@@ -1,0 +1,104 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: sudorequests.sudo.andrewgarrett.dev
+spec:
+  group: sudo.andrewgarrett.dev
+  scope: Namespaced
+  names:
+    plural: sudorequests
+    singular: sudorequest
+    kind: SudoRequest
+    shortNames:
+      - sudoreq
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Requester
+          type: string
+          jsonPath: .spec.requester
+        - name: ExitCode
+          type: integer
+          jsonPath: .status.exitCode
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          required:
+            - spec
+          properties:
+            spec:
+              type: object
+              required:
+                - requester
+                - reason
+                - command
+              properties:
+                requester:
+                  type: string
+                  description: >-
+                    Logical caller identity. Enforced server-side by a
+                    ValidatingAdmissionPolicy against request.userInfo.username,
+                    so this cannot be spoofed across SAs on direct CRD writes.
+                reason:
+                  type: string
+                  description: Free-text shown to the human reviewer.
+                command:
+                  type: string
+                  description: Exact argv (single string) executed under cluster-admin.
+                image:
+                  type: string
+                  description: >-
+                    Container image the executor Job runs. Defaults to alpine/k8s:1.35.5.
+                    The human reviewer is the trust boundary; the approve page shows
+                    image + command together.
+                ttlSecondsAfterApproval:
+                  type: integer
+                  format: int32
+                  default: 600
+                  minimum: 0
+                  # Capped at 3600 to match the executor VAP's ttlSecondsAfterFinished
+                  # guard (kubernetes/manifests/workloads/sudo-service/validatingadmissionpolicy-executor.yaml).
+                  maximum: 3600
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum: [Pending, Approved, Denied, Executed, Failed, Expired]
+                approvedBy: {type: string}
+                approvedAt: {type: string, format: date-time}
+                deniedBy: {type: string}
+                deniedAt: {type: string, format: date-time}
+                denialReason: {type: string}
+                exitCode: {type: integer, format: int32}
+                outputSecretRef:
+                  type: string
+                  description: >-
+                    Name of the short-TTL Secret in sudo-service namespace holding
+                    stdout/stderr. Reads go through the controller HTTP API, not
+                    direct RBAC.
+                executorJobName:
+                  type: string
+                  description: >-
+                    Name of the executor Job, recorded the moment the Job is
+                    created. If the Job is GC'd by its TTL before the controller
+                    observes completion, the reconciler uses this as proof that
+                    the command already ran and fails the request rather than
+                    re-creating the Job and replaying privileged execution.
+                pushoverRequestID: {type: string}
+                approvalTokenHash:
+                  type: string
+                  description: >-
+                    SHA-256 hex of the one-time approval token. Plaintext token is
+                    only ever sent in the Pushbullet push URL.
+                approvalTokenExpiresAt: {type: string, format: date-time}

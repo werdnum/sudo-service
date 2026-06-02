@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.namespace }}
+{{- if .Values.goldilocks.enabled }}
+  labels:
+    goldilocks.fairwinds.com/enabled: "true"
+  annotations:
+    goldilocks.fairwinds.com/vpa-update-mode: {{ .Values.goldilocks.vpaUpdateMode | quote }}
+    goldilocks.fairwinds.com/vpa-resource-policy: {{ .Values.goldilocks.vpaResourcePolicy | quote }}
+{{- end }}

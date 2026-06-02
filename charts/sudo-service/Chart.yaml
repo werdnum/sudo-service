@@ -1,0 +1,22 @@
+apiVersion: v2
+name: sudo-service
+description: |-
+  Human-approved privileged command execution for in-cluster agents. Ships the
+  controller Deployment (with an oauth2-proxy sidecar), the SudoRequest CRD, the
+  executor RBAC + ValidatingAdmissionPolicies, and the supporting Service,
+  ServiceMonitor, NetworkPolicy and Ingress.
+type: application
+# Chart version is bumped on chart changes; appVersion tracks the container
+# image and is rewritten by .github/workflows/build.yaml on each push to main.
+version: 0.1.0
+appVersion: "2026.6.2"
+keywords:
+  - sudo
+  - kubernetes
+  - rbac
+  - approval
+home: https://github.com/werdnum/sudo-service
+sources:
+  - https://github.com/werdnum/sudo-service
+maintainers:
+  - name: werdnum

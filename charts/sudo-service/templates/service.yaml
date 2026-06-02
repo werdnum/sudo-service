@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: sudo-service
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: sudo-service
+spec:
+  selector:
+    app: sudo-service
+  ports:
+    # Public traffic terminates at oauth2-proxy in the controller Pod (sidecar).
+    - name: http
+      port: 80
+      targetPort: 3000
+    # In-cluster scrape target for the controller's /metrics endpoint
+    # (controller-runtime metrics, served from the same listener as the rest
+    # of the API). Locked down to the monitoring namespace by NetworkPolicy.
+    - name: metrics
+      port: 8080
+      targetPort: 8080
+  type: ClusterIP

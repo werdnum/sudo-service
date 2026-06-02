@@ -1,0 +1,523 @@
+package main
+
+import (
+	"context"
+	"embed"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"html/template"
+	"net/http"
+	"sort"
+	"strings"
+
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+)
+
+//go:embed templates/*.html
+var templatesFS embed.FS
+
+// APIServer wires up the HTTP handlers. It does NOT own the reconciler lifecycle —
+// it borrows the manager's client (cached, so reads are cheap) and pokes the reconciler
+// through Approve/Deny helpers.
+type APIServer struct {
+	Client        client.Client
+	Verifier      *JWTVerifier
+	TokenReviewer *TokenReviewer
+	Broadcaster   *Broadcaster
+	Reconciler    *SudoRequestReconciler // wired up at start time
+	Config        *Config
+	Templates     *template.Template
+}
+
+func (a *APIServer) RegisterRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("/health", a.healthHandler)
+	mux.HandleFunc("/", a.indexHandler)
+	mux.HandleFunc("/approve", a.approveHandler)
+	mux.HandleFunc("/deny", a.denyHandler)
+	mux.HandleFunc("/requests", a.createRequestHandler)
+	mux.HandleFunc("/requests/", a.requestSubpathHandler)
+}
+
+func (a *APIServer) healthHandler(w http.ResponseWriter, _ *http.Request) {
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("ok"))
+}
+
+// ---- HTTP API (requester side) ----
+
+type createRequestBody struct {
+	Reason                  string `json:"reason"`
+	Command                 string `json:"command"`
+	Image                   string `json:"image,omitempty"`
+	TTLSecondsAfterApproval *int32 `json:"ttlSecondsAfterApproval,omitempty"`
+}
+
+type requestStatusResponse struct {
+	UID             string `json:"uid"`
+	Name            string `json:"name"`
+	Phase           string `json:"phase"`
+	Requester       string `json:"requester"`
+	Command         string `json:"command"`
+	Image           string `json:"image"`
+	ApprovedBy      string `json:"approvedBy,omitempty"`
+	ApprovedAt      string `json:"approvedAt,omitempty"`
+	DeniedBy        string `json:"deniedBy,omitempty"`
+	DeniedAt        string `json:"deniedAt,omitempty"`
+	DenialReason    string `json:"denialReason,omitempty"`
+	ExitCode        *int32 `json:"exitCode,omitempty"`
+	OutputSecretRef string `json:"outputSecretRef,omitempty"`
+}
+
+// createRequestHandler is POST /requests. Authenticated via SA bearer token (TokenReview).
+// On success, returns the CR UID + name. spec.requester is server-stamped to the authenticated
+// username, so the requester can't spoof another agent's identity via the HTTP path.
+func (a *APIServer) createRequestHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	username, err := a.authenticateBearer(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusUnauthorized)
+		return
+	}
+	var body createRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if body.Command == "" || body.Reason == "" {
+		http.Error(w, "command and reason are required", http.StatusBadRequest)
+		return
+	}
+
+	sr := &SudoRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			GenerateName: "http-",
+			Namespace:    ControllerNamespace,
+		},
+		Spec: SudoRequestSpec{
+			Requester:               username,
+			Reason:                  body.Reason,
+			Command:                 body.Command,
+			Image:                   body.Image,
+			TTLSecondsAfterApproval: body.TTLSecondsAfterApproval,
+		},
+	}
+	if err := a.Client.Create(r.Context(), sr); err != nil {
+		http.Error(w, "create: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"uid":  string(sr.UID),
+		"name": sr.Name,
+	})
+}
+
+// requestSubpathHandler routes GET /requests/{uid}, /requests/{uid}/output, /requests/{uid}/events.
+func (a *APIServer) requestSubpathHandler(w http.ResponseWriter, r *http.Request) {
+	rest := strings.TrimPrefix(r.URL.Path, "/requests/")
+	parts := strings.SplitN(rest, "/", 2)
+	uid := parts[0]
+	if uid == "" {
+		http.Error(w, "missing uid", http.StatusBadRequest)
+		return
+	}
+
+	username, err := a.authenticateBearer(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusUnauthorized)
+		return
+	}
+
+	sr, err := a.findByUID(r.Context(), types.UID(uid))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	if sr.Spec.Requester != username {
+		http.Error(w, "forbidden: not the requester", http.StatusForbidden)
+		return
+	}
+
+	subpath := ""
+	if len(parts) == 2 {
+		subpath = parts[1]
+	}
+	switch subpath {
+	case "":
+		a.serveStatus(w, sr)
+	case "output":
+		a.serveOutput(w, r, sr)
+	case "events":
+		a.serveEvents(w, r, sr)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func (a *APIServer) serveStatus(w http.ResponseWriter, sr *SudoRequest) {
+	resp := requestStatusResponse{
+		UID:             string(sr.UID),
+		Name:            sr.Name,
+		Phase:           sr.Status.Phase,
+		Requester:       sr.Spec.Requester,
+		Command:         sr.Spec.Command,
+		Image:           imageFor(sr),
+		ApprovedBy:      sr.Status.ApprovedBy,
+		DeniedBy:        sr.Status.DeniedBy,
+		DenialReason:    sr.Status.DenialReason,
+		ExitCode:        sr.Status.ExitCode,
+		OutputSecretRef: sr.Status.OutputSecretRef,
+	}
+	if sr.Status.ApprovedAt != nil {
+		resp.ApprovedAt = sr.Status.ApprovedAt.UTC().Format("2006-01-02T15:04:05Z")
+	}
+	if sr.Status.DeniedAt != nil {
+		resp.DeniedAt = sr.Status.DeniedAt.UTC().Format("2006-01-02T15:04:05Z")
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func (a *APIServer) serveOutput(w http.ResponseWriter, r *http.Request, sr *SudoRequest) {
+	if sr.Status.OutputSecretRef == "" {
+		http.Error(w, "output not available yet", http.StatusConflict)
+		return
+	}
+	var sec corev1.Secret
+	if err := a.Client.Get(r.Context(), client.ObjectKey{Namespace: ControllerNamespace, Name: sr.Status.OutputSecretRef}, &sec); err != nil {
+		http.Error(w, "fetch output: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, _ = w.Write(sec.Data["output"])
+}
+
+func (a *APIServer) serveEvents(w http.ResponseWriter, r *http.Request, sr *SudoRequest) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+
+	// Subscribe BEFORE reading state to close the race where a terminal
+	// transition happens between snapshot emission and Subscribe(). Any phase
+	// change after this point is guaranteed to land in our channel; the
+	// re-fetch below is what defines "now" for the snapshot.
+	ch, cancel := a.Broadcaster.Subscribe(string(sr.UID))
+	defer cancel()
+
+	// Re-read state under the subscription. If the phase transitioned between
+	// the caller's findByUID and here, we'll either see it now (and return
+	// after emitting a terminal snapshot) or pick it up off the channel.
+	if fresh, err := a.findByUID(r.Context(), sr.UID); err == nil {
+		sr = fresh
+	}
+
+	snap := Event{Type: "snapshot", Phase: sr.Status.Phase, ExitCode: sr.Status.ExitCode, OutputSecretRef: sr.Status.OutputSecretRef}
+	writeSSE(w, snap)
+	flusher.Flush()
+
+	if isTerminalPhase(sr.Status.Phase) {
+		return
+	}
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case ev := <-ch:
+			writeSSE(w, ev)
+			flusher.Flush()
+			if isTerminalPhase(ev.Phase) {
+				return
+			}
+		}
+	}
+}
+
+func writeSSE(w http.ResponseWriter, ev Event) {
+	buf, _ := json.Marshal(ev)
+	_, _ = fmt.Fprintf(w, "data: %s\n\n", string(buf))
+}
+
+func isTerminalPhase(p string) bool {
+	switch p {
+	case PhaseExecuted, PhaseFailed, PhaseDenied, PhaseExpired:
+		return true
+	}
+	return false
+}
+
+// authenticateBearer extracts and validates a SA bearer token via TokenReview,
+// requiring our audience.
+func (a *APIServer) authenticateBearer(r *http.Request) (string, error) {
+	auth := r.Header.Get("Authorization")
+	if !strings.HasPrefix(auth, "Bearer ") {
+		return "", errors.New("missing bearer token")
+	}
+	tok := strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
+	if tok == "" {
+		return "", errors.New("empty bearer token")
+	}
+	return a.TokenReviewer.Review(r.Context(), tok, RequesterTokenAudience)
+}
+
+// ---- HTML approve/deny (human side) ----
+
+type indexView struct {
+	User      string
+	UserEmail string
+	Pending   []SudoRequest
+	History   []SudoRequest
+}
+
+func (a *APIServer) indexHandler(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+	claims, err := a.authenticateHuman(r)
+	if err != nil {
+		http.Error(w, "unauthorized: "+err.Error(), http.StatusUnauthorized)
+		return
+	}
+	if !claims.IsInGroup(a.Config.AdminGroup) {
+		http.Error(w, fmt.Sprintf("forbidden: requires group %q", a.Config.AdminGroup), http.StatusForbidden)
+		return
+	}
+
+	var list SudoRequestList
+	if err := a.Client.List(r.Context(), &list, client.InNamespace(ControllerNamespace)); err != nil {
+		http.Error(w, "list requests: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	sort.Slice(list.Items, func(i, j int) bool {
+		return list.Items[i].CreationTimestamp.After(list.Items[j].CreationTimestamp.Time)
+	})
+
+	view := indexView{
+		User:      claims.PreferredUsername,
+		UserEmail: claims.Email,
+	}
+
+	for _, sr := range list.Items {
+		if sr.Status.Phase == PhasePending {
+			view.Pending = append(view.Pending, sr)
+		} else if sr.Status.Phase != "" {
+			if len(view.History) < 20 {
+				view.History = append(view.History, sr)
+			}
+		}
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_ = a.Templates.ExecuteTemplate(w, "index.html", view)
+}
+
+type approveView struct {
+	UID       string
+	Token     string
+	Requester string
+	Reason    string
+	Command   string
+	Image     string
+	CreatedAt string
+	User      string
+	UserEmail string
+	Error     string
+}
+
+func (a *APIServer) approveHandler(w http.ResponseWriter, r *http.Request) {
+	claims, err := a.authenticateHuman(r)
+	if err != nil {
+		http.Error(w, "unauthorized: "+err.Error(), http.StatusUnauthorized)
+		return
+	}
+	if !claims.IsInGroup(a.Config.AdminGroup) {
+		http.Error(w, fmt.Sprintf("forbidden: requires group %q", a.Config.AdminGroup), http.StatusForbidden)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		a.renderApprovePage(w, r, claims)
+	case http.MethodPost:
+		a.handleApprovePost(w, r, claims)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (a *APIServer) renderApprovePage(w http.ResponseWriter, r *http.Request, claims *HumanClaims) {
+	id := r.URL.Query().Get("id")
+	token := r.URL.Query().Get("t")
+	if id == "" {
+		http.Error(w, "missing id", http.StatusBadRequest)
+		return
+	}
+
+	var sr *SudoRequest
+	var err error
+	if token != "" {
+		sr, err = a.Reconciler.VerifyApprovalToken(r.Context(), types.UID(id), token)
+	} else if claims.IsInGroup(a.Config.AdminGroup) {
+		sr, err = a.findByUID(r.Context(), types.UID(id))
+	} else {
+		http.Error(w, "missing token or not an admin", http.StatusUnauthorized)
+		return
+	}
+
+	view := approveView{
+		UID: id, Token: token,
+		User: claims.PreferredUsername, UserEmail: claims.Email,
+	}
+	if err != nil {
+		view.Error = err.Error()
+	} else {
+		view.Requester = sr.Spec.Requester
+		view.Reason = sr.Spec.Reason
+		view.Command = sr.Spec.Command
+		view.Image = imageFor(sr)
+		view.CreatedAt = sr.CreationTimestamp.UTC().Format("2006-01-02T15:04:05Z")
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_ = a.Templates.ExecuteTemplate(w, "approve.html", view)
+}
+
+func (a *APIServer) handleApprovePost(w http.ResponseWriter, r *http.Request, claims *HumanClaims) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+	id := r.Form.Get("id")
+	token := r.Form.Get("t")
+
+	if token != "" {
+		if _, err := a.Reconciler.VerifyApprovalToken(r.Context(), types.UID(id), token); err != nil {
+			http.Error(w, "approval token check failed: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+	} else if !claims.IsInGroup(a.Config.AdminGroup) {
+		http.Error(w, "forbidden: admin required for token-less approval", http.StatusForbidden)
+		return
+	}
+
+	approvedBy := claims.PreferredUsername
+	if approvedBy == "" {
+		approvedBy = claims.Subject
+	}
+	if err := a.Reconciler.Approve(r.Context(), types.UID(id), approvedBy); err != nil {
+		http.Error(w, "approve: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = fmt.Fprintf(w, "<html><body><h1>Approved.</h1><p>Request %s will execute shortly.</p><p><a href=\"/\">Back to home</a></p></body></html>", id)
+}
+
+func (a *APIServer) denyHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	claims, err := a.authenticateHuman(r)
+	if err != nil {
+		http.Error(w, "unauthorized: "+err.Error(), http.StatusUnauthorized)
+		return
+	}
+	if !claims.IsInGroup(a.Config.AdminGroup) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+	id := r.Form.Get("id")
+	token := r.Form.Get("t")
+	reason := r.Form.Get("reason")
+
+	if token != "" {
+		if _, err := a.Reconciler.VerifyApprovalToken(r.Context(), types.UID(id), token); err != nil {
+			http.Error(w, "approval token check failed: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+	} else if !claims.IsInGroup(a.Config.AdminGroup) {
+		http.Error(w, "forbidden: admin required for token-less denial", http.StatusForbidden)
+		return
+	}
+
+	deniedBy := claims.PreferredUsername
+	if deniedBy == "" {
+		deniedBy = claims.Subject
+	}
+	if err := a.Reconciler.Deny(r.Context(), types.UID(id), deniedBy, reason); err != nil {
+		http.Error(w, "deny: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = fmt.Fprintf(w, "<html><body><h1>Denied.</h1><p><a href=\"/\">Back to home</a></p></body></html>")
+}
+
+// authenticateHuman extracts the JWT from the request and verifies it against Keycloak's JWKS.
+// In oauth2-proxy mode, the JWT is in X-Auth-Request-Id-Token or -Access-Token; we IGNORE
+// X-Auth-Request-{User,Groups,Email} (forgeable) and re-derive identity from the verified claims.
+// In DIY OIDC mode, the JWT is in our own signed session cookie. (Stub for now — production runs
+// with oauth2-proxy.)
+//
+// Order matters: ID tokens are the canonical OIDC identity source and reliably carry
+// aud=<client_id>; Keycloak access tokens require a custom audience mapper to do the same
+// (default access-token aud is "account"). Prefer the ID token, fall back to the access token,
+// then to a raw Authorization: Bearer (handy for ad-hoc curl testing).
+func (a *APIServer) authenticateHuman(r *http.Request) (*HumanClaims, error) {
+	candidates := make([]string, 0, 3)
+	if v := r.Header.Get("X-Auth-Request-Id-Token"); v != "" {
+		candidates = append(candidates, v)
+	}
+	if v := r.Header.Get("X-Auth-Request-Access-Token"); v != "" {
+		candidates = append(candidates, v)
+	}
+	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+		candidates = append(candidates, strings.TrimPrefix(auth, "Bearer "))
+	}
+	if len(candidates) == 0 {
+		return nil, errors.New("no JWT in request")
+	}
+	var lastErr error
+	for _, raw := range candidates {
+		claims, err := a.Verifier.Verify(r.Context(), raw)
+		if err == nil {
+			return claims, nil
+		}
+		lastErr = err
+	}
+	return nil, fmt.Errorf("JWT verification failed: %w", lastErr)
+}
+
+// findByUID lists SudoRequests in the controller namespace and returns the matching one.
+// Cached by the manager, so this is a hashmap lookup after the first reconcile.
+func (a *APIServer) findByUID(ctx context.Context, uid types.UID) (*SudoRequest, error) {
+	var list SudoRequestList
+	if err := a.Client.List(ctx, &list, client.InNamespace(ControllerNamespace)); err != nil {
+		return nil, err
+	}
+	for i := range list.Items {
+		if list.Items[i].UID == uid {
+			return &list.Items[i], nil
+		}
+	}
+	return nil, apierrors.NewNotFound(GroupVersionResource.GroupResource(), string(uid))
+}

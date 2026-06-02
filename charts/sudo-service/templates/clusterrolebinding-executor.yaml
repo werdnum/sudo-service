@@ -1,0 +1,18 @@
+# Executor SA gets cluster-admin. Only ever attached to the ephemeral executor Job pod,
+# never to the long-running controller. The controller has no way to assume this SA's
+# permissions directly; it can only create a Job that runs as it.
+#
+# An admission policy (validatingadmissionpolicy-executor.yaml) restricts Job creation
+# under this SA to the controller SA, providing defence in depth.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: sudo-service-executor
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+  - kind: ServiceAccount
+    name: sudo-service-executor-sa
+    namespace: {{ .Values.namespace }}
