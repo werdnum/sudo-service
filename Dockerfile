@@ -1,9 +1,12 @@
 # syntax=docker/dockerfile:1
 #
 # sudo-service: human-approved privileged command execution for cluster agents.
-# See docs/sudo-service.md for the full design.
+# See README.md for the full design.
 
-FROM golang:1.24-bullseye AS builder
+# Pin the builder to the runner's native platform and cross-compile to
+# TARGETARCH (CGO is disabled), so multi-arch builds need no QEMU emulation —
+# only the final COPY-only stage is per-target.
+FROM --platform=$BUILDPLATFORM golang:1.24-bullseye AS builder
 WORKDIR /app
 ENV CGO_ENABLED=0
 ARG TARGETARCH

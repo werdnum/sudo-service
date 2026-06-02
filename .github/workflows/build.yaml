@@ -23,7 +23,7 @@ permissions:
   packages: write
 jobs:
   prepare:
-    runs-on: [self-hosted, vps]
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
       tag: ${{ steps.tags.outputs.tag }}
@@ -64,7 +64,10 @@ jobs:
           {
             echo "tag=${TAG}"
             echo "should-push=${SHOULD_PUSH}"
-            echo "platforms=linux/arm64"
+            # The cluster runs arm64; amd64 is built too so the image is
+            # portable. The Dockerfile cross-compiles from the native build
+            # host (see --platform=$BUILDPLATFORM), so this needs no QEMU.
+            echo "platforms=linux/amd64,linux/arm64"
           } >> "$GITHUB_OUTPUT"
 
           # Determine cache strategy
@@ -79,7 +82,7 @@ jobs:
 
   build-sudo-service:
     needs: prepare
-    runs-on: [self-hosted, vps]
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
       - name: Checkout code
@@ -124,12 +127,12 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Fall back to a user-writable install path if the runner image is
-          # missing yq. Incus runners cannot write to /usr/local/bin.
+          # ubuntu-latest ships mikefarah yq, but fall back to a user-writable
+          # install if it's ever missing.
           if ! command -v yq >/dev/null 2>&1; then
             YQ_VERSION="v4.44.3"
             mkdir -p "${RUNNER_TEMP}/bin"
-            curl -sSL "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_arm64" \
+            curl -sSL "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64" \
               -o "${RUNNER_TEMP}/bin/yq"
             chmod +x "${RUNNER_TEMP}/bin/yq"
             export PATH="${RUNNER_TEMP}/bin:${PATH}"
