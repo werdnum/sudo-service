@@ -1,0 +1,39 @@
+{{- if .Values.networkPolicy.enabled }}
+# Ingress to the controller Pod is allowed on:
+#  - 3000 (oauth2-proxy): nginx-ingress (for /approve admin UI) and any
+#    in-cluster pod (for /requests requesters). The load-bearing auth is
+#    upstack — oauth2-proxy's OIDC flow for /approve, and the controller's
+#    TokenReview-with-audience check on /requests — so allowing cluster-wide
+#    pod ingress to 3000 doesn't expand the attack surface.
+#  - 8080 (controller /metrics): the monitoring namespace only, for
+#    vmagent/prometheus scrape via the Service's `metrics` port.
+#    The /health endpoint is also on 8080, but kubelet probes come from the
+#    node netns directly and bypass NetworkPolicy.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sudo-service-ingress
+  namespace: {{ .Values.namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      app: sudo-service
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.ingressNamespace }}
+        - namespaceSelector: {}
+      ports:
+        - port: 3000
+          protocol: TCP
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.monitoringNamespace }}
+      ports:
+        - port: 8080
+          protocol: TCP
+{{- end }}

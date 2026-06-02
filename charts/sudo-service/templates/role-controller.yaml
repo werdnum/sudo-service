@@ -1,0 +1,38 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: sudo-service-controller
+  namespace: {{ .Values.namespace }}
+rules:
+  # SudoRequest spec: full CRUD (also covers finalizer management on the parent resource).
+  - apiGroups: ["sudo.andrewgarrett.dev"]
+    resources: ["sudorequests"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # SudoRequest status subresource — RBAC treats <resource>/status as separate from <resource>,
+  # so the wildcard above doesn't cover it. Without this every status-write 403s.
+  - apiGroups: ["sudo.andrewgarrett.dev"]
+    resources: ["sudorequests/status"]
+    verbs: ["get", "update", "patch"]
+  # Executor Jobs.
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  # Output Secrets + TTL GC.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  # Read pod status + logs for output capture from the executor Job's pod.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  # Audit-trail Events. EventRecorder calls require explicit RBAC on both the
+  # new events.k8s.io group and the legacy core/events used by older clients.
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch", "update"]
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["create", "patch", "update"]

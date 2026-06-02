@@ -1,0 +1,7 @@
+# Go build output
+/sudo-service
+/out/
+
+# Editor/OS cruft
+*.swp
+.DS_Store

@@ -1,0 +1,31 @@
+# Server-validated spec.requester. requester is in spec, so a naive implementation
+# could let any agent SA submit a CR claiming to be another SA. This VAP enforces:
+#
+#   request.userInfo.username == object.spec.requester
+#     — for the direct CRD-write path (in-cluster agents applying YAML).
+#
+#   OR
+#
+#   request.userInfo.username == "system:serviceaccount:sudo-service:sudo-service-controller-sa"
+#     — exempts the HTTP-path case (POST /requests). The controller authenticates the
+#       HTTP caller itself via TokenReview and writes spec.requester to the verified
+#       identity, so misattribution would require controller compromise.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: sudo-service-requester-validation
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["sudo.andrewgarrett.dev"]
+        apiVersions: ["v1alpha1"]
+        operations: ["CREATE"]
+        resources: ["sudorequests"]
+  validations:
+    - expression: >-
+        object.spec.requester == request.userInfo.username ||
+        request.userInfo.username == "{{ include "sudo-service.controllerUsername" . }}"
+      message: >-
+        spec.requester must match the authenticated user, unless the request is
+        submitted by the sudo-service controller SA via the HTTP API.

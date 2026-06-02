@@ -1,0 +1,13 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: sudo-service-controller
+  namespace: {{ .Values.namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: sudo-service-controller
+subjects:
+  - kind: ServiceAccount
+    name: sudo-service-controller-sa
+    namespace: {{ .Values.namespace }}

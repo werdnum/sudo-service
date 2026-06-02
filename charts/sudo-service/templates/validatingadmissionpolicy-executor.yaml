@@ -1,0 +1,69 @@
+# Defence-in-depth gate on executor Job creation. The controller is the policy decision
+# point for "approved or not" (gated on status.phase + the approval token it issued);
+# this VAP restricts WHO may create executor Jobs at all.
+#
+# What this CANNOT enforce, and why we accept it: VAP CEL has no cross-object reads,
+# so the policy cannot dereference the ownerReference to check status.phase == Approved.
+# A controller-RCE attacker could create executor Jobs — but a controller-RCE attacker
+# already has the controller's kubeconfig, so this is not a *new* capability they gain.
+# The hard human checkpoint remains the Pushbullet approval click.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: sudo-service-executor-job-restrictions
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["batch"]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["jobs"]
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: {{ .Values.namespace }}
+  matchConditions:
+    - name: targets-executor-sa
+      expression: >-
+        has(object.spec.template.spec.serviceAccountName) &&
+        object.spec.template.spec.serviceAccountName == "sudo-service-executor-sa"
+  validations:
+    - expression: >-
+        request.userInfo.username == "{{ include "sudo-service.controllerUsername" . }}"
+      message: "Only the sudo-service controller SA may create executor Jobs"
+    - expression: >-
+        has(object.metadata.labels) && has(object.metadata.labels.app) &&
+        object.metadata.labels.app == "sudo-service" &&
+        has(object.metadata.labels.role) && object.metadata.labels.role == "executor"
+      message: "Executor Job must have labels app=sudo-service,role=executor"
+    - expression: >-
+        has(object.metadata.ownerReferences) &&
+        object.metadata.ownerReferences.exists(o,
+          o.kind == "SudoRequest" && o.apiVersion == "sudo.andrewgarrett.dev/v1alpha1")
+      message: "Executor Job must have ownerReference to a SudoRequest"
+    - expression: >-
+        has(object.spec.backoffLimit) && object.spec.backoffLimit == 0
+      message: "Job backoffLimit must be 0 (no retries)"
+    - expression: >-
+        has(object.spec.ttlSecondsAfterFinished) &&
+        object.spec.ttlSecondsAfterFinished <= 3600
+      message: "Job must set ttlSecondsAfterFinished <= 3600 (1h)"
+    - expression: >-
+        object.spec.template.spec.restartPolicy == "Never"
+      message: "Job pods must have restartPolicy=Never"
+    - expression: >-
+        !has(object.spec.template.spec.hostNetwork) || !object.spec.template.spec.hostNetwork
+      message: "Executor Job pods must not use host networking"
+    - expression: >-
+        !has(object.spec.template.spec.hostPID) || !object.spec.template.spec.hostPID
+      message: "Executor Job pods must not use host PID namespace"
+    - expression: >-
+        !object.spec.template.spec.containers.exists(c,
+          has(c.securityContext) && has(c.securityContext.privileged) && c.securityContext.privileged
+        )
+      message: "Executor containers must not run as privileged"
+    - expression: >-
+        !has(object.spec.template.spec.securityContext) ||
+        !has(object.spec.template.spec.securityContext.runAsUser) ||
+        object.spec.template.spec.securityContext.runAsUser != 0
+      message: "Executor pod must not run as UID 0"

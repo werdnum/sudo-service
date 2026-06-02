@@ -1,0 +1,16 @@
+# Binds the controller SA to the built-in `system:auth-delegator` ClusterRole so the
+# controller can call TokenReview on the apiserver to authenticate requester SA tokens
+# on GET /requests/{uid}, /output, /events. This is the standard K8s-native API
+# auth-delegation pattern and is the only cluster-scoped capability the controller has.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: sudo-service-controller-tokenreview
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+  - kind: ServiceAccount
+    name: sudo-service-controller-sa
+    namespace: {{ .Values.namespace }}

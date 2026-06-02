@@ -1,0 +1,42 @@
+{{template "header" .}}
+<div class="card">
+    <h2 style="font-size: 1.125rem; margin-top: 0;">Pending Approvals</h2>
+    {{if .Pending}}
+        {{range .Pending}}
+        <div class="request-item">
+            <div class="request-info">
+                <div style="font-weight: 600;">{{.Spec.Requester}}</div>
+                <div style="font-size: 0.875rem; color: var(--text-muted);">{{.Spec.Reason}}</div>
+                <code style="font-size: 0.75rem; background: #f1f5f9; padding: 0.125rem 0.25rem; border-radius: 0.25rem;">{{.Spec.Command}}</code>
+                <div class="timestamp">{{.CreationTimestamp.Format "2006-01-02 15:04:05 UTC"}}</div>
+            </div>
+            <div class="request-actions">
+                <a href="/approve?id={{.UID}}" class="btn btn-primary">Review</a>
+            </div>
+        </div>
+        {{end}}
+    {{else}}
+        <p style="color: var(--text-muted); font-size: 0.875rem;">No pending requests.</p>
+    {{end}}
+</div>
+
+<div class="card">
+    <h2 style="font-size: 1.125rem; margin-top: 0;">Recent History</h2>
+    {{if .History}}
+        {{range .History}}
+        <div class="request-item">
+            <div class="request-info">
+                <div style="font-weight: 600;">{{.Spec.Requester}}</div>
+                <div style="font-size: 0.875rem; color: var(--text-muted);">{{.Spec.Reason}}</div>
+                <div class="timestamp">{{.CreationTimestamp.Format "2006-01-02 15:04:05 UTC"}}</div>
+            </div>
+            <div class="request-actions">
+                <span class="badge badge-{{.Status.Phase | Lower}}">{{.Status.Phase}}</span>
+            </div>
+        </div>
+        {{end}}
+    {{else}}
+        <p style="color: var(--text-muted); font-size: 0.875rem;">No history yet.</p>
+    {{end}}
+</div>
+{{template "footer" .}}

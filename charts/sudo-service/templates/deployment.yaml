@@ -1,0 +1,162 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sudo-service
+  namespace: {{ .Values.namespace }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: sudo-service
+  template:
+    metadata:
+      labels:
+        app: sudo-service
+    spec:
+      serviceAccountName: sudo-service-controller-sa
+      {{- with .Values.imagePullSecrets }}
+      # ghcr-secret is mirrored into all namespaces by the emberstack reflector
+      # (see kubernetes/manifests/infrastructure/default-secrets/sealedsecret-ghcr-secret.yaml).
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: sudo-service
+          # Image digest is rewritten by .github/workflows/build.yaml on each
+          # push to main.
+          image: {{ include "sudo-service.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            # Bind to all pod interfaces so kubelet's HTTP probes (which dial
+            # the pod IP from the host netns, not pod-localhost) actually
+            # reach us. External isolation is enforced by NetworkPolicy
+            # (which only allows port 3000 from nginx-ingress) plus the
+            # Service only exposing port 3000.
+            - name: BIND_ADDRESS
+              value: :8080
+            - name: PUBLIC_BASE_URL
+              value: {{ .Values.publicBaseURL | quote }}
+            - name: KEYCLOAK_ISSUER
+              value: {{ .Values.keycloak.issuerURL | quote }}
+            - name: KEYCLOAK_AUDIENCE
+              value: {{ .Values.keycloak.audience | quote }}
+            - name: ADMIN_GROUP
+              value: {{ .Values.adminGroup | quote }}
+            - name: OAUTH2_PROXY_MODE
+              value: "true"
+            # Pushover credentials — same convention as the alertmanager
+            # pushover-credentials Secret in kubernetes/jsonnet/monitoring/
+            # (keys `token` + `user_key`).
+            - name: PUSHOVER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.pushover }}
+                  key: token
+            - name: PUSHOVER_USER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.pushover }}
+                  key: user_key
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+        - name: oauth2-proxy
+          image: {{ .Values.oauth2Proxy.image }}
+          imagePullPolicy: IfNotPresent
+          args:
+            # config.yaml uses the structured/alpha format (providers,
+            # upstreamConfig, injectRequestHeaders) — --config is the legacy
+            # INI-style channel and would fail to parse it.
+            - --alpha-config=/etc/oauth2-proxy/config.yaml
+            - --reverse-proxy
+            - --email-domain=*
+            - --skip-provider-button
+            # /requests* uses SA-bearer + TokenReview auth in the controller
+            # (not OIDC); /health is unauthenticated for kubelet probes. Bypass
+            # oauth2-proxy for these so the requester API actually works.
+            # Flag is singular (--skip-auth-route), not plural — passed
+            # multiple times for multiple patterns.
+            #
+            # Header pass-through note: in alpha-config mode the legacy
+            # --pass-basic-auth / --skip-auth-strip-headers flags are not
+            # registered (loadOptions uses options.NewFlagSet, not the legacy
+            # flagset). With injectRequestHeaders explicitly listing the
+            # headers oauth2-proxy adds, no Basic-auth is injected and the
+            # incoming Authorization header passes through unchanged on
+            # skip-auth-route requests — which is what we need for the SA
+            # bearer on /requests.
+            - --skip-auth-route=^/requests
+            - --skip-auth-route=^/health
+            - --cookie-refresh=5m
+            - --cookie-expire=30m
+            - --cookie-secure
+            - --cookie-name=__Host-sudo_service_oauth2_proxy
+            - --cookie-csrf-per-request
+            - --session-store-type=redis
+            - --redis-connection-url={{ .Values.redis.connectionURL }}
+          env:
+            - name: OAUTH2_PROXY_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.oauth2Proxy }}
+                  key: client-secret
+            - name: OAUTH2_PROXY_COOKIE_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.oauth2Proxy }}
+                  key: cookie-secret
+          ports:
+            - containerPort: 3000
+              name: http
+              protocol: TCP
+          resources:
+            {{- toYaml .Values.oauth2Proxy.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: oauth2-proxy-config
+              mountPath: /etc/oauth2-proxy
+              readOnly: true
+            - name: oauth2-proxy-secrets
+              mountPath: /etc/oauth2-proxy/secrets
+              readOnly: true
+      volumes:
+        - name: oauth2-proxy-config
+          configMap:
+            name: sudo-service-oauth2-proxy
+            items:
+              - key: config.yaml
+                path: config.yaml
+        - name: oauth2-proxy-secrets
+          secret:
+            secretName: {{ .Values.secrets.oauth2Proxy }}
+            items:
+              - key: client-secret
+                path: client-secret

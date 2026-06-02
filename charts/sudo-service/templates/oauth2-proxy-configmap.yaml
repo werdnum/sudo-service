@@ -1,0 +1,46 @@
+{{- $issuer := .Values.keycloak.issuerURL -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sudo-service-oauth2-proxy
+  namespace: {{ .Values.namespace }}
+data:
+  config.yaml: |-
+    # Forward the verified JWT to the controller via X-Auth-Request-Access-Token.
+    # The controller IGNORES X-Auth-Request-User/-Groups (forgeable headers) and
+    # re-verifies the JWT signature itself against Keycloak's JWKS before reading
+    # the groups claim.
+    #
+    # Schema note: oauth2-proxy >=7.14 alpha-config requires HeaderValue entries
+    # to nest the source under claimSource: / secretSource:. The flat
+    # "claim: foo" shorthand only works for the pre-7.14 schema.
+    injectRequestHeaders:
+      - name: X-Auth-Request-Access-Token
+        values:
+          - claimSource:
+              claim: access_token
+      - name: X-Auth-Request-Id-Token
+        values:
+          - claimSource:
+              claim: id_token
+    providers:
+      - clientID: {{ .Values.keycloak.clientID }}
+        clientSecretFile: /etc/oauth2-proxy/secrets/client-secret
+        id: keycloak
+        provider: oidc
+        profileURL: {{ $issuer }}/protocol/openid-connect/userinfo
+        redeemURL: {{ $issuer }}/protocol/openid-connect/token
+        loginURL: {{ $issuer }}/protocol/openid-connect/auth
+        validateURL: {{ $issuer }}/protocol/openid-connect/userinfo
+        oidcConfig:
+          issuerURL: {{ $issuer }}
+          emailClaim: email
+          groupsClaim: groups
+          userIDClaim: email
+    upstreamConfig:
+      upstreams:
+        - id: sudo-service
+          path: /
+          uri: http://127.0.0.1:8080
+    server:
+      bindAddress: ":3000"
