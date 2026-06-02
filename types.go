@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -17,10 +19,12 @@ const (
 	PhaseFailed   = "Failed"
 	PhaseExpired  = "Expired"
 
-	// Namespace and resource constants.
-	ControllerNamespace = "sudo-service"
-	ControllerSAName    = "sudo-service-controller-sa"
-	ExecutorSAName      = "sudo-service-executor-sa"
+	// DefaultControllerNamespace is the fallback used when POD_NAMESPACE is unset,
+	// matching the historical hardcoded value so existing deployments keep working.
+	DefaultControllerNamespace = "sudo-service"
+
+	ControllerSAName = "sudo-service-controller-sa"
+	ExecutorSAName   = "sudo-service-executor-sa"
 
 	// Default image used when SudoRequest.spec.image is empty. The executor
 	// invokes `sh -c <command>`, so the image needs both a POSIX shell and
@@ -44,6 +48,18 @@ var GroupVersionResource = schema.GroupVersionResource{
 	Version:  GroupVersion,
 	Resource: "sudorequests",
 }
+
+// ControllerNamespace is the namespace the controller watches and creates
+// executor Jobs / output Secrets in. Sourced from POD_NAMESPACE (downward API
+// in the chart's Deployment) so the chart's .Values.namespace genuinely
+// controls the install namespace end-to-end. Falls back to the historical
+// hardcoded value for backwards compatibility when the env var is unset.
+var ControllerNamespace = func() string {
+	if ns := os.Getenv("POD_NAMESPACE"); ns != "" {
+		return ns
+	}
+	return DefaultControllerNamespace
+}()
 
 // SudoRequestSpec is the desired state described by the requester.
 type SudoRequestSpec struct {

@@ -35,6 +35,14 @@ spec:
           image: {{ include "sudo-service.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           env:
+            # Tell the controller which namespace it's running in so it watches,
+            # creates, and reads in the same namespace the chart installs into.
+            # Without this it falls back to the "sudo-service" default and a
+            # chart installed elsewhere would target the wrong namespace.
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
             # Bind to all pod interfaces so kubelet's HTTP probes (which dial
             # the pod IP from the host netns, not pod-localhost) actually
             # reach us. External isolation is enforced by NetworkPolicy

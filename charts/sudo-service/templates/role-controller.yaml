@@ -13,6 +13,13 @@ rules:
   - apiGroups: ["sudo.andrewgarrett.dev"]
     resources: ["sudorequests/status"]
     verbs: ["get", "update", "patch"]
+  # SudoRequest finalizers subresource — required by the OwnerReferencesPermissionEnforcement
+  # admission plugin: setting blockOwnerDeletion=true on a child (executor Job, output Secret)
+  # whose owner is a SudoRequest requires update on the owner's finalizers subresource.
+  # Without it, child creation 403s on clusters where the plugin is enabled.
+  - apiGroups: ["sudo.andrewgarrett.dev"]
+    resources: ["sudorequests/finalizers"]
+    verbs: ["update"]
   # Executor Jobs.
   - apiGroups: ["batch"]
     resources: ["jobs"]
