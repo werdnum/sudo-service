@@ -17,6 +17,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 )
 
 // SudoRequestReconciler drives the state machine:
@@ -39,6 +40,15 @@ func (r *SudoRequestReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&SudoRequest{}).
 		Owns(&corev1.Secret{}).
+		// Reconcile a few requests in parallel. controller-runtime still
+		// serializes reconciles of the same object via the workqueue, so this
+		// stays replay-safe; it only lets independent requests proceed
+		// concurrently. The motivating case is the optional AI summary: that
+		// best-effort call can block its reconcile for up to its timeout, and
+		// with a single worker one slow request would head-of-line-block every
+		// other transition (e.g. an approved request waiting for its executor
+		// Job). A small worker pool keeps those independent transitions moving.
+		WithOptions(controller.Options{MaxConcurrentReconciles: 4}).
 		Complete(r)
 }
 
