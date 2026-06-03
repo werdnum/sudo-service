@@ -34,30 +34,38 @@ func init() {
 
 // Config bundles env-derived runtime settings.
 type Config struct {
-	BindAddress      string // e.g. "0.0.0.0:8080" or "127.0.0.1:8080"
-	PublicBaseURL    string // e.g. "https://sudo.andrewgarrett.dev"
-	PushoverToken    string // Pushover application token
-	PushoverUserKey  string // Pushover user or group key (`user` field on the API)
-	KeycloakIssuer   string // e.g. "https://id.andrewgarrett.dev/realms/master"
-	KeycloakAudience string // expected aud claim
-	AdminGroup       string // e.g. "cluster-admins"
-	CookieSigningKey string // for DIY OIDC sessions; optional in oauth2-proxy mode
-	OAuth2ProxyMode  bool   // true: trust forwarded ID token after JWKS check
+	BindAddress           string // e.g. "0.0.0.0:8080" or "127.0.0.1:8080"
+	PublicBaseURL         string // e.g. "https://sudo.andrewgarrett.dev"
+	PushoverToken         string // Pushover application token
+	PushoverUserKey       string // Pushover user or group key (`user` field on the API)
+	KeycloakIssuer        string // e.g. "https://id.andrewgarrett.dev/realms/master"
+	KeycloakAudience      string // expected aud claim
+	AdminGroup            string // e.g. "cluster-admins"
+	CookieSigningKey      string // for DIY OIDC sessions; optional in oauth2-proxy mode
+	OAuth2ProxyMode       bool   // true: trust forwarded ID token after JWKS check
 	AutoApproveConfigPath string // path to auto-approve YAML
+
+	// Optional AI command-summary feature. Enabled only when OpenAIAPIKey is set.
+	OpenAIAPIKey  string // OPENAI_API_KEY; empty disables the feature
+	OpenAIBaseURL string // OPENAI_BASE_URL; defaults to the OpenAI public API
+	OpenAIModel   string // OPENAI_MODEL; defaults to DefaultOpenAIModel
 }
 
 func loadConfig() (*Config, error) {
 	cfg := &Config{
-		BindAddress:      getenv("BIND_ADDRESS", "127.0.0.1:8080"),
-		PublicBaseURL:    getenv("PUBLIC_BASE_URL", "https://sudo.andrewgarrett.dev"),
-		PushoverToken:    os.Getenv("PUSHOVER_TOKEN"),
-		PushoverUserKey:  os.Getenv("PUSHOVER_USER_KEY"),
-		KeycloakIssuer:   getenv("KEYCLOAK_ISSUER", "https://id.andrewgarrett.dev/realms/master"),
-		KeycloakAudience: getenv("KEYCLOAK_AUDIENCE", "sudo-service"),
-		AdminGroup:       getenv("ADMIN_GROUP", "cluster-admins"),
-		CookieSigningKey: os.Getenv("COOKIE_SIGNING_KEY"),
-		OAuth2ProxyMode:  strings.EqualFold(os.Getenv("OAUTH2_PROXY_MODE"), "true"),
+		BindAddress:           getenv("BIND_ADDRESS", "127.0.0.1:8080"),
+		PublicBaseURL:         getenv("PUBLIC_BASE_URL", "https://sudo.andrewgarrett.dev"),
+		PushoverToken:         os.Getenv("PUSHOVER_TOKEN"),
+		PushoverUserKey:       os.Getenv("PUSHOVER_USER_KEY"),
+		KeycloakIssuer:        getenv("KEYCLOAK_ISSUER", "https://id.andrewgarrett.dev/realms/master"),
+		KeycloakAudience:      getenv("KEYCLOAK_AUDIENCE", "sudo-service"),
+		AdminGroup:            getenv("ADMIN_GROUP", "cluster-admins"),
+		CookieSigningKey:      os.Getenv("COOKIE_SIGNING_KEY"),
+		OAuth2ProxyMode:       strings.EqualFold(os.Getenv("OAUTH2_PROXY_MODE"), "true"),
 		AutoApproveConfigPath: os.Getenv("AUTO_APPROVE_CONFIG"),
+		OpenAIAPIKey:          os.Getenv("OPENAI_API_KEY"),
+		OpenAIBaseURL:         getenv("OPENAI_BASE_URL", DefaultOpenAIBaseURL),
+		OpenAIModel:           getenv("OPENAI_MODEL", DefaultOpenAIModel),
 	}
 	if cfg.PushoverToken == "" || cfg.PushoverUserKey == "" {
 		return nil, fmt.Errorf("PUSHOVER_TOKEN and PUSHOVER_USER_KEY are required")
@@ -118,12 +126,19 @@ func main() {
 
 	po := NewPushoverClient(cfg.PushoverToken, cfg.PushoverUserKey)
 
+	// Optional: AI command summaries. nil when OPENAI_API_KEY is unset.
+	summarizer := NewSummarizer(cfg.OpenAIAPIKey, cfg.OpenAIBaseURL, cfg.OpenAIModel)
+	if summarizer != nil {
+		logger.Info("AI command summaries enabled", "baseURL", cfg.OpenAIBaseURL, "model", cfg.OpenAIModel)
+	}
+
 	broadcaster := NewBroadcaster()
 
 	reconciler := &SudoRequestReconciler{
 		Client:        mgr.GetClient(),
 		Scheme:        mgr.GetScheme(),
 		Pushover:      po,
+		Summarizer:    summarizer,
 		Broadcaster:   broadcaster,
 		PublicBaseURL: cfg.PublicBaseURL,
 		Recorder:      mgr.GetEventRecorderFor("sudo-service"),

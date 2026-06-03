@@ -87,6 +87,14 @@ spec:
                     Name of the short-TTL Secret in sudo-service namespace holding
                     stdout/stderr. Reads go through the controller HTTP API, not
                     direct RBAC.
+                summary:
+                  type: string
+                  description: >-
+                    Optional AI-generated, human-readable review aid for the
+                    command, produced once when the request enters Pending and
+                    cached here. A review aid only — never a substitute for the
+                    human reviewer reading the command. Empty when the summarizer
+                    is disabled or generation failed.
                 executorJobName:
                   type: string
                   description: >-

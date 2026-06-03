@@ -29,6 +29,7 @@ type SudoRequestReconciler struct {
 	client.Client
 	Scheme        *runtime.Scheme
 	Pushover      *PushoverClient
+	Summarizer    *Summarizer // optional; nil when AI summaries are disabled
 	Broadcaster   *Broadcaster
 	Recorder      record.EventRecorder
 	PublicBaseURL string
@@ -119,6 +120,21 @@ func (r *SudoRequestReconciler) handleNew(ctx context.Context, sr *SudoRequest) 
 	sr.Status.ApprovalTokenHash = hash
 	sr.Status.ApprovalTokenExpiresAt = &expiry
 	sr.Status.PushoverRequestID = reqID
+
+	// Best-effort AI review aid, generated once on the transition into Pending
+	// and cached in status. Optional and never load-bearing: a failure here must
+	// not block approval, so we log and proceed with an empty summary. We use a
+	// short independent timeout so a slow model can't stall the reconcile.
+	if r.Summarizer != nil {
+		sumCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		summary, err := r.Summarizer.Summarize(sumCtx, sr.Spec.Command, imageFor(sr), sr.Spec.Reason)
+		cancel()
+		if err != nil {
+			log.Error(err, "AI command summary failed; continuing without one")
+		} else {
+			sr.Status.Summary = summary
+		}
+	}
 
 	if err := r.Status().Update(ctx, sr); err != nil {
 		return ctrl.Result{}, fmt.Errorf("status update Pending: %w", err)
