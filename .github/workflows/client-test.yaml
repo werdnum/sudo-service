@@ -1,0 +1,29 @@
+name: Client CLI Tests
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'client/**'
+      - '.github/workflows/client-test.yaml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'client/**'
+      - '.github/workflows/client-test.yaml'
+
+jobs:
+  test:
+    name: Run CLI tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: client/cli
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
+
+      # The CLI and its tests are stdlib-only, so the runner's system Python is
+      # all we need — no dependency install step.
+      - name: Run tests
+        run: python3 -m unittest discover -s tests -v

@@ -23,6 +23,7 @@ executor Jobs and who may claim a given requester identity.
 |---|---|
 | `*.go`, `templates/`, `Dockerfile` | Controller source + container image (built to `ghcr.io/werdnum/sudo-service`). |
 | `charts/sudo-service/` | Helm chart deploying the controller, CRD, RBAC, admission policies, Service, ServiceMonitor, NetworkPolicy and Ingress. |
+| `client/` | Requester-side tooling: the `sudo-service` CLI and the agent skill. Canonical home; consumers install these by reference. See [`client/README.md`](client/README.md). |
 | `.github/workflows/build.yaml` | Builds + pushes the image and pins the new digest into the chart's `values.yaml`. |
 
 ## Deploying
