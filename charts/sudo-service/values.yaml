@@ -12,21 +12,18 @@
 # cluster-scoped ValidatingAdmissionPolicies (via the controller/executor SA
 # usernames) and by the NetworkPolicy/VAP namespace selectors.
 namespace: sudo-service
-
 # Controller container image. The digest is rewritten by the chart's build
 # workflow on each push to main; pin it here so deploys are reproducible.
 image:
   repository: ghcr.io/werdnum/sudo-service
   # Either a digest (preferred, set by CI) or a tag. Digest wins if both set.
-  digest: "sha256:2a92d9513919618aadad58787a741490d976a3a6c655e7a116877b9afcd0eebf"
+  digest: "sha256:fee463da65f70beb8418e8009cbe30e46e4829697ad6ccd20bda78949ec59702"
   tag: ""
   pullPolicy: IfNotPresent
-
 # imagePullSecrets are mirrored into the namespace out-of-band (e.g. by the
 # emberstack reflector in the reference cluster).
 imagePullSecrets:
   - name: ghcr-secret
-
 # Controller resource requests/limits.
 resources:
   requests:
@@ -35,20 +32,16 @@ resources:
   limits:
     cpu: 500m
     memory: 256Mi
-
 # Public base URL the controller advertises in approval links.
 publicBaseURL: https://sudo.andrewgarrett.dev
-
 # Keycloak / OIDC settings shared by the controller (JWT verification) and the
 # oauth2-proxy sidecar (login flow).
 keycloak:
   issuerURL: https://id.andrewgarrett.dev/realms/master
   audience: sudo-service
   clientID: sudo-service
-
 # OIDC group whose members may approve requests via the admin UI.
 adminGroup: kubernetes-cluster-admin
-
 # Optional AI command summaries. When enabled, the controller calls an
 # OpenAI-compatible chat-completions endpoint once per request (as it enters
 # Pending) to produce a concise, security-oriented review aid that is cached on
@@ -66,11 +59,9 @@ openai:
   secretName: sudo-service-openai
   # Key within secretName holding the API key.
   secretKey: api-key
-
 # Redis/KeyDB backing the oauth2-proxy session store.
 redis:
   connectionURL: redis://keydb.redis.svc.cluster.local/3
-
 # oauth2-proxy sidecar.
 oauth2Proxy:
   image: quay.io/oauth2-proxy/oauth2-proxy:v7.15.2-arm64@sha256:138539bae490fd122d151d6f7f12d028dd917fba5c582885ce376c08a2a33c67
@@ -81,7 +72,6 @@ oauth2Proxy:
     limits:
       cpu: 200m
       memory: 128Mi
-
 # Secret names consumed by the controller + oauth2-proxy. The Secrets
 # themselves are NOT part of this chart (they are cluster-specific and managed
 # out-of-band, e.g. as SealedSecrets); only their names are referenced.
@@ -90,13 +80,11 @@ secrets:
   pushover: sudo-service-pushover
   # Keys: client-secret, cookie-secret
   oauth2Proxy: sudo-service-oauth2-proxy
-
 # Namespace-level Goldilocks (Fairwinds VPA recommender) opt-in.
 goldilocks:
   enabled: true
   vpaUpdateMode: "Off"
   vpaResourcePolicy: '{"containerPolicies":[{"containerName":"*","controlledValues":"RequestsOnly","maxAllowed":{"cpu":"500m","memory":"512Mi"}}]}'
-
 ingress:
   enabled: true
   className: nginx
@@ -106,11 +94,9 @@ ingress:
   # Routes through Cloudflare Tunnel so approval pushes work from phones
   # outside the LAN. Set to "" to omit the external-dns target annotation.
   cloudflareTunnelTarget: 6422e862-06ea-4b65-ae99-cad51841931c.cfargotunnel.com
-
 # Create the ServiceMonitor (requires the Prometheus operator CRDs).
 serviceMonitor:
   enabled: true
-
 # Create the NetworkPolicy locking ingress to the controller Pod.
 networkPolicy:
   enabled: true
