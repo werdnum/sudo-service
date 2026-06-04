@@ -65,6 +65,20 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.secrets.pushover }}
                   key: user_key
+            {{- if .Values.openai.enabled }}
+            # Optional AI command summaries. The API key Secret is managed
+            # out-of-band (not part of this chart); enabling without it will
+            # crash-loop on the missing Secret reference.
+            - name: OPENAI_BASE_URL
+              value: {{ .Values.openai.baseURL | quote }}
+            - name: OPENAI_MODEL
+              value: {{ .Values.openai.model | quote }}
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.openai.secretName }}
+                  key: {{ .Values.openai.secretKey }}
+            {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           securityContext:

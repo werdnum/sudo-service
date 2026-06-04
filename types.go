@@ -79,6 +79,13 @@ type SudoRequestStatus struct {
 	ExitCode        *int32 `json:"exitCode,omitempty"`
 	OutputSecretRef string `json:"outputSecretRef,omitempty"`
 
+	// Summary is an optional, AI-generated human-readable review aid for the
+	// command, produced once when the request enters Pending and cached here
+	// (the object is the natural machine-readable cache). Empty when the
+	// summarizer is disabled or generation failed; it is never a substitute for
+	// the human reviewer reading the command.
+	Summary string `json:"summary,omitempty"`
+
 	// ExecutorJobName is the name of the Job that was (or is being) run for
 	// this request. Recorded as soon as the Job is created so that, if the
 	// Job is GC'd by ttlSecondsAfterFinished before the controller observes

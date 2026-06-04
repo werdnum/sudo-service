@@ -17,6 +17,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 )
 
 // SudoRequestReconciler drives the state machine:
@@ -29,6 +30,7 @@ type SudoRequestReconciler struct {
 	client.Client
 	Scheme        *runtime.Scheme
 	Pushover      *PushoverClient
+	Summarizer    *Summarizer // optional; nil when AI summaries are disabled
 	Broadcaster   *Broadcaster
 	Recorder      record.EventRecorder
 	PublicBaseURL string
@@ -38,6 +40,15 @@ func (r *SudoRequestReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&SudoRequest{}).
 		Owns(&corev1.Secret{}).
+		// Reconcile a few requests in parallel. controller-runtime still
+		// serializes reconciles of the same object via the workqueue, so this
+		// stays replay-safe; it only lets independent requests proceed
+		// concurrently. The motivating case is the optional AI summary: that
+		// best-effort call can block its reconcile for up to its timeout, and
+		// with a single worker one slow request would head-of-line-block every
+		// other transition (e.g. an approved request waiting for its executor
+		// Job). A small worker pool keeps those independent transitions moving.
+		WithOptions(controller.Options{MaxConcurrentReconciles: 4}).
 		Complete(r)
 }
 
@@ -105,6 +116,28 @@ func (r *SudoRequestReconciler) handleNew(ctx context.Context, sr *SudoRequest) 
 	u.RawQuery = q.Encode()
 	approvalURL := u.String()
 
+	// Best-effort AI review aid. Generated BEFORE the push (and thus before the
+	// adjacent status write) so that the instant the reviewer receives the
+	// approval URL, the request is already Pending with its token hash stored.
+	// Doing this slow call after the push would open a window where the
+	// freshly-delivered link is unusable — VerifyApprovalToken requires Pending
+	// + a stored hash, neither of which exists until the status update lands.
+	// Optional and never load-bearing: a failure here logs and proceeds with no
+	// summary, and a short timeout bounds it. (On a push retry the summary is
+	// regenerated; that wasted call on the rare error path is worth the
+	// correctness.)
+	var summary string
+	if r.Summarizer != nil {
+		sumCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		s, err := r.Summarizer.Summarize(sumCtx, sr.Spec.Command, imageFor(sr), sr.Spec.Reason)
+		cancel()
+		if err != nil {
+			log.Error(err, "AI command summary failed; continuing without one")
+		} else {
+			summary = s
+		}
+	}
+
 	// Send the Pushover push first; if it fails, we don't want to mark Pending and lose the token.
 	title := fmt.Sprintf("sudo: %s wants to run %s", sr.Spec.Requester, truncate(sr.Spec.Command, 80))
 	body := fmt.Sprintf("reason: %s\ncommand: %s\nimage: %s",
@@ -119,6 +152,7 @@ func (r *SudoRequestReconciler) handleNew(ctx context.Context, sr *SudoRequest) 
 	sr.Status.ApprovalTokenHash = hash
 	sr.Status.ApprovalTokenExpiresAt = &expiry
 	sr.Status.PushoverRequestID = reqID
+	sr.Status.Summary = summary
 
 	if err := r.Status().Update(ctx, sr); err != nil {
 		return ctrl.Result{}, fmt.Errorf("status update Pending: %w", err)

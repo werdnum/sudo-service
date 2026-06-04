@@ -71,6 +71,7 @@ type requestStatusResponse struct {
 	DenialReason    string `json:"denialReason,omitempty"`
 	ExitCode        *int32 `json:"exitCode,omitempty"`
 	OutputSecretRef string `json:"outputSecretRef,omitempty"`
+	Summary         string `json:"summary,omitempty"`
 }
 
 // createRequestHandler is POST /requests. Authenticated via SA bearer token (TokenReview).
@@ -175,6 +176,7 @@ func (a *APIServer) serveStatus(w http.ResponseWriter, sr *SudoRequest) {
 		DenialReason:    sr.Status.DenialReason,
 		ExitCode:        sr.Status.ExitCode,
 		OutputSecretRef: sr.Status.OutputSecretRef,
+		Summary:         sr.Status.Summary,
 	}
 	if sr.Status.ApprovedAt != nil {
 		resp.ApprovedAt = sr.Status.ApprovedAt.UTC().Format("2006-01-02T15:04:05Z")
@@ -334,6 +336,7 @@ type approveView struct {
 	Reason    string
 	Command   string
 	Image     string
+	Summary   string
 	CreatedAt string
 	User      string
 	UserEmail string
@@ -391,6 +394,7 @@ func (a *APIServer) renderApprovePage(w http.ResponseWriter, r *http.Request, cl
 		view.Reason = sr.Spec.Reason
 		view.Command = sr.Spec.Command
 		view.Image = imageFor(sr)
+		view.Summary = sr.Status.Summary
 		view.CreatedAt = sr.CreationTimestamp.UTC().Format("2006-01-02T15:04:05Z")
 	}
 

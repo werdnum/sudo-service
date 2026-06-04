@@ -39,6 +39,29 @@ The Secrets the controller and its oauth2-proxy sidecar consume
 chart — they are cluster-specific and expected to be provided out-of-band
 (e.g. as SealedSecrets). The chart only references them by name.
 
+### AI command summaries (optional)
+
+When an OpenAI-compatible API key is configured, the controller generates a
+concise, security-oriented **review aid** for each request as it enters the
+`Pending` phase, caches it on the `SudoRequest` (`status.summary`), and shows it
+on the approve page and in the requester status API. It is a review aid only —
+explicitly **not** a substitute for the human reading the command — and the
+whole feature is best-effort: a summarizer error never blocks an approval.
+
+Enable it by setting `openai.enabled=true` and providing an API key Secret
+(`openai.secretName`, default `sudo-service-openai`, key `api-key`). Point
+`openai.baseURL` at any OpenAI-compatible endpoint to switch providers/models;
+it defaults to the public OpenAI API with model `gpt-5.4-mini`.
+
+The controller reads these env vars directly (the chart wires them from the
+values above):
+
+| Env | Default | Meaning |
+|---|---|---|
+| `OPENAI_API_KEY` | _(unset)_ | API key. **Unset disables the feature.** |
+| `OPENAI_BASE_URL` | `https://api.openai.com/v1` | OpenAI-compatible base URL (no `/chat/completions` suffix). |
+| `OPENAI_MODEL` | `gpt-5.4-mini` | Model id served by the base URL. |
+
 ### Render locally
 
 ```sh
@@ -53,3 +76,4 @@ helm template sudo-service charts/sudo-service \
 |---|---|---|
 | `sudo-service-pushover` | `token`, `user_key` | controller — Pushover approval pushes |
 | `sudo-service-oauth2-proxy` | `client-secret`, `cookie-secret` | oauth2-proxy sidecar — OIDC login + session cookie |
+| `sudo-service-openai` | `api-key` | controller — AI command summaries (only when `openai.enabled=true`) |
