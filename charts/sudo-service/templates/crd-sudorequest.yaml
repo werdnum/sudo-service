@@ -64,7 +64,7 @@ spec:
                 ttlSecondsAfterApproval:
                   type: integer
                   format: int32
-                  default: 600
+                  default: 3600
                   minimum: 0
                   # Capped at 3600 to match the executor VAP's ttlSecondsAfterFinished
                   # guard (kubernetes/manifests/workloads/sudo-service/validatingadmissionpolicy-executor.yaml).
