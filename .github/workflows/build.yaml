@@ -106,7 +106,6 @@ jobs:
           tags: |
             ${{ needs.prepare.outputs.image-path }}:${{ needs.prepare.outputs.tag }}
             ${{ needs.prepare.outputs.image-path }}:latest
-            ${{ needs.prepare.outputs.image-path }}:buildcache
           cache-from: |
             type=gha,scope=${{ env.IMAGE_NAME }}
             type=registry,ref=${{ needs.prepare.outputs.image-path }}:latest
