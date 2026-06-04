@@ -1,14 +1,16 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
+
+	openai "github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/option"
+	"github.com/openai/openai-go/v3/packages/param"
+	"github.com/openai/openai-go/v3/shared"
 )
 
 // Default OpenAI-compatible endpoint and model. The base URL is configurable so
@@ -47,6 +49,7 @@ type Summarizer struct {
 	BaseURL string // without trailing slash, e.g. https://api.openai.com/v1
 	Model   string
 	HTTP    *http.Client
+	Client  openai.Client
 }
 
 // NewSummarizer returns a configured Summarizer, or nil if no API key is set
@@ -62,32 +65,20 @@ func NewSummarizer(apiKey, baseURL, model string) *Summarizer {
 	if model == "" {
 		model = DefaultOpenAIModel
 	}
+	httpClient := &http.Client{Timeout: 30 * time.Second}
+	baseURL = strings.TrimRight(baseURL, "/")
 	return &Summarizer{
 		APIKey:  apiKey,
-		BaseURL: strings.TrimRight(baseURL, "/"),
+		BaseURL: baseURL,
 		Model:   model,
 		// Generous-but-bounded: summarization must never wedge a reconcile.
-		HTTP: &http.Client{Timeout: 30 * time.Second},
+		HTTP: httpClient,
+		Client: openai.NewClient(
+			option.WithAPIKey(apiKey),
+			option.WithBaseURL(baseURL),
+			option.WithHTTPClient(httpClient),
+		),
 	}
-}
-
-type chatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
-}
-
-type chatCompletionRequest struct {
-	Model    string        `json:"model"`
-	Messages []chatMessage `json:"messages"`
-}
-
-type chatCompletionResponse struct {
-	Choices []struct {
-		Message chatMessage `json:"message"`
-	} `json:"choices"`
-	Error *struct {
-		Message string `json:"message"`
-	} `json:"error,omitempty"`
 }
 
 // Summarize returns a concise, security-oriented review aid for the given
@@ -99,46 +90,21 @@ func (s *Summarizer) Summarize(ctx context.Context, command, image, reason strin
 		image, reason, command,
 	)
 
-	reqBody := chatCompletionRequest{
-		Model: s.Model,
-		Messages: []chatMessage{
-			{Role: "system", Content: summarySystemPrompt},
-			{Role: "user", Content: userContent},
+	resp, err := s.Client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
+		Model:               shared.ChatModel(s.Model),
+		MaxCompletionTokens: param.NewOpt[int64](220),
+		Messages: []openai.ChatCompletionMessageParamUnion{
+			openai.SystemMessage(summarySystemPrompt),
+			openai.UserMessage(userContent),
 		},
-	}
-	buf, err := json.Marshal(reqBody)
-	if err != nil {
-		return "", fmt.Errorf("marshal request: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.BaseURL+"/chat/completions", bytes.NewReader(buf))
+	})
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+s.APIKey)
-
-	resp, err := s.HTTP.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 300 {
-		return "", fmt.Errorf("summarizer API %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
-	}
-
-	var cr chatCompletionResponse
-	if err := json.Unmarshal(body, &cr); err != nil {
-		return "", fmt.Errorf("decode response: %w", err)
-	}
-	if cr.Error != nil {
-		return "", fmt.Errorf("summarizer API error: %s", cr.Error.Message)
-	}
-	if len(cr.Choices) == 0 {
+	if len(resp.Choices) == 0 {
 		return "", fmt.Errorf("summarizer returned no choices")
 	}
-	summary := strings.TrimSpace(cr.Choices[0].Message.Content)
+	summary := strings.TrimSpace(resp.Choices[0].Message.Content)
 	if summary == "" {
 		return "", fmt.Errorf("summarizer returned empty content")
 	}

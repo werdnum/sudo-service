@@ -35,13 +35,13 @@ func TestNewSummarizerDefaults(t *testing.T) {
 
 func TestSummarizeRequestAndResponse(t *testing.T) {
 	var gotAuth, gotPath string
-	var gotBody chatCompletionRequest
+	var gotRawBody map[string]any
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
 		gotPath = r.URL.Path
 		body, _ := io.ReadAll(r.Body)
-		_ = json.Unmarshal(body, &gotBody)
+		_ = json.Unmarshal(body, &gotRawBody)
 
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"  Summary: lists pods.\nRisk: low — Confidence: high  "}}]}`)
@@ -64,19 +64,35 @@ func TestSummarizeRequestAndResponse(t *testing.T) {
 	if gotPath != "/v1/chat/completions" {
 		t.Errorf("path = %q, want /v1/chat/completions", gotPath)
 	}
-	if gotBody.Model != "test-model" {
-		t.Errorf("model = %q, want test-model", gotBody.Model)
+	if gotRawBody["model"] != "test-model" {
+		t.Errorf("model = %q, want test-model", gotRawBody["model"])
 	}
-	if len(gotBody.Messages) != 2 || gotBody.Messages[0].Role != "system" || gotBody.Messages[1].Role != "user" {
-		t.Fatalf("unexpected messages: %+v", gotBody.Messages)
+	if gotRawBody["max_completion_tokens"] != float64(220) {
+		t.Errorf("max_completion_tokens = %v, want 220", gotRawBody["max_completion_tokens"])
+	}
+	if _, ok := gotRawBody["max_tokens"]; ok {
+		t.Fatal("request must not send legacy max_tokens")
+	}
+	messages, ok := gotRawBody["messages"].([]any)
+	if !ok || len(messages) != 2 {
+		t.Fatalf("unexpected messages: %+v", gotRawBody["messages"])
+	}
+	systemMessage, ok := messages[0].(map[string]any)
+	if !ok || systemMessage["role"] != "system" {
+		t.Fatalf("unexpected system message: %+v", messages[0])
+	}
+	userMessage, ok := messages[1].(map[string]any)
+	if !ok || userMessage["role"] != "user" {
+		t.Fatalf("unexpected user message: %+v", messages[1])
 	}
 	// The command and image must reach the model; the reason is included as
 	// untrusted context.
-	if !strings.Contains(gotBody.Messages[1].Content, "kubectl get pods") {
-		t.Errorf("user message missing command: %q", gotBody.Messages[1].Content)
+	userContent, _ := userMessage["content"].(string)
+	if !strings.Contains(userContent, "kubectl get pods") {
+		t.Errorf("user message missing command: %q", userContent)
 	}
-	if !strings.Contains(gotBody.Messages[1].Content, "alpine/k8s:1.35.5") {
-		t.Errorf("user message missing image: %q", gotBody.Messages[1].Content)
+	if !strings.Contains(userContent, "alpine/k8s:1.35.5") {
+		t.Errorf("user message missing image: %q", userContent)
 	}
 }
 
