@@ -5,3 +5,7 @@
 # Editor/OS cruft
 *.swp
 .DS_Store
+
+# Python
+__pycache__/
+*.pyc
