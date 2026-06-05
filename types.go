@@ -22,6 +22,12 @@ const (
 	ControllerSAName    = "sudo-service-controller-sa"
 	ExecutorSAName      = "sudo-service-executor-sa"
 
+	AppLabelKey             = "app"
+	RoleLabelKey            = "role"
+	ControllerAppLabelValue = "sudo-service"
+	ExecutorAppLabelValue   = "sudo-service-executor"
+	ExecutorRoleLabelValue  = "executor"
+
 	// Default image used when SudoRequest.spec.image is empty. The executor
 	// invokes `sh -c <command>`, so the image needs both a POSIX shell and
 	// kubectl. alpine/k8s bundles both for the right minor; rancher/kubectl

@@ -33,9 +33,10 @@ spec:
       message: "Only the sudo-service controller SA may create executor Jobs"
     - expression: >-
         has(object.metadata.labels) && has(object.metadata.labels.app) &&
-        object.metadata.labels.app == "sudo-service" &&
+        (object.metadata.labels.app == "sudo-service-executor" ||
+        object.metadata.labels.app == "sudo-service") &&
         has(object.metadata.labels.role) && object.metadata.labels.role == "executor"
-      message: "Executor Job must have labels app=sudo-service,role=executor"
+      message: "Executor Job must have labels app=sudo-service-executor,role=executor; legacy app=sudo-service is accepted during rollout"
     - expression: >-
         has(object.metadata.ownerReferences) &&
         object.metadata.ownerReferences.exists(o,

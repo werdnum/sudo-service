@@ -36,4 +36,18 @@ spec:
       ports:
         - port: 8080
           protocol: TCP
+---
+# Executor pods run approved commands and do not expose an inbound API.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sudo-service-executor-ingress
+  namespace: {{ .Values.namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      app: sudo-service-executor
+      role: executor
+  policyTypes:
+    - Ingress
 {{- end }}
