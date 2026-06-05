@@ -343,6 +343,17 @@ type approveView struct {
 	Error     string
 }
 
+// resultView backs result.html, the styled confirmation page shown after an
+// approve or deny action.
+type resultView struct {
+	Title     string
+	Message   string
+	UID       string
+	Variant   string // "success" or "error"
+	User      string
+	UserEmail string
+}
+
 func (a *APIServer) approveHandler(w http.ResponseWriter, r *http.Request) {
 	claims, err := a.authenticateHuman(r)
 	if err != nil {
@@ -429,7 +440,14 @@ func (a *APIServer) handleApprovePost(w http.ResponseWriter, r *http.Request, cl
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = fmt.Fprintf(w, "<html><body><h1>Approved.</h1><p>Request %s will execute shortly.</p><p><a href=\"/\">Back to home</a></p></body></html>", id)
+	_ = a.Templates.ExecuteTemplate(w, "result.html", resultView{
+		Title:     "Approved",
+		Message:   "This request will execute shortly.",
+		UID:       id,
+		Variant:   "success",
+		User:      claims.PreferredUsername,
+		UserEmail: claims.Email,
+	})
 }
 
 func (a *APIServer) denyHandler(w http.ResponseWriter, r *http.Request) {
@@ -473,7 +491,14 @@ func (a *APIServer) denyHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = fmt.Fprintf(w, "<html><body><h1>Denied.</h1><p><a href=\"/\">Back to home</a></p></body></html>")
+	_ = a.Templates.ExecuteTemplate(w, "result.html", resultView{
+		Title:     "Denied",
+		Message:   "The requester has been notified.",
+		UID:       id,
+		Variant:   "error",
+		User:      claims.PreferredUsername,
+		UserEmail: claims.Email,
+	})
 }
 
 // authenticateHuman extracts the JWT from the request and verifies it against Keycloak's JWKS.
