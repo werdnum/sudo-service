@@ -124,12 +124,9 @@
             }
         } else if (ev.phase === 'Approved') {
             if (existing) existing.remove();
-            if (pendingList.children.length === 0) {
-                pendingList.innerHTML = '<p class="empty-msg" style="color: var(--text-muted); font-size: 0.875rem;">No pending requests.</p>';
-            }
         }
 
-        if (pendingList.children.length === 0) {
+        if (pendingList.children.length === 0 && !pendingList.querySelector('.empty-msg')) {
             pendingList.innerHTML = '<p class="empty-msg" style="color: var(--text-muted); font-size: 0.875rem;">No pending requests.</p>';
         }
     }

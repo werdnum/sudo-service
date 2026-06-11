@@ -192,14 +192,14 @@ func (r *SudoRequestReconciler) handlePending(ctx context.Context, sr *SudoReque
 			return ctrl.Result{}, err
 		}
 		r.Recorder.Eventf(sr, corev1.EventTypeWarning, "Expired", "Request expired without approval after %s", age)
-	r.Broadcaster.Publish(string(sr.UID), Event{
-		Type:      "phase",
-		Phase:     PhaseExpired,
-		Requester: sr.Spec.Requester,
-		Reason:    sr.Spec.Reason,
-		Command:   sr.Spec.Command,
-		CreatedAt: sr.CreationTimestamp.Format("2006-01-02 15:04:05 UTC"),
-	})
+		r.Broadcaster.Publish(string(sr.UID), Event{
+			Type:      "phase",
+			Phase:     PhaseExpired,
+			Requester: sr.Spec.Requester,
+			Reason:    sr.Spec.Reason,
+			Command:   sr.Spec.Command,
+			CreatedAt: sr.CreationTimestamp.Format("2006-01-02 15:04:05 UTC"),
+		})
 		return ctrl.Result{}, nil
 	}
 	// Requeue at expiry.
