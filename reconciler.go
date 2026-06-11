@@ -93,13 +93,13 @@ func (r *SudoRequestReconciler) handleNew(ctx context.Context, sr *SudoRequest) 
 		}
 		r.Recorder.Eventf(sr, corev1.EventTypeNormal, "Approved", "Approved by auto-approve")
 		r.Broadcaster.Publish(string(sr.UID), Event{
-			Type:      "phase",
-			Phase:     PhaseApproved,
+			Type:       "phase",
+			Phase:      PhaseApproved,
 			ApprovedBy: "auto-approve",
-			Requester: sr.Spec.Requester,
-			Reason:    sr.Spec.Reason,
-			Command:   sr.Spec.Command,
-			CreatedAt: sr.CreationTimestamp.Format("2006-01-02 15:04:05 UTC"),
+			Requester:  sr.Spec.Requester,
+			Reason:     sr.Spec.Reason,
+			Command:    sr.Spec.Command,
+			CreatedAt:  sr.CreationTimestamp.Format("2006-01-02 15:04:05 UTC"),
 		})
 		return ctrl.Result{}, nil
 	}
