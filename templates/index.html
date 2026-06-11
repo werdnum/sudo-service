@@ -1,9 +1,6 @@
 {{template "header" .}}
 <div class="card">
-    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
-        <h2 style="font-size: 1.125rem; margin: 0;">Pending Approvals</h2>
-        <button id="notify-btn" class="btn" style="background: var(--bg-color); color: var(--text-muted); font-size: 0.75rem; border: 1px solid var(--border-color); display: none;">Enable Notifications</button>
-    </div>
+    <h2 style="font-size: 1.125rem; margin-top: 0; margin-bottom: 1rem;">Pending Approvals</h2>
     <div id="pending-list">
     {{if .Pending}}
         {{range .Pending}}
@@ -50,18 +47,6 @@
 <script>
     const pendingList = document.getElementById('pending-list');
     const historyList = document.getElementById('history-list');
-    const notifyBtn = document.getElementById('notify-btn');
-
-    if (Notification.permission === 'default') {
-        notifyBtn.style.display = 'block';
-        notifyBtn.addEventListener('click', () => {
-            Notification.requestPermission().then(() => {
-                if (Notification.permission !== 'default') {
-                    notifyBtn.style.display = 'none';
-                }
-            });
-        });
-    }
 
     function createRequestItem(ev) {
         const div = document.createElement('div');
