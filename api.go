@@ -537,8 +537,6 @@ func (a *APIServer) authenticateHuman(r *http.Request) (*HumanClaims, error) {
 	return nil, fmt.Errorf("JWT verification failed: %w", lastErr)
 }
 
-// findByUID lists SudoRequests in the controller namespace and returns the matching one.
-// Cached by the manager, so this is a hashmap lookup after the first reconcile.
 func (a *APIServer) globalEventsHandler(w http.ResponseWriter, r *http.Request) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -575,6 +573,8 @@ func (a *APIServer) globalEventsHandler(w http.ResponseWriter, r *http.Request) 
 	}
 }
 
+// findByUID lists SudoRequests in the controller namespace and returns the matching one.
+// Cached by the manager, so this is a hashmap lookup after the first reconcile.
 func (a *APIServer) findByUID(ctx context.Context, uid types.UID) (*SudoRequest, error) {
 	var list SudoRequestList
 	if err := a.Client.List(ctx, &list, client.InNamespace(ControllerNamespace)); err != nil {

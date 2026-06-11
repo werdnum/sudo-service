@@ -2,9 +2,7 @@
 <div class="card">
     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
         <h2 style="font-size: 1.125rem; margin: 0;">Pending Approvals</h2>
-        <label style="font-size: 0.875rem; color: var(--text-muted); cursor: pointer; display: flex; align-items: center; gap: 0.5rem;">
-            <input type="checkbox" id="notify-toggle"> Enable Notifications
-        </label>
+        <button id="notify-btn" class="btn" style="background: var(--bg-color); color: var(--text-muted); font-size: 0.75rem; border: 1px solid var(--border-color); display: none;">Enable Notifications</button>
     </div>
     <div id="pending-list">
     {{if .Pending}}
@@ -52,16 +50,18 @@
 <script>
     const pendingList = document.getElementById('pending-list');
     const historyList = document.getElementById('history-list');
-    const notifyToggle = document.getElementById('notify-toggle');
+    const notifyBtn = document.getElementById('notify-btn');
 
-    // Notifications setup
-    notifyToggle.checked = localStorage.getItem('sudo-notify') === 'true';
-    notifyToggle.addEventListener('change', (e) => {
-        localStorage.setItem('sudo-notify', e.target.checked);
-        if (e.target.checked && Notification.permission !== 'granted') {
-            Notification.requestPermission();
-        }
-    });
+    if (Notification.permission === 'default') {
+        notifyBtn.style.display = 'block';
+        notifyBtn.addEventListener('click', () => {
+            Notification.requestPermission().then(() => {
+                if (Notification.permission !== 'default') {
+                    notifyBtn.style.display = 'none';
+                }
+            });
+        });
+    }
 
     function createRequestItem(ev) {
         const div = document.createElement('div');
@@ -99,13 +99,12 @@
 
         if (ev.phase === 'Pending') {
             if (!existing) {
-                // New pending request
                 const item = createRequestItem(ev);
                 const emptyMsg = pendingList.querySelector('.empty-msg');
                 if (emptyMsg) emptyMsg.remove();
                 pendingList.prepend(item);
 
-                if (notifyToggle.checked && Notification.permission === 'granted') {
+                if (Notification.permission === 'granted') {
                     new Notification('New Sudo Request', {
                         body: `${ev.requester}: ${ev.command}`,
                     });
@@ -115,26 +114,21 @@
             if (existing) {
                 existing.remove();
             }
-            // Add to history
             const item = createRequestItem(ev);
             const emptyMsg = historyList.querySelector('.empty-msg');
             if (emptyMsg) emptyMsg.remove();
             historyList.prepend(item);
 
-            // Limit history to 20 items
             while (historyList.children.length > 20) {
                 historyList.lastElementChild.remove();
             }
         } else if (ev.phase === 'Approved') {
-            // If it's in pending, we can remove it or just wait for terminal.
-            // Let's remove it from pending to be snappy.
             if (existing) existing.remove();
             if (pendingList.children.length === 0) {
                 pendingList.innerHTML = '<p class="empty-msg" style="color: var(--text-muted); font-size: 0.875rem;">No pending requests.</p>';
             }
         }
 
-        // Clean up empty messages
         if (pendingList.children.length === 0) {
             pendingList.innerHTML = '<p class="empty-msg" style="color: var(--text-muted); font-size: 0.875rem;">No pending requests.</p>';
         }
