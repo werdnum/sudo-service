@@ -41,6 +41,7 @@ func (a *APIServer) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/deny", a.denyHandler)
 	mux.HandleFunc("/requests", a.createRequestHandler)
 	mux.HandleFunc("/requests/", a.requestSubpathHandler)
+	mux.HandleFunc("/events", a.globalEventsHandler)
 }
 
 func (a *APIServer) healthHandler(w http.ResponseWriter, _ *http.Request) {
@@ -534,6 +535,42 @@ func (a *APIServer) authenticateHuman(r *http.Request) (*HumanClaims, error) {
 		lastErr = err
 	}
 	return nil, fmt.Errorf("JWT verification failed: %w", lastErr)
+}
+
+func (a *APIServer) globalEventsHandler(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	claims, err := a.authenticateHuman(r)
+	if err != nil {
+		http.Error(w, "unauthorized: "+err.Error(), http.StatusUnauthorized)
+		return
+	}
+	if !claims.IsInGroup(a.Config.AdminGroup) {
+		http.Error(w, fmt.Sprintf("forbidden: requires group %q", a.Config.AdminGroup), http.StatusForbidden)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+
+	ch, cancel := a.Broadcaster.SubscribeAll()
+	defer cancel()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case ev := <-ch:
+			writeSSE(w, ev)
+			flusher.Flush()
+		}
+	}
 }
 
 // findByUID lists SudoRequests in the controller namespace and returns the matching one.

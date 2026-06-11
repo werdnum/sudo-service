@@ -92,7 +92,15 @@ func (r *SudoRequestReconciler) handleNew(ctx context.Context, sr *SudoRequest) 
 			return ctrl.Result{}, fmt.Errorf("status update Approved for auto-approve: %w", err)
 		}
 		r.Recorder.Eventf(sr, corev1.EventTypeNormal, "Approved", "Approved by auto-approve")
-		r.Broadcaster.Publish(string(sr.UID), Event{Type: "phase", Phase: PhaseApproved, ApprovedBy: "auto-approve"})
+		r.Broadcaster.Publish(string(sr.UID), Event{
+			Type:       "phase",
+			Phase:      PhaseApproved,
+			ApprovedBy: "auto-approve",
+			Requester:  sr.Spec.Requester,
+			Reason:     sr.Spec.Reason,
+			Command:    sr.Spec.Command,
+			CreatedAt:  sr.CreationTimestamp.Format("2006-01-02 15:04:05 UTC"),
+		})
 		return ctrl.Result{}, nil
 	}
 
@@ -159,7 +167,14 @@ func (r *SudoRequestReconciler) handleNew(ctx context.Context, sr *SudoRequest) 
 	}
 
 	r.Recorder.Eventf(sr, corev1.EventTypeNormal, "Pending", "Awaiting human approval (pushover request=%s)", reqID)
-	r.Broadcaster.Publish(string(sr.UID), Event{Type: "phase", Phase: PhasePending})
+	r.Broadcaster.Publish(string(sr.UID), Event{
+		Type:      "phase",
+		Phase:     PhasePending,
+		Requester: sr.Spec.Requester,
+		Reason:    sr.Spec.Reason,
+		Command:   sr.Spec.Command,
+		CreatedAt: sr.CreationTimestamp.Format("2006-01-02 15:04:05 UTC"),
+	})
 
 	// Wake up to enforce TTL.
 	return ctrl.Result{RequeueAfter: time.Until(metav1.NewTime(time.Now().Add(PendingRequestTTL * time.Second)).Time)}, nil
@@ -177,7 +192,14 @@ func (r *SudoRequestReconciler) handlePending(ctx context.Context, sr *SudoReque
 			return ctrl.Result{}, err
 		}
 		r.Recorder.Eventf(sr, corev1.EventTypeWarning, "Expired", "Request expired without approval after %s", age)
-		r.Broadcaster.Publish(string(sr.UID), Event{Type: "phase", Phase: PhaseExpired})
+		r.Broadcaster.Publish(string(sr.UID), Event{
+			Type:      "phase",
+			Phase:     PhaseExpired,
+			Requester: sr.Spec.Requester,
+			Reason:    sr.Spec.Reason,
+			Command:   sr.Spec.Command,
+			CreatedAt: sr.CreationTimestamp.Format("2006-01-02 15:04:05 UTC"),
+		})
 		return ctrl.Result{}, nil
 	}
 	// Requeue at expiry.
@@ -228,7 +250,14 @@ func (r *SudoRequestReconciler) handleApproved(ctx context.Context, sr *SudoRequ
 		r.Recorder.Eventf(sr, corev1.EventTypeWarning, "Failed",
 			"Executor Job %s disappeared before controller observed completion (likely ttlSecondsAfterApproval too short)",
 			sr.Status.ExecutorJobName)
-		r.Broadcaster.Publish(string(sr.UID), Event{Type: "phase", Phase: PhaseFailed})
+		r.Broadcaster.Publish(string(sr.UID), Event{
+			Type:      "phase",
+			Phase:     PhaseFailed,
+			Requester: sr.Spec.Requester,
+			Reason:    sr.Spec.Reason,
+			Command:   sr.Spec.Command,
+			CreatedAt: sr.CreationTimestamp.Format("2006-01-02 15:04:05 UTC"),
+		})
 		return ctrl.Result{}, nil
 	}
 
@@ -246,7 +275,14 @@ func (r *SudoRequestReconciler) handleApproved(ctx context.Context, sr *SudoRequ
 			return ctrl.Result{}, err
 		}
 		r.Recorder.Eventf(sr, corev1.EventTypeWarning, "Failed", "Failed to capture output: %v", err)
-		r.Broadcaster.Publish(string(sr.UID), Event{Type: "phase", Phase: PhaseFailed})
+		r.Broadcaster.Publish(string(sr.UID), Event{
+			Type:      "phase",
+			Phase:     PhaseFailed,
+			Requester: sr.Spec.Requester,
+			Reason:    sr.Spec.Reason,
+			Command:   sr.Spec.Command,
+			CreatedAt: sr.CreationTimestamp.Format("2006-01-02 15:04:05 UTC"),
+		})
 		return ctrl.Result{}, nil
 	}
 
@@ -271,6 +307,10 @@ func (r *SudoRequestReconciler) handleApproved(ctx context.Context, sr *SudoRequ
 		Phase:           sr.Status.Phase,
 		ExitCode:        &exitCode,
 		OutputSecretRef: outputSecret,
+		Requester:       sr.Spec.Requester,
+		Reason:          sr.Spec.Reason,
+		Command:         sr.Spec.Command,
+		CreatedAt:       sr.CreationTimestamp.Format("2006-01-02 15:04:05 UTC"),
 	})
 	return ctrl.Result{}, nil
 }
@@ -296,7 +336,15 @@ func (r *SudoRequestReconciler) Approve(ctx context.Context, uid types.UID, appr
 		return err
 	}
 	r.Recorder.Eventf(sr, corev1.EventTypeNormal, "Approved", "Approved by %s", approvedBy)
-	r.Broadcaster.Publish(string(sr.UID), Event{Type: "phase", Phase: PhaseApproved, ApprovedBy: approvedBy})
+	r.Broadcaster.Publish(string(sr.UID), Event{
+		Type:       "phase",
+		Phase:      PhaseApproved,
+		ApprovedBy: approvedBy,
+		Requester:  sr.Spec.Requester,
+		Reason:     sr.Spec.Reason,
+		Command:    sr.Spec.Command,
+		CreatedAt:  sr.CreationTimestamp.Format("2006-01-02 15:04:05 UTC"),
+	})
 	return nil
 }
 
@@ -320,7 +368,16 @@ func (r *SudoRequestReconciler) Deny(ctx context.Context, uid types.UID, deniedB
 		return err
 	}
 	r.Recorder.Eventf(sr, corev1.EventTypeWarning, "Denied", "Denied by %s: %s", deniedBy, reason)
-	r.Broadcaster.Publish(string(sr.UID), Event{Type: "phase", Phase: PhaseDenied, DeniedBy: deniedBy, DenialReason: reason})
+	r.Broadcaster.Publish(string(sr.UID), Event{
+		Type:         "phase",
+		Phase:        PhaseDenied,
+		DeniedBy:     deniedBy,
+		DenialReason: reason,
+		Requester:    sr.Spec.Requester,
+		Reason:       sr.Spec.Reason,
+		Command:      sr.Spec.Command,
+		CreatedAt:    sr.CreationTimestamp.Format("2006-01-02 15:04:05 UTC"),
+	})
 	return nil
 }
 

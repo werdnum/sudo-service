@@ -1,9 +1,10 @@
 {{template "header" .}}
 <div class="card">
-    <h2 style="font-size: 1.125rem; margin-top: 0;">Pending Approvals</h2>
+    <h2 style="font-size: 1.125rem; margin-top: 0; margin-bottom: 1rem;">Pending Approvals</h2>
+    <div id="pending-list">
     {{if .Pending}}
         {{range .Pending}}
-        <div class="request-item">
+        <div class="request-item" id="request-{{.UID}}">
             <div class="request-info">
                 <div style="font-weight: 600;">{{.Spec.Requester}}</div>
                 <div style="font-size: 0.875rem; color: var(--text-muted);">{{.Spec.Reason}}</div>
@@ -16,15 +17,17 @@
         </div>
         {{end}}
     {{else}}
-        <p style="color: var(--text-muted); font-size: 0.875rem;">No pending requests.</p>
+        <p class="empty-msg" style="color: var(--text-muted); font-size: 0.875rem;">No pending requests.</p>
     {{end}}
+    </div>
 </div>
 
 <div class="card">
     <h2 style="font-size: 1.125rem; margin-top: 0;">Recent History</h2>
+    <div id="history-list">
     {{if .History}}
         {{range .History}}
-        <div class="request-item">
+        <div class="request-item" id="request-{{.UID}}">
             <div class="request-info">
                 <div style="font-weight: 600;">{{.Spec.Requester}}</div>
                 <div style="font-size: 0.875rem; color: var(--text-muted);">{{.Spec.Reason}}</div>
@@ -36,7 +39,93 @@
         </div>
         {{end}}
     {{else}}
-        <p style="color: var(--text-muted); font-size: 0.875rem;">No history yet.</p>
+        <p class="empty-msg" style="color: var(--text-muted); font-size: 0.875rem;">No history yet.</p>
     {{end}}
+    </div>
 </div>
+
+<script>
+    const pendingList = document.getElementById('pending-list');
+    const historyList = document.getElementById('history-list');
+
+    function createRequestItem(ev) {
+        const div = document.createElement('div');
+        div.className = 'request-item';
+        div.id = `request-${ev.uid}`;
+
+        const isPending = ev.phase === 'Pending';
+
+        div.innerHTML = `
+            <div class="request-info">
+                <div style="font-weight: 600;">${escapeHTML(ev.requester)}</div>
+                <div style="font-size: 0.875rem; color: var(--text-muted);">${escapeHTML(ev.reason)}</div>
+                ${isPending ? `<code style="font-size: 0.75rem; background: #f1f5f9; padding: 0.125rem 0.25rem; border-radius: 0.25rem;">${escapeHTML(ev.command)}</code>` : ''}
+                <div class="timestamp">${ev.createdAt}</div>
+            </div>
+            <div class="request-actions">
+                ${isPending
+                    ? `<a href="/approve?id=${ev.uid}" class="btn btn-primary">Review</a>`
+                    : `<span class="badge badge-${ev.phase.toLowerCase()}">${ev.phase}</span>`
+                }
+            </div>
+        `;
+        return div;
+    }
+
+    function escapeHTML(str) {
+        const div = document.createElement('div');
+        div.textContent = str;
+        return div.innerHTML;
+    }
+
+    function handleEvent(ev) {
+        const existing = document.getElementById(`request-${ev.uid}`);
+        const isTerminal = ['Executed', 'Failed', 'Denied', 'Expired'].includes(ev.phase);
+
+        if (ev.phase === 'Pending') {
+            if (!existing) {
+                const item = createRequestItem(ev);
+                const emptyMsg = pendingList.querySelector('.empty-msg');
+                if (emptyMsg) emptyMsg.remove();
+                pendingList.prepend(item);
+
+                if (Notification.permission === 'granted') {
+                    new Notification('New Sudo Request', {
+                        body: `${ev.requester}: ${ev.command}`,
+                    });
+                }
+            }
+        } else if (isTerminal) {
+            if (existing) {
+                existing.remove();
+            }
+            const item = createRequestItem(ev);
+            const emptyMsg = historyList.querySelector('.empty-msg');
+            if (emptyMsg) emptyMsg.remove();
+            historyList.prepend(item);
+
+            while (historyList.children.length > 20) {
+                historyList.lastElementChild.remove();
+            }
+        } else if (ev.phase === 'Approved') {
+            if (existing) existing.remove();
+        }
+
+        if (pendingList.children.length === 0 && !pendingList.querySelector('.empty-msg')) {
+            pendingList.innerHTML = '<p class="empty-msg" style="color: var(--text-muted); font-size: 0.875rem;">No pending requests.</p>';
+        }
+    }
+
+    const events = new EventSource('/events');
+    events.onmessage = (e) => {
+        try {
+            const ev = JSON.parse(e.data);
+            if (ev.type === 'phase') {
+                handleEvent(ev);
+            }
+        } catch (err) {
+            console.error('failed to parse event', err);
+        }
+    };
+</script>
 {{template "footer" .}}

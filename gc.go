@@ -96,7 +96,14 @@ func (g *GarbageCollector) expirePending(ctx context.Context) error {
 		// even when this GC path is the one that fires (e.g. after a
 		// controller restart dropped the per-object requeue).
 		if g.Broadcaster != nil {
-			g.Broadcaster.Publish(string(sr.UID), Event{Type: "phase", Phase: PhaseExpired})
+			g.Broadcaster.Publish(string(sr.UID), Event{
+				Type:      "phase",
+				Phase:     PhaseExpired,
+				Requester: sr.Spec.Requester,
+				Reason:    sr.Spec.Reason,
+				Command:   sr.Spec.Command,
+				CreatedAt: sr.CreationTimestamp.Format("2006-01-02 15:04:05 UTC"),
+			})
 		}
 	}
 	return nil

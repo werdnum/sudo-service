@@ -7,7 +7,12 @@ import (
 // Event is what gets pushed over SSE on /requests/{uid}/events.
 type Event struct {
 	Type            string `json:"type"`
+	UID             string `json:"uid,omitempty"`
 	Phase           string `json:"phase,omitempty"`
+	Requester       string `json:"requester,omitempty"`
+	Reason          string `json:"reason,omitempty"`
+	Command         string `json:"command,omitempty"`
+	CreatedAt       string `json:"createdAt,omitempty"`
 	ApprovedBy      string `json:"approvedBy,omitempty"`
 	DeniedBy        string `json:"deniedBy,omitempty"`
 	DenialReason    string `json:"denialReason,omitempty"`
@@ -23,10 +28,26 @@ type Event struct {
 type Broadcaster struct {
 	mu   sync.Mutex
 	subs map[string]map[chan Event]struct{}
+	all  map[chan Event]struct{}
 }
 
 func NewBroadcaster() *Broadcaster {
-	return &Broadcaster{subs: make(map[string]map[chan Event]struct{})}
+	return &Broadcaster{
+		subs: make(map[string]map[chan Event]struct{}),
+		all:  make(map[chan Event]struct{}),
+	}
+}
+
+func (b *Broadcaster) SubscribeAll() (<-chan Event, func()) {
+	ch := make(chan Event, 32)
+	b.mu.Lock()
+	b.all[ch] = struct{}{}
+	b.mu.Unlock()
+	return ch, func() {
+		b.mu.Lock()
+		delete(b.all, ch)
+		b.mu.Unlock()
+	}
 }
 
 func (b *Broadcaster) Subscribe(uid string) (<-chan Event, func()) {
@@ -57,9 +78,13 @@ func (b *Broadcaster) Subscribe(uid string) (<-chan Event, func()) {
 }
 
 func (b *Broadcaster) Publish(uid string, e Event) {
+	e.UID = uid
 	b.mu.Lock()
-	chans := make([]chan Event, 0, len(b.subs[uid]))
+	chans := make([]chan Event, 0, len(b.subs[uid])+len(b.all))
 	for ch := range b.subs[uid] {
+		chans = append(chans, ch)
+	}
+	for ch := range b.all {
 		chans = append(chans, ch)
 	}
 	b.mu.Unlock()
