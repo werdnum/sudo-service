@@ -1,9 +1,15 @@
 {{template "header" .}}
 <div class="card">
-    <h2 style="font-size: 1.125rem; margin-top: 0;">Pending Approvals</h2>
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+        <h2 style="font-size: 1.125rem; margin: 0;">Pending Approvals</h2>
+        <label style="font-size: 0.875rem; color: var(--text-muted); cursor: pointer; display: flex; align-items: center; gap: 0.5rem;">
+            <input type="checkbox" id="notify-toggle"> Enable Notifications
+        </label>
+    </div>
+    <div id="pending-list">
     {{if .Pending}}
         {{range .Pending}}
-        <div class="request-item">
+        <div class="request-item" id="request-{{.UID}}">
             <div class="request-info">
                 <div style="font-weight: 600;">{{.Spec.Requester}}</div>
                 <div style="font-size: 0.875rem; color: var(--text-muted);">{{.Spec.Reason}}</div>
@@ -16,15 +22,17 @@
         </div>
         {{end}}
     {{else}}
-        <p style="color: var(--text-muted); font-size: 0.875rem;">No pending requests.</p>
+        <p class="empty-msg" style="color: var(--text-muted); font-size: 0.875rem;">No pending requests.</p>
     {{end}}
+    </div>
 </div>
 
 <div class="card">
     <h2 style="font-size: 1.125rem; margin-top: 0;">Recent History</h2>
+    <div id="history-list">
     {{if .History}}
         {{range .History}}
-        <div class="request-item">
+        <div class="request-item" id="request-{{.UID}}">
             <div class="request-info">
                 <div style="font-weight: 600;">{{.Spec.Requester}}</div>
                 <div style="font-size: 0.875rem; color: var(--text-muted);">{{.Spec.Reason}}</div>
@@ -36,7 +44,112 @@
         </div>
         {{end}}
     {{else}}
-        <p style="color: var(--text-muted); font-size: 0.875rem;">No history yet.</p>
+        <p class="empty-msg" style="color: var(--text-muted); font-size: 0.875rem;">No history yet.</p>
     {{end}}
+    </div>
 </div>
+
+<script>
+    const pendingList = document.getElementById('pending-list');
+    const historyList = document.getElementById('history-list');
+    const notifyToggle = document.getElementById('notify-toggle');
+
+    // Notifications setup
+    notifyToggle.checked = localStorage.getItem('sudo-notify') === 'true';
+    notifyToggle.addEventListener('change', (e) => {
+        localStorage.setItem('sudo-notify', e.target.checked);
+        if (e.target.checked && Notification.permission !== 'granted') {
+            Notification.requestPermission();
+        }
+    });
+
+    function createRequestItem(ev) {
+        const div = document.createElement('div');
+        div.className = 'request-item';
+        div.id = `request-${ev.uid}`;
+
+        const isPending = ev.phase === 'Pending';
+
+        div.innerHTML = `
+            <div class="request-info">
+                <div style="font-weight: 600;">${escapeHTML(ev.requester)}</div>
+                <div style="font-size: 0.875rem; color: var(--text-muted);">${escapeHTML(ev.reason)}</div>
+                ${isPending ? `<code style="font-size: 0.75rem; background: #f1f5f9; padding: 0.125rem 0.25rem; border-radius: 0.25rem;">${escapeHTML(ev.command)}</code>` : ''}
+                <div class="timestamp">${ev.createdAt}</div>
+            </div>
+            <div class="request-actions">
+                ${isPending
+                    ? `<a href="/approve?id=${ev.uid}" class="btn btn-primary">Review</a>`
+                    : `<span class="badge badge-${ev.phase.toLowerCase()}">${ev.phase}</span>`
+                }
+            </div>
+        `;
+        return div;
+    }
+
+    function escapeHTML(str) {
+        const div = document.createElement('div');
+        div.textContent = str;
+        return div.innerHTML;
+    }
+
+    function handleEvent(ev) {
+        const existing = document.getElementById(`request-${ev.uid}`);
+        const isTerminal = ['Executed', 'Failed', 'Denied', 'Expired'].includes(ev.phase);
+
+        if (ev.phase === 'Pending') {
+            if (!existing) {
+                // New pending request
+                const item = createRequestItem(ev);
+                const emptyMsg = pendingList.querySelector('.empty-msg');
+                if (emptyMsg) emptyMsg.remove();
+                pendingList.prepend(item);
+
+                if (notifyToggle.checked && Notification.permission === 'granted') {
+                    new Notification('New Sudo Request', {
+                        body: `${ev.requester}: ${ev.command}`,
+                    });
+                }
+            }
+        } else if (isTerminal) {
+            if (existing) {
+                existing.remove();
+            }
+            // Add to history
+            const item = createRequestItem(ev);
+            const emptyMsg = historyList.querySelector('.empty-msg');
+            if (emptyMsg) emptyMsg.remove();
+            historyList.prepend(item);
+
+            // Limit history to 20 items
+            while (historyList.children.length > 20) {
+                historyList.lastElementChild.remove();
+            }
+        } else if (ev.phase === 'Approved') {
+            // If it's in pending, we can remove it or just wait for terminal.
+            // Let's remove it from pending to be snappy.
+            if (existing) existing.remove();
+            if (pendingList.children.length === 0) {
+                pendingList.innerHTML = '<p class="empty-msg" style="color: var(--text-muted); font-size: 0.875rem;">No pending requests.</p>';
+            }
+        }
+
+        // Clean up empty messages
+        if (pendingList.children.length === 0) {
+            pendingList.innerHTML = '<p class="empty-msg" style="color: var(--text-muted); font-size: 0.875rem;">No pending requests.</p>';
+        }
+    }
+
+    const events = new EventSource('/events');
+    events.onmessage = (e) => {
+        try {
+            const ev = JSON.parse(e.data);
+            if (ev.type === 'phase') {
+                handleEvent(ev);
+            }
+        } catch (err) {
+            console.error('failed to parse event', err);
+        }
+    };
+</script>
 {{template "footer" .}}
