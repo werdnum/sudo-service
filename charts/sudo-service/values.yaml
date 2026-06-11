@@ -97,6 +97,13 @@ ingress:
 # Create the ServiceMonitor (requires the Prometheus operator CRDs).
 serviceMonitor:
   enabled: true
+# List of ServiceAccounts (as {name: ..., namespace: ...} objects) allowed to
+# submit SudoRequests. Bound to the sudo-service-requester ClusterRole in the
+# sudo-service namespace.
+requesters:
+  - name: k8s-agent-sa
+    namespace: k8s-agent
+
 # Create the NetworkPolicy locking ingress to the controller Pod.
 networkPolicy:
   enabled: true
