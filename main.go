@@ -219,7 +219,11 @@ func withLogging(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		lrw := &loggingResponseWriter{ResponseWriter: w, status: http.StatusOK}
-		next.ServeHTTP(lrw, r)
+		if _, ok := w.(http.Flusher); ok {
+			next.ServeHTTP(&loggingFlusherResponseWriter{loggingResponseWriter: lrw}, r)
+		} else {
+			next.ServeHTTP(lrw, r)
+		}
 		log.Printf("%s %s %d %s", r.Method, r.URL.Path, lrw.status, time.Since(start))
 	})
 }
@@ -232,6 +236,18 @@ type loggingResponseWriter struct {
 func (l *loggingResponseWriter) WriteHeader(code int) {
 	l.status = code
 	l.ResponseWriter.WriteHeader(code)
+}
+
+func (l *loggingResponseWriter) Unwrap() http.ResponseWriter {
+	return l.ResponseWriter
+}
+
+type loggingFlusherResponseWriter struct {
+	*loggingResponseWriter
+}
+
+func (l *loggingFlusherResponseWriter) Flush() {
+	l.ResponseWriter.(http.Flusher).Flush()
 }
 
 // Convenience: caller wants the manager's client typed.
