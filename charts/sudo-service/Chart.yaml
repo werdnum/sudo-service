@@ -9,7 +9,7 @@ type: application
 # Chart version is bumped on chart changes; appVersion tracks the container
 # image and is rewritten by .github/workflows/build.yaml on each push to main.
 version: 0.1.0
-appVersion: "20260611_140213-81c99b3"
+appVersion: "20260612_011106-fa36162"
 keywords:
   - sudo
   - kubernetes
