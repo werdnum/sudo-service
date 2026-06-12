@@ -42,7 +42,7 @@ const (
 	PendingRequestTTL   = 60 * 60 // 1 hour (seconds)
 	OutputSecretTTL     = 60 * 60 // 1 hour (seconds)
 	ExecutorJobTTL      = 60 * 60 // 1 hour (seconds)
-	DefaultPostApproval = 600     // ttlSecondsAfterApproval default
+	DefaultPostApproval = 3600    // ttlSecondsAfterApproval default (1 hour)
 )
 
 var GroupVersionResource = schema.GroupVersionResource{
@@ -68,7 +68,7 @@ type SudoRequestSpec struct {
 	// prominently so the human notices suspicious image+command pairings.
 	Image string `json:"image,omitempty"`
 
-	// TTLSecondsAfterApproval defaults to 600 seconds.
+	// TTLSecondsAfterApproval defaults to 3600 seconds.
 	TTLSecondsAfterApproval *int32 `json:"ttlSecondsAfterApproval,omitempty"`
 }
 
