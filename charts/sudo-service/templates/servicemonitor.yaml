@@ -9,6 +9,10 @@ spec:
     - port: metrics
       path: /metrics
       interval: 60s
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_label_role]
+          regex: executor
+          action: drop
   namespaceSelector:
     matchNames:
       - {{ .Values.namespace }}

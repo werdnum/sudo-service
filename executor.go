@@ -53,12 +53,9 @@ func (r *SudoRequestReconciler) findOrCreateJob(ctx context.Context, sr *SudoReq
 
 	job = batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: ControllerNamespace,
-			Labels: map[string]string{
-				"app":  "sudo-service",
-				"role": "executor",
-			},
+			Name:            name,
+			Namespace:       ControllerNamespace,
+			Labels:          executorLabels(),
 			OwnerReferences: []metav1.OwnerReference{ownerRef(sr)},
 		},
 		Spec: batchv1.JobSpec{
@@ -66,10 +63,7 @@ func (r *SudoRequestReconciler) findOrCreateJob(ctx context.Context, sr *SudoReq
 			TTLSecondsAfterFinished: &ttl,
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: map[string]string{
-						"app":  "sudo-service",
-						"role": "executor",
-					},
+					Labels: executorLabels(),
 				},
 				Spec: corev1.PodSpec{
 					RestartPolicy:      corev1.RestartPolicyNever,
@@ -115,6 +109,13 @@ func (r *SudoRequestReconciler) findOrCreateJob(ctx context.Context, sr *SudoReq
 		return nil, fmt.Errorf("create job: %w", err)
 	}
 	return &job, nil
+}
+
+func executorLabels() map[string]string {
+	return map[string]string{
+		AppLabelKey:  ExecutorAppLabelValue,
+		RoleLabelKey: ExecutorRoleLabelValue,
+	}
 }
 
 // captureJobOutput reads the pod logs of the executor Job, stuffs them into a Secret
