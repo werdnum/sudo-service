@@ -234,5 +234,15 @@ func (l *loggingResponseWriter) WriteHeader(code int) {
 	l.ResponseWriter.WriteHeader(code)
 }
 
+func (l *loggingResponseWriter) Flush() {
+	if flusher, ok := l.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+func (l *loggingResponseWriter) Unwrap() http.ResponseWriter {
+	return l.ResponseWriter
+}
+
 // Convenience: caller wants the manager's client typed.
 var _ client.Client = (client.Client)(nil)
