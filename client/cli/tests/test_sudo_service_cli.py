@@ -223,6 +223,39 @@ class SudoServiceCLITest(unittest.TestCase):
             ],
         )
 
+    def test_invalid_syntax_is_rejected_before_submitting(self) -> None:
+        result = self.run_cli(
+            "--reason",
+            "read a secret",
+            "--quiet",
+            "--command",
+            "kubectl get secret foo -o jsonpath='{.data.password}",  # unterminated quote
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("local syntax check", result.stderr)
+        # The request must never reach the server.
+        self.assertEqual(FakeSudoServiceHandler.request_bodies, [])
+
+    def test_no_validate_flag_skips_local_syntax_check(self) -> None:
+        FakeSudoServiceHandler.phases = ["Executed"]
+        FakeSudoServiceHandler.output = b"ok\n"
+
+        result = self.run_cli(
+            "--reason",
+            "skip validation",
+            "--quiet",
+            "--no-validate",
+            "--poll-interval",
+            "0.01",
+            "--command",
+            "kubectl get secret foo -o jsonpath='{.data.password}",  # unterminated quote
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(FakeSudoServiceHandler.request_bodies), 1)
+
     def test_denied_request_surfaces_denial_reason(self) -> None:
         FakeSudoServiceHandler.phases = ["Denied"]
         FakeSudoServiceHandler.denial_reason = "too broad"

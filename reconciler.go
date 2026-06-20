@@ -83,6 +83,33 @@ func (r *SudoRequestReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 func (r *SudoRequestReconciler) handleNew(ctx context.Context, sr *SudoRequest) (ctrl.Result, error) {
 	log := ctrl.LoggerFrom(ctx)
 
+	// Reject syntactically-broken commands before they cost the reviewer a
+	// round-trip. The HTTP API rejects these at submission, but a request
+	// created directly against the CRD bypasses that path and only reaches us
+	// here. Fail it now rather than push an unrunnable command to the human.
+	if err := validateCommandSyntax(sr.Spec.Command); err != nil {
+		now := metav1.NewTime(time.Now())
+		sr.Status.Phase = PhaseDenied
+		sr.Status.DeniedBy = "syntax-check"
+		sr.Status.DeniedAt = &now
+		sr.Status.DenialReason = err.Error()
+		if err := r.Status().Update(ctx, sr); err != nil {
+			return ctrl.Result{}, fmt.Errorf("status update Denied for invalid syntax: %w", err)
+		}
+		r.Recorder.Eventf(sr, corev1.EventTypeWarning, "Denied", "Rejected: %v", err)
+		r.Broadcaster.Publish(string(sr.UID), Event{
+			Type:         "phase",
+			Phase:        PhaseDenied,
+			DeniedBy:     "syntax-check",
+			DenialReason: err.Error(),
+			Requester:    sr.Spec.Requester,
+			Reason:       sr.Spec.Reason,
+			Command:      sr.Spec.Command,
+			CreatedAt:    sr.CreationTimestamp.Format("2006-01-02 15:04:05 UTC"),
+		})
+		return ctrl.Result{}, nil
+	}
+
 	if _, ok := getAutoApproveParsedCommand(sr.Spec.Command, imageFor(sr)); ok {
 		now := metav1.NewTime(time.Now())
 		sr.Status.Phase = PhaseApproved

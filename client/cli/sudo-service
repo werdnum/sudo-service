@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import shlex
+import subprocess
 import sys
 import time
 import urllib.error
@@ -76,6 +77,15 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Suppress progress messages on stderr.",
     )
+    parser.add_argument(
+        "--no-validate",
+        action="store_true",
+        help=(
+            "Skip the local 'sh -n' syntax check that runs before the request is "
+            "submitted. The server validates too; this only suppresses the early "
+            "client-side check."
+        ),
+    )
     parser.add_argument("argv", nargs=argparse.REMAINDER, help="Command and arguments after '--'.")
     args = parser.parse_args()
     if args.argv and args.argv[0] == "--":
@@ -99,6 +109,32 @@ def command_from_args(args: argparse.Namespace) -> str:
     if len(args.argv) == 1:
         return args.argv[0]
     return shlex.join(args.argv)
+
+
+def validate_command_syntax(command: str) -> str | None:
+    """Syntax-check the command with `sh -n` before submitting it.
+
+    The executor runs the command as `sh -c <command>`, so a syntax error here
+    means it can never run — better to fail locally than burn the reviewer's
+    approval round-trip on a doomed request. Returns an error string on a
+    syntax error, or None if the command parses (or cannot be checked because
+    no shell is available, in which case the server-side check still applies).
+    """
+    try:
+        result = subprocess.run(
+            ["sh", "-n"],
+            input=command,
+            text=True,
+            capture_output=True,
+            timeout=5,
+        )
+    except (FileNotFoundError, OSError, subprocess.SubprocessError):
+        # No usable shell to check with; defer to the server-side validation.
+        return None
+    if result.returncode == 0:
+        return None
+    detail = (result.stderr or result.stdout).strip()
+    return detail or f"sh -n exited {result.returncode}"
 
 
 def read_token(path: str) -> str:
@@ -193,6 +229,13 @@ def main() -> int:
     args = parse_args()
     command = command_from_args(args)
     base_url = args.url.rstrip("/")
+
+    if not args.no_validate:
+        syntax_error = validate_command_syntax(command)
+        if syntax_error is not None:
+            raise SudoServiceError(
+                f"command failed local syntax check (sh -n); not submitting: {syntax_error}"
+            )
 
     uid = create_request(
         base_url,

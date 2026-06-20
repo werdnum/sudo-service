@@ -63,6 +63,25 @@ values above):
 | `OPENAI_BASE_URL` | `https://api.openai.com/v1` | OpenAI-compatible base URL (no `/chat/completions` suffix). |
 | `OPENAI_MODEL` | `gpt-5.4-mini` | Model id served by the base URL. |
 
+### Command validation
+
+The executor runs each request as `sh -c <command>`, so a command with a shell
+syntax error (an unbalanced quote, a dangling pipe, an unterminated `$(`) can
+never run. The controller parses every command's shell syntax — with a pure-Go
+parser, never executing anything — and rejects broken ones up front rather than
+spending the reviewer's attention on a doomed request:
+
+- Requests submitted via the HTTP API are rejected at submission with `400 Bad
+  Request`.
+- Requests created directly against the CRD (which bypass the API) are caught by
+  the controller and moved straight to `Denied` (with `deniedBy=syntax-check`
+  and the parse error in `denialReason`) **before** any approval push is sent.
+
+The parser uses the bash language variant — a superset of POSIX `sh` — so it only
+rejects input that is broken in every shell; the human reviewer remains the trust
+boundary for everything that parses. The `sudo-service` CLI runs the same check
+locally with `sh -n` before submitting (skippable with `--no-validate`).
+
 ### Render locally
 
 ```sh
