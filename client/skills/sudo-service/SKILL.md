@@ -209,14 +209,16 @@ approve page):
 - `initContainers` — e.g. to stage a tool binary into a shared `emptyDir`. They
   run sequentially before the executor and inherit its locked-down
   securityContext and resource bounds. Only a reviewable subset of fields is
-  permitted — `name`, `image`, **`command` (required)**, `args`, `workingDir`,
-  `env`, `envFrom`, `volumeMounts`, `imagePullPolicy` — and anything else
-  (securityContext, lifecycle hooks, volumeDevices, restartPolicy/sidecars,
-  probes, ports, ...) is rejected, so the approve page can faithfully show what
-  runs. An explicit `command` is required because the image's default entrypoint
-  isn't shown to the reviewer.
+  permitted — `name`, `image`, **`command` (required)**, `args`, `env`,
+  `envFrom`, `volumeMounts` — and anything else (`workingDir`,
+  `imagePullPolicy`, securityContext, lifecycle hooks, volumeDevices,
+  restartPolicy/sidecars, probes, ports, ...) is **rejected**, so the approve
+  page can faithfully show what runs. An explicit `command` is required because
+  the image's default entrypoint isn't shown to the reviewer.
 - `stdin` — fed to the command's stdin. Use this instead of a heredoc to pipe a
   manifest to `kubectl apply -f -`; it travels as literal bytes, no shell quoting.
+  Capped just under 1 MiB (it is carried in a Secret); oversized stdin is rejected
+  at submission.
 - `privileges.clusterAdmin` — defaults `true` in `sudo-service`, where it grants
   the cluster-admin executor SA. **Unavailable in other namespaces** (a
   cross-namespace Job can't be cluster-admin); setting both is rejected.
@@ -287,6 +289,12 @@ filesystem and all capabilities dropped; write to a mounted `emptyDir` (e.g.
   straight to `Denied` (`deniedBy=spec-validation`). Rejections include `hostPath`
   volumes, an init container that sets its own `securityContext`, and
   `privileges.clusterAdmin: true` combined with a non-default `namespace`.
+- For a **non-cluster-admin** executor (any cross-namespace Job, or one with
+  `privileges.clusterAdmin: false`), a referenced Secret may not be of type
+  `kubernetes.io/service-account-token` — that would smuggle in API credentials —
+  and every referenced Secret (volume, `env`, `envFrom`) **must already exist** in
+  the target namespace when the Job is created, else the request fails. So create
+  any credential Secret you mount *before* submitting the request.
 - Commands are syntax-checked before they reach the human. The HTTP API rejects
   a syntactically-broken command with `400`; a CRD-created one is moved straight
   to `Denied` (`deniedBy=syntax-check`, parse error in `denialReason`) before any
