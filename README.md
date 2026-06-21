@@ -82,6 +82,22 @@ rejects input that is broken in every shell; the human reviewer remains the trus
 boundary for everything that parses. The `sudo-service` CLI runs the same check
 locally with `sh -n` before submitting (skippable with `--no-validate`).
 
+### Structured pod fields
+
+Beyond a one-line `command`, a request can describe the executor pod directly —
+`namespace`, `stdin`, `env`/`envFrom`, `volumes`/`volumeMounts`, `initContainers`,
+and a `privileges` block — so the human approves the actual privileged action
+(which Secrets/PVCs it mounts, which namespace it runs in) rather than a `kubectl`
+that creates an arbitrary pod. The fields reuse the upstream Kubernetes shapes but
+are narrowed to a reviewable, non-escalating subset in `validateSpecExtras`
+(no `hostPath`, no requester-set container `securityContext`, ...), with the same
+two-path rejection as the syntax check (`400` on the HTTP path, `Denied` with
+`deniedBy=spec-validation` on the CRD path). `cluster-admin` stays exclusive to
+the controller namespace; cross-namespace Jobs run under the target namespace's
+unprivileged `default` ServiceAccount. See
+[`docs/widening-the-executor.md`](docs/widening-the-executor.md) for the full
+design and the security rationale.
+
 ### Render locally
 
 ```sh

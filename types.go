@@ -43,6 +43,29 @@ const (
 	OutputSecretTTL     = 60 * 60 // 1 hour (seconds)
 	ExecutorJobTTL      = 60 * 60 // 1 hour (seconds)
 	DefaultPostApproval = 3600    // ttlSecondsAfterApproval default (1 hour)
+
+	// ExecutorStartDeadline bounds how long an approved request waits for its
+	// executor pod to start running. A pod stuck in ContainerCreating (an
+	// unsatisfiable mount, an unschedulable pod, an image that won't pull) never
+	// increments the Job's succeeded/failed counts, so without this the request
+	// would sit in Approved forever. Generous, since it includes image-pull time.
+	ExecutorStartDeadline = 600 // seconds (10 minutes)
+
+	// ExecutorJobTTLFloor is the minimum lifetime of a finished executor Job,
+	// independent of the requester's (output-retention) ttlSecondsAfterApproval.
+	// The reconciler polls the Job to capture output; if the requester asks for a
+	// tiny TTL (e.g. 0), kube-controller-manager could delete the finished Job
+	// before we read its pod logs, losing the output and the exit code. The floor
+	// guarantees a capture window. It stays <= the executor VAP's 3600s guard.
+	ExecutorJobTTLFloor = 120 // seconds
+
+	// MaxStdinBytes caps spec.stdin so it always fits in the Secret that carries it.
+	// Kubernetes limits a Secret's data to 1 MiB total; stdin between that and the
+	// (~1.5 MiB) object limit would pass CRD storage and human review, then fail at
+	// Secret creation *after* approval. Rejecting oversized stdin at submission keeps
+	// the failure in front of the reviewer. Headroom is left for the data key name
+	// and any other Secret fields.
+	MaxStdinBytes = 1024*1024 - 4096
 )
 
 var GroupVersionResource = schema.GroupVersionResource{
@@ -70,6 +93,61 @@ type SudoRequestSpec struct {
 
 	// TTLSecondsAfterApproval defaults to 3600 seconds.
 	TTLSecondsAfterApproval *int32 `json:"ttlSecondsAfterApproval,omitempty"`
+
+	// Namespace is the namespace the executor Job runs in. Defaults to the
+	// controller namespace (sudo-service). Targeting another namespace lets the
+	// command mount that namespace's Secrets/PVCs as files (pods cannot mount
+	// cross-namespace) — but such a Job runs under that namespace's default
+	// ServiceAccount with no API privileges, so cluster-admin is only available
+	// in the controller namespace. See validateSpecExtras.
+	Namespace string `json:"namespace,omitempty"`
+
+	// Stdin, if set, is fed to the command's standard input. It removes the need
+	// to smuggle a multi-line payload (a manifest piped to `kubectl apply -f -`,
+	// a heredoc, ...) through the single-string Command field and the layers of
+	// shell quoting that implies. The bytes are materialised into a short-TTL
+	// Secret mounted into the executor pod, never interpolated into the shell.
+	Stdin string `json:"stdin,omitempty"`
+
+	// Env / EnvFrom / Volumes / VolumeMounts / InitContainers are the widened pod
+	// fields. They are stored as raw JSON (runtime.RawExtension) rather than the
+	// concrete corev1 types on purpose: the CRD schema uses
+	// x-kubernetes-preserve-unknown-fields, so a malformed-but-schema-valid object
+	// (e.g. an integer env[].name) written directly to the CRD must NOT make the
+	// controller's typed List decode fail — that would wedge the informer for every
+	// request. Each item is decoded per-object in decodePodExtras; a decode failure
+	// becomes a per-request Denied (via validateSpecExtras), not a cache-wide DoS.
+	//
+	// Env / EnvFrom: extra environment for the executor container (e.g. a secretRef
+	// for credentials). Volumes / VolumeMounts: read Secrets/ConfigMaps/PVCs and
+	// scratch space as files; sources are narrowed to a reviewable allowlist in
+	// validateSpecExtras (hostPath/projected rejected). InitContainers run before
+	// the executor with a controller-stamped securityContext and resource bounds.
+	Env            []runtime.RawExtension `json:"env,omitempty"`
+	EnvFrom        []runtime.RawExtension `json:"envFrom,omitempty"`
+	Volumes        []runtime.RawExtension `json:"volumes,omitempty"`
+	VolumeMounts   []runtime.RawExtension `json:"volumeMounts,omitempty"`
+	InitContainers []runtime.RawExtension `json:"initContainers,omitempty"`
+
+	// Privileges holds the explicit, approval-surfaced capability toggles. Each
+	// flag widens what the executor pod may do; the human reviewer sees them on
+	// the approve page. Only ClusterAdmin is wired up today — privileged, runAsRoot,
+	// hostPath, etc. are the planned extensions.
+	Privileges SudoRequestPrivileges `json:"privileges,omitempty"`
+}
+
+// SudoRequestPrivileges is the set of explicit capability toggles a request may
+// flip. They default to a safe value and are rendered individually on the
+// approve page so the reviewer can see exactly what power is being handed over.
+type SudoRequestPrivileges struct {
+	// ClusterAdmin runs the executor under the cluster-admin-bound executor SA.
+	// It is only available when the Job runs in the controller namespace (that is
+	// where the cluster-admin SA lives), and defaults to true there to preserve
+	// the historical "every request is fully privileged" behaviour. When the Job
+	// targets another namespace it is unavailable (nil/false) and the request runs
+	// under that namespace's unprivileged default SA. nil means "use the default
+	// for the chosen namespace".
+	ClusterAdmin *bool `json:"clusterAdmin,omitempty"`
 }
 
 // SudoRequestStatus is owned by the controller.
@@ -85,6 +163,14 @@ type SudoRequestStatus struct {
 	ExitCode        *int32 `json:"exitCode,omitempty"`
 	OutputSecretRef string `json:"outputSecretRef,omitempty"`
 
+	// StdinSecretName is the controller-minted, unguessable name of the Secret
+	// holding spec.stdin. It is generated randomly (not derived from the request
+	// UID, which the requester learns at create time) and recorded before the
+	// executor Job is created, so a requester who can create Secrets in the target
+	// namespace cannot pre-create it to swap in an unapproved payload. Empty when
+	// the request has no stdin.
+	StdinSecretName string `json:"stdinSecretName,omitempty"`
+
 	// Summary is an optional, AI-generated human-readable review aid for the
 	// command, produced once when the request enters Pending and cached here
 	// (the object is the natural machine-readable cache). Empty when the
@@ -92,12 +178,18 @@ type SudoRequestStatus struct {
 	// the human reviewer reading the command.
 	Summary string `json:"summary,omitempty"`
 
-	// ExecutorJobName is the name of the Job that was (or is being) run for
-	// this request. Recorded as soon as the Job is created so that, if the
-	// Job is GC'd by ttlSecondsAfterFinished before the controller observes
-	// its completion, the next reconcile fails the request instead of
-	// silently recreating the Job and re-running the privileged command.
+	// ExecutorJobName is the controller-minted, unguessable name of the executor
+	// Job. Like StdinSecretName it is a random token (not derived from the request
+	// UID), recorded before the Job is created so a requester who can create Jobs
+	// in the target namespace can't pre-create a predictable sudo-exec-<uid> Job
+	// for the controller to adopt as the (unapproved) workload.
 	ExecutorJobName string `json:"executorJobName,omitempty"`
+
+	// ExecutorJobUID is the UID of the Job the controller created, recorded after
+	// creation. It distinguishes "not created yet" (empty) from "created then GC'd"
+	// (set, but the Job is now gone → fail rather than replay), and lets the
+	// reconciler reject a Job that was deleted and replaced at the same name.
+	ExecutorJobUID string `json:"executorJobUID,omitempty"`
 
 	// PushoverRequestID is the Pushover API's per-request UUID, for audit-trail
 	// correlation with the Pushover dashboard.
@@ -177,6 +269,25 @@ func (in *SudoRequestSpec) DeepCopyInto(out *SudoRequestSpec) {
 	if in.TTLSecondsAfterApproval != nil {
 		v := *in.TTLSecondsAfterApproval
 		out.TTLSecondsAfterApproval = &v
+	}
+	copyRaw := func(in []runtime.RawExtension) []runtime.RawExtension {
+		if in == nil {
+			return nil
+		}
+		out := make([]runtime.RawExtension, len(in))
+		for i := range in {
+			in[i].DeepCopyInto(&out[i])
+		}
+		return out
+	}
+	out.Env = copyRaw(in.Env)
+	out.EnvFrom = copyRaw(in.EnvFrom)
+	out.Volumes = copyRaw(in.Volumes)
+	out.VolumeMounts = copyRaw(in.VolumeMounts)
+	out.InitContainers = copyRaw(in.InitContainers)
+	if in.Privileges.ClusterAdmin != nil {
+		v := *in.Privileges.ClusterAdmin
+		out.Privileges.ClusterAdmin = &v
 	}
 }
 

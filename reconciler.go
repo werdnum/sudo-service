@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/url"
 	"time"
@@ -18,7 +19,14 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
+
+// executorCleanupFinalizer guards deletion of a SudoRequest whose executor Job
+// runs in another namespace. Cross-namespace Jobs carry no ownerRef (cross-
+// namespace GC is not honoured by Kubernetes), so deleting the SudoRequest would
+// not cascade them; the finalizer lets the controller stop the Job first.
+const executorCleanupFinalizer = "sudo.andrewgarrett.dev/executor-cleanup"
 
 // SudoRequestReconciler drives the state machine:
 //
@@ -28,6 +36,11 @@ import (
 //	Approved     -> Failed   (job didn't finish or pod errored)
 type SudoRequestReconciler struct {
 	client.Client
+	// APIReader is an uncached, direct-to-apiserver reader. The manager's cache
+	// (and thus the embedded Client's reads) is scoped to ControllerNamespace, so
+	// reads of executor Jobs/Pods that may live in another namespace
+	// (spec.namespace) must go through this reader, not the cache.
+	APIReader     client.Reader
 	Scheme        *runtime.Scheme
 	Pushover      *PushoverClient
 	Summarizer    *Summarizer // optional; nil when AI summaries are disabled
@@ -61,6 +74,30 @@ func (r *SudoRequestReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
+	}
+
+	// Being deleted: stop a still-running cross-namespace executor Job before
+	// releasing the object, then drop the finalizer. Without this the Job's pod
+	// keeps running with its mounted Secrets/PVCs after the request is gone.
+	if !sr.DeletionTimestamp.IsZero() {
+		if controllerutil.ContainsFinalizer(&sr, executorCleanupFinalizer) {
+			if sr.Status.ExecutorJobName != "" {
+				job, err := r.getExecutorJob(ctx, &sr)
+				if err != nil {
+					return ctrl.Result{}, fmt.Errorf("read executor job during finalize: %w", err)
+				}
+				if job != nil {
+					if err := r.stopJob(ctx, job); err != nil {
+						return ctrl.Result{}, fmt.Errorf("stop executor job during finalize: %w", err)
+					}
+				}
+			}
+			controllerutil.RemoveFinalizer(&sr, executorCleanupFinalizer)
+			if err := r.Update(ctx, &sr); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+		return ctrl.Result{}, nil
 	}
 
 	switch sr.Status.Phase {
@@ -110,7 +147,37 @@ func (r *SudoRequestReconciler) handleNew(ctx context.Context, sr *SudoRequest) 
 		return ctrl.Result{}, nil
 	}
 
-	if _, ok := getAutoApproveParsedCommand(sr.Spec.Command, imageFor(sr)); ok {
+	// Reject a spec whose widened pod fields fall outside the curated allowlist
+	// (a hostPath volume, an init container setting its own securityContext, ...).
+	// As with the syntax check, the HTTP API rejects these at submission; a
+	// CRD-created one only reaches us here, so deny it before the approval push.
+	if err := validateSpecExtras(sr); err != nil {
+		now := metav1.NewTime(time.Now())
+		sr.Status.Phase = PhaseDenied
+		sr.Status.DeniedBy = "spec-validation"
+		sr.Status.DeniedAt = &now
+		sr.Status.DenialReason = err.Error()
+		if err := r.Status().Update(ctx, sr); err != nil {
+			return ctrl.Result{}, fmt.Errorf("status update Denied for invalid spec: %w", err)
+		}
+		r.Recorder.Eventf(sr, corev1.EventTypeWarning, "Denied", "Rejected: %v", err)
+		r.Broadcaster.Publish(string(sr.UID), Event{
+			Type:         "phase",
+			Phase:        PhaseDenied,
+			DeniedBy:     "spec-validation",
+			DenialReason: err.Error(),
+			Requester:    sr.Spec.Requester,
+			Reason:       sr.Spec.Reason,
+			Command:      sr.Spec.Command,
+			CreatedAt:    sr.CreationTimestamp.Format("2006-01-02 15:04:05 UTC"),
+		})
+		return ctrl.Result{}, nil
+	}
+
+	// Auto-approve only reasons about command+image, so requests that use the
+	// widened pod fields or privilege toggles always require a human
+	// (autoApproveTokens enforces that, shared with executorCommand).
+	if _, ok := autoApproveTokens(sr); ok {
 		now := metav1.NewTime(time.Now())
 		sr.Status.Phase = PhaseApproved
 		sr.Status.ApprovedBy = "auto-approve"
@@ -163,8 +230,20 @@ func (r *SudoRequestReconciler) handleNew(ctx context.Context, sr *SudoRequest) 
 	// correctness.)
 	var summary string
 	if r.Summarizer != nil {
+		// Give the AI the ground-truth pod spec to review (not just the curated
+		// summary), but redact literal env values — the summary goes to a
+		// third-party endpoint, so credentials in spec.env must not leave the
+		// cluster. The human push and approve page still show the raw values.
+		aiContext := ""
+		if hasSpecExtras(sr) {
+			if tmpl, err := displayPodTemplate(sr, true); err == nil {
+				aiContext = tmpl
+			} else {
+				aiContext = specExtrasText(sr, true)
+			}
+		}
 		sumCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		s, err := r.Summarizer.Summarize(sumCtx, sr.Spec.Command, imageFor(sr), sr.Spec.Reason)
+		s, err := r.Summarizer.Summarize(sumCtx, sr.Spec.Command, imageFor(sr), sr.Spec.Reason, aiContext)
 		cancel()
 		if err != nil {
 			log.Error(err, "AI command summary failed; continuing without one")
@@ -177,6 +256,11 @@ func (r *SudoRequestReconciler) handleNew(ctx context.Context, sr *SudoRequest) 
 	title := fmt.Sprintf("sudo: %s wants to run %s", sr.Spec.Requester, truncate(sr.Spec.Command, 80))
 	body := fmt.Sprintf("reason: %s\ncommand: %s\nimage: %s",
 		sr.Spec.Reason, sr.Spec.Command, imageFor(sr))
+	// Redact literal env values: the push goes to the external Pushover service.
+	// The OIDC-protected approve page still shows the raw values for review.
+	if extras := specExtrasText(sr, true); extras != "" {
+		body += "\n" + extras
+	}
 	reqID, err := r.Pushover.SendApproval(ctx, title, body, approvalURL)
 	if err != nil {
 		log.Error(err, "Pushover send failed; will retry")
@@ -233,8 +317,60 @@ func (r *SudoRequestReconciler) handlePending(ctx context.Context, sr *SudoReque
 	return ctrl.Result{RequeueAfter: PendingRequestTTL*time.Second - age + time.Second}, nil
 }
 
+// failApproved moves an Approved request to Failed with a reason, emitting the
+// event + broadcast the same way the other terminal transitions do.
+//
+// It first best-effort stops any executor Job sitting at the minted name. That
+// Job may be one we must not leave running: a foreign/pre-created Job, a Job that
+// replaced ours (UID mismatch), our own Job that ended up mounting a foreign
+// stdin Secret, or a stuck pod past its start deadline. None of these have an
+// ownerRef/activeDeadlineSeconds to stop them, so without this they'd keep
+// running (an unapproved or unreviewed workload) after we record Failed.
+func (r *SudoRequestReconciler) failApproved(ctx context.Context, sr *SudoRequest, reason string) (ctrl.Result, error) {
+	if sr.Status.ExecutorJobName != "" {
+		job, err := r.getExecutorJob(ctx, sr)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if job != nil {
+			// Stopping the Job is a precondition for the terminal transition, not
+			// best-effort: once we record Failed there's no further reconcile, so a
+			// transient delete error must requeue rather than leave the (possibly
+			// foreign/unapproved or stuck) workload running.
+			if err := r.stopJob(ctx, job); err != nil {
+				return ctrl.Result{}, fmt.Errorf("stop executor job before failing: %w", err)
+			}
+		}
+	}
+	sr.Status.Phase = PhaseFailed
+	if err := r.Status().Update(ctx, sr); err != nil {
+		return ctrl.Result{}, err
+	}
+	r.Recorder.Eventf(sr, corev1.EventTypeWarning, "Failed", "%s", reason)
+	r.Broadcaster.Publish(string(sr.UID), Event{
+		Type:      "phase",
+		Phase:     PhaseFailed,
+		Requester: sr.Spec.Requester,
+		Reason:    sr.Spec.Reason,
+		Command:   sr.Spec.Command,
+		CreatedAt: sr.CreationTimestamp.Format("2006-01-02 15:04:05 UTC"),
+	})
+	return ctrl.Result{}, nil
+}
+
 func (r *SudoRequestReconciler) handleApproved(ctx context.Context, sr *SudoRequest) (ctrl.Result, error) {
 	log := ctrl.LoggerFrom(ctx)
+
+	// A cross-namespace executor Job carries no ownerRef, so it won't cascade when
+	// the SudoRequest is deleted. Add the cleanup finalizer before creating any
+	// Job (same-namespace Jobs cascade via their ownerRef and don't need it).
+	if executorNamespace(sr) != ControllerNamespace && !controllerutil.ContainsFinalizer(sr, executorCleanupFinalizer) {
+		controllerutil.AddFinalizer(sr, executorCleanupFinalizer)
+		if err := r.Update(ctx, sr); err != nil {
+			return ctrl.Result{}, fmt.Errorf("add executor-cleanup finalizer: %w", err)
+		}
+		return ctrl.Result{Requeue: true}, nil
+	}
 
 	// Replay-safe Job handling:
 	//
@@ -249,14 +385,57 @@ func (r *SudoRequestReconciler) handleApproved(ctx context.Context, sr *SudoRequ
 	// controller-manager already GC'd it), we have to assume it already ran
 	// — fail the request rather than re-create and replay the privileged
 	// command. We have no output to capture in that case.
+	// Mint the unguessable child-resource names BEFORE creating anything (the Job
+	// is named ExecutorJobName, and references StdinSecretName). Persisting them
+	// first makes creation replay-safe and means a requester who can create Jobs/
+	// Secrets in the target namespace can't pre-create predictable sudo-exec-<uid>
+	// / sudo-stdin-<uid> objects for the controller to adopt.
 	if sr.Status.ExecutorJobName == "" {
+		jobSuffix, err := randomToken(8)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("mint executor job name: %w", err)
+		}
+		sr.Status.ExecutorJobName = "sudo-exec-" + jobSuffix
+		if sr.Spec.Stdin != "" {
+			stdinSuffix, err := randomToken(8)
+			if err != nil {
+				return ctrl.Result{}, fmt.Errorf("mint stdin secret name: %w", err)
+			}
+			sr.Status.StdinSecretName = "sudo-stdin-" + stdinSuffix
+		}
+		if err := r.Status().Update(ctx, sr); err != nil {
+			return ctrl.Result{}, fmt.Errorf("record minted resource names: %w", err)
+		}
+		return ctrl.Result{Requeue: true}, nil
+	}
+
+	// Create the Job once (at the minted name) and record its UID. The UID lets
+	// later reconciles tell "not created yet" from "created then GC'd".
+	if sr.Status.ExecutorJobUID == "" {
 		job, err := r.findOrCreateJob(ctx, sr)
 		if err != nil {
+			// A permanent rejection (the apiserver refused the Job spec, RBAC
+			// forbids it, or the target namespace doesn't exist) will never succeed
+			// on retry. Fail the request instead of looping forever in Approved.
+			// Validation catches the known cases up front; this is the backstop for
+			// anything that slips through.
+			if apierrors.IsInvalid(err) || apierrors.IsForbidden(err) || apierrors.IsNotFound(err) ||
+				errors.Is(err, errForeignChildObject) || errors.Is(err, errDisallowedSecret) {
+				return r.failApproved(ctx, sr, fmt.Sprintf("executor Job rejected: %v", err))
+			}
 			return ctrl.Result{}, err
 		}
-		sr.Status.ExecutorJobName = job.Name
+		sr.Status.ExecutorJobUID = string(job.UID)
 		if err := r.Status().Update(ctx, sr); err != nil {
-			return ctrl.Result{}, fmt.Errorf("record executorJobName: %w", err)
+			// Roll back the Job we just created. Otherwise the next reconcile
+			// re-enters with ExecutorJobUID still empty, finds this un-recorded Job,
+			// and (cross-namespace, where we can't authenticate it) fails the request
+			// as "foreign" — a transient status-write error would spuriously fail a
+			// legitimate request. Deleting it gives the retry a clean create.
+			if delErr := r.stopJob(ctx, job); delErr != nil {
+				log.Error(delErr, "failed to roll back executor Job after UID-record failure", "job", job.Name)
+			}
+			return ctrl.Result{}, fmt.Errorf("record executorJobUID: %w", err)
 		}
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
@@ -265,7 +444,19 @@ func (r *SudoRequestReconciler) handleApproved(ctx context.Context, sr *SudoRequ
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+	if job != nil && string(job.UID) != sr.Status.ExecutorJobUID {
+		// A different Job now occupies our name (ours was deleted and replaced).
+		// Don't read its logs/exit code as if it were the approved workload.
+		return r.failApproved(ctx, sr, "executor Job was replaced by a different object; refusing to use it")
+	}
 	if job == nil {
+		// If we already captured the result (the sidecar two-phase below records
+		// outputSecret+exitCode before tearing the Job down), the Job being gone now
+		// is our own teardown, not a lost execution — finalize from the recorded
+		// result instead of failing.
+		if sr.Status.OutputSecretRef != "" && sr.Status.ExitCode != nil {
+			return r.finalizeFromRecordedResult(ctx, sr)
+		}
 		// Job has been GC'd before we observed completion. Treat as Failed
 		// rather than re-creating (which would re-run the privileged command).
 		log.Info("executor Job missing before completion; failing request to prevent replay",
@@ -288,14 +479,50 @@ func (r *SudoRequestReconciler) handleApproved(ctx context.Context, sr *SudoRequ
 		return ctrl.Result{}, nil
 	}
 
-	// If job is still running, requeue.
-	if job.Status.Succeeded == 0 && job.Status.Failed == 0 {
+	// Completion is signalled by the executor container terminating, OR the Job's
+	// counts advancing. We check the executor container directly because the Job's
+	// Succeeded/Failed never advance if a mutating webhook injected a sidecar that
+	// keeps the pod running after the executor exits — which would otherwise hang
+	// the request forever.
+	pod, err := r.getJobPod(ctx, job)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	jobFinished := job.Status.Succeeded > 0 || job.Status.Failed > 0
+	executorDone := pod != nil && executorContainerTerminated(pod)
+	if !jobFinished && !executorDone {
+		// Still running — requeue, but guard against a pod that never starts. An
+		// unsatisfiable mount (a Secret/ConfigMap/PVC that doesn't exist in the
+		// target namespace), an unschedulable pod, an image that won't pull, etc.
+		// leaves the pod in ContainerCreating without ever incrementing the Job's
+		// succeeded/failed counts, so without this the request would sit in Approved
+		// forever.
+		timedOut, reason, err := r.executorStartTimedOut(ctx, job)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if timedOut {
+			// failApproved stops the Job (it has no activeDeadlineSeconds and, cross
+			// namespace, no ownerRef, so leaving it would let the pod start and run
+			// the privileged command after we record Failed).
+			return r.failApproved(ctx, sr, fmt.Sprintf("executor pod did not start within %ds: %s", ExecutorStartDeadline, reason))
+		}
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 
-	// Job finished. Collect output and finalize.
+	// Job finished (or the executor terminated while an injected sidecar keeps the
+	// Job from finishing). Collect output and finalize.
 	outputSecret, exitCode, err := r.captureJobOutput(ctx, sr, job)
 	if err != nil {
+		// In the sidecar scenario the Job never finishes on its own, so it has no
+		// TTL to fall back on and a terminal SudoRequest is never reconciled again.
+		// Going terminal here would orphan the pod (and its mounted Secrets/PVCs)
+		// forever. The sidecar keeps the pod — and its logs — alive, so the capture
+		// is retriable; requeue instead of recording a terminal Failed on what is
+		// almost always a transient apiserver hiccup.
+		if !jobFinished {
+			return ctrl.Result{}, fmt.Errorf("capture output while sidecar holds job %s open: %w", job.Name, err)
+		}
 		log.Error(err, "capture job output")
 		sr.Status.Phase = PhaseFailed
 		if err := r.Status().Update(ctx, sr); err != nil {
@@ -313,8 +540,45 @@ func (r *SudoRequestReconciler) handleApproved(ctx context.Context, sr *SudoRequ
 		return ctrl.Result{}, nil
 	}
 
+	// If the executor finished but the Job hasn't (an injected sidecar is keeping
+	// the pod alive), we must tear the Job down — it would otherwise never finish, so
+	// neither its TTL nor anything else would reclaim the pod. Two phases, so a
+	// transient error neither loses the output nor strands the pod:
+	//
+	//  1. Persist outputSecret+exitCode while still in Approved. The pod (and its
+	//     logs) only live while the Job exists, so deleting first and then failing the
+	//     terminal status write would lose the captured result; recording it first
+	//     keeps it durable (and the missing-Job path above recovers from it).
+	//  2. Once the result is durable, delete the Job and finalize. The delete returns
+	//     its error to retry — the request is still Approved with the result recorded,
+	//     so retrying can't lose output, and we never go terminal with the pod alive.
+	if !jobFinished {
+		if sr.Status.OutputSecretRef == "" || sr.Status.ExitCode == nil {
+			sr.Status.OutputSecretRef = outputSecret
+			sr.Status.ExitCode = &exitCode
+			if err := r.Status().Update(ctx, sr); err != nil {
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{Requeue: true}, nil
+		}
+		if err := r.stopJob(ctx, job); err != nil {
+			return ctrl.Result{}, fmt.Errorf("stop job %s after executor completion (injected sidecar?): %w", job.Name, err)
+		}
+	}
+
 	sr.Status.ExitCode = &exitCode
 	sr.Status.OutputSecretRef = outputSecret
+	return r.finalizeFromRecordedResult(ctx, sr)
+}
+
+// finalizeFromRecordedResult writes the terminal phase from a result already present
+// in status (outputSecret + exitCode). The normal completion path sets those fields
+// then calls this; the missing-Job path calls it to recover when the sidecar two-phase
+// had already persisted the result before the Job was torn down (so the Job being gone
+// is our own teardown, not a lost execution).
+func (r *SudoRequestReconciler) finalizeFromRecordedResult(ctx context.Context, sr *SudoRequest) (ctrl.Result, error) {
+	exitCode := *sr.Status.ExitCode
+	outputSecret := sr.Status.OutputSecretRef
 	if exitCode == 0 {
 		sr.Status.Phase = PhaseExecuted
 	} else {

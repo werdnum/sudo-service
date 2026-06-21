@@ -266,6 +266,43 @@ class SudoServiceCLITest(unittest.TestCase):
         self.assertEqual(result.stdout, "")
         self.assertIn("request uid-1 denied: too broad", result.stderr)
 
+    def test_namespace_stdin_and_no_cluster_admin_flags(self) -> None:
+        FakeSudoServiceHandler.phases = ["Executed"]
+        FakeSudoServiceHandler.output = b"applied\n"
+
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as fh:
+            fh.write("kind: Job\n")
+            stdin_path = fh.name
+
+        result = self.run_cli(
+            "--reason",
+            "apply a manifest without a heredoc",
+            "--quiet",
+            "--poll-interval",
+            "0.01",
+            "--namespace",
+            "seaweedfs",
+            "--stdin-file",
+            stdin_path,
+            "--no-cluster-admin",
+            "--command",
+            "kubectl apply -f -",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            FakeSudoServiceHandler.request_bodies,
+            [
+                {
+                    "reason": "apply a manifest without a heredoc",
+                    "command": "kubectl apply -f -",
+                    "namespace": "seaweedfs",
+                    "stdin": "kind: Job\n",
+                    "privileges": {"clusterAdmin": False},
+                }
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

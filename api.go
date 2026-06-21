@@ -14,6 +14,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -56,6 +57,18 @@ type createRequestBody struct {
 	Command                 string `json:"command"`
 	Image                   string `json:"image,omitempty"`
 	TTLSecondsAfterApproval *int32 `json:"ttlSecondsAfterApproval,omitempty"`
+
+	// Widened pod fields — same shape as the CRD spec, carried as raw JSON so a
+	// malformed item is rejected by validateSpecExtras (400) rather than failing
+	// the body decode in a way that diverges from the CRD path.
+	Namespace      string                 `json:"namespace,omitempty"`
+	Stdin          string                 `json:"stdin,omitempty"`
+	Env            []runtime.RawExtension `json:"env,omitempty"`
+	EnvFrom        []runtime.RawExtension `json:"envFrom,omitempty"`
+	Volumes        []runtime.RawExtension `json:"volumes,omitempty"`
+	VolumeMounts   []runtime.RawExtension `json:"volumeMounts,omitempty"`
+	InitContainers []runtime.RawExtension `json:"initContainers,omitempty"`
+	Privileges     SudoRequestPrivileges  `json:"privileges,omitempty"`
 }
 
 type requestStatusResponse struct {
@@ -65,6 +78,8 @@ type requestStatusResponse struct {
 	Requester       string `json:"requester"`
 	Command         string `json:"command"`
 	Image           string `json:"image"`
+	Namespace       string `json:"namespace"`
+	ClusterAdmin    bool   `json:"clusterAdmin"`
 	ApprovedBy      string `json:"approvedBy,omitempty"`
 	ApprovedAt      string `json:"approvedAt,omitempty"`
 	DeniedBy        string `json:"deniedBy,omitempty"`
@@ -113,7 +128,19 @@ func (a *APIServer) createRequestHandler(w http.ResponseWriter, r *http.Request)
 			Command:                 body.Command,
 			Image:                   body.Image,
 			TTLSecondsAfterApproval: body.TTLSecondsAfterApproval,
+			Namespace:               body.Namespace,
+			Stdin:                   body.Stdin,
+			Env:                     body.Env,
+			EnvFrom:                 body.EnvFrom,
+			Volumes:                 body.Volumes,
+			VolumeMounts:            body.VolumeMounts,
+			InitContainers:          body.InitContainers,
+			Privileges:              body.Privileges,
 		},
+	}
+	if err := validateSpecExtras(sr); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
 	}
 	if err := a.Client.Create(r.Context(), sr); err != nil {
 		http.Error(w, "create: "+err.Error(), http.StatusInternalServerError)
@@ -176,6 +203,8 @@ func (a *APIServer) serveStatus(w http.ResponseWriter, sr *SudoRequest) {
 		Requester:       sr.Spec.Requester,
 		Command:         sr.Spec.Command,
 		Image:           imageFor(sr),
+		Namespace:       executorNamespace(sr),
+		ClusterAdmin:    clusterAdminEnabled(sr),
 		ApprovedBy:      sr.Status.ApprovedBy,
 		DeniedBy:        sr.Status.DeniedBy,
 		DenialReason:    sr.Status.DenialReason,
@@ -335,17 +364,20 @@ func (a *APIServer) indexHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 type approveView struct {
-	UID       string
-	Token     string
-	Requester string
-	Reason    string
-	Command   string
-	Image     string
-	Summary   string
-	CreatedAt string
-	User      string
-	UserEmail string
-	Error     string
+	UID         string
+	Token       string
+	Requester   string
+	Reason      string
+	Command     string
+	Image       string
+	Stdin       string
+	Extras      specExtrasView
+	PodTemplate string
+	Summary     string
+	CreatedAt   string
+	User        string
+	UserEmail   string
+	Error       string
 }
 
 // resultView backs result.html, the styled confirmation page shown after an
@@ -410,6 +442,13 @@ func (a *APIServer) renderApprovePage(w http.ResponseWriter, r *http.Request, cl
 		view.Reason = sr.Spec.Reason
 		view.Command = sr.Spec.Command
 		view.Image = imageFor(sr)
+		view.Stdin = sr.Spec.Stdin
+		view.Extras = newSpecExtrasView(sr, false)
+		// Ground-truth pod spec (raw — the approve page is OIDC-protected). On the
+		// off chance it can't render, the curated rows above still stand.
+		if tmpl, err := displayPodTemplate(sr, false); err == nil {
+			view.PodTemplate = tmpl
+		}
 		view.Summary = sr.Status.Summary
 		view.CreatedAt = sr.CreationTimestamp.UTC().Format("2006-01-02T15:04:05Z")
 	}

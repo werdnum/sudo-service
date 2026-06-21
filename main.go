@@ -136,6 +136,7 @@ func main() {
 
 	reconciler := &SudoRequestReconciler{
 		Client:        mgr.GetClient(),
+		APIReader:     mgr.GetAPIReader(),
 		Scheme:        mgr.GetScheme(),
 		Pushover:      po,
 		Summarizer:    summarizer,
