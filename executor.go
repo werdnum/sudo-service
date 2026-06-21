@@ -166,6 +166,15 @@ func (r *SudoRequestReconciler) findOrCreateJob(ctx context.Context, sr *SudoReq
 	// missing mount until this lands; the kubelet retries, so the brief window is
 	// harmless.
 	if err := r.ensureStdinSecret(ctx, sr, &job); err != nil {
+		// The Job exists but its stdin payload doesn't. Roll the Job back so the
+		// retry gets a clean create: otherwise it stays with no recorded UID, and
+		// the next reconcile (cross-namespace) would see it as foreign and
+		// permanently fail a request that hit only a transient stdin-Secret error.
+		// (A foreign pre-existing Secret yields errForeignChildObject, which is
+		// permanent — the rollback then just cleans up our orphaned Job.)
+		if delErr := r.stopJob(ctx, &job); delErr != nil {
+			return nil, fmt.Errorf("roll back job after stdin secret error (%v): %w", err, delErr)
+		}
 		return nil, err
 	}
 	return &job, nil
