@@ -129,6 +129,14 @@ func (r *SudoRequestReconciler) findOrCreateJob(ctx context.Context, sr *SudoReq
 	// Uncached: the Job may be in spec.namespace, which the cache doesn't watch.
 	err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &job)
 	if err == nil {
+		if job.DeletionTimestamp != nil {
+			// A Job is terminating at our name — almost certainly our own rollback
+			// (a UID-record failure deletes the Job in the background). It isn't gone
+			// yet, but we can't create over it. Treat as transient: requeue and wait
+			// for it to disappear, then create cleanly. (Not errForeignChildObject —
+			// that would permanently fail a legitimate request mid-rollback.)
+			return nil, fmt.Errorf("executor Job %s is terminating; waiting for deletion", job.Name)
+		}
 		if ns != ControllerNamespace {
 			return nil, errForeignChildObject
 		}

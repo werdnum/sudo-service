@@ -121,14 +121,13 @@ func validateSpecExtras(sr *SudoRequest) error {
 			Image:           c.Image,
 			Command:         c.Command,
 			Args:            c.Args,
-			WorkingDir:      c.WorkingDir,
 			Env:             c.Env,
 			EnvFrom:         c.EnvFrom,
 			VolumeMounts:    c.VolumeMounts,
 			ImagePullPolicy: c.ImagePullPolicy,
 		}
 		if !reflect.DeepEqual(c, permitted) {
-			return fmt.Errorf("initContainer %q: only name, image, command, args, workingDir, env, envFrom, volumeMounts and imagePullPolicy are permitted", c.Name)
+			return fmt.Errorf("initContainer %q: only name, image, command, args, env, envFrom, volumeMounts and imagePullPolicy are permitted", c.Name)
 		}
 		// Init containers may not mount the controller-owned stdin volume (the
 		// approve page presents stdin as fed to the executor command, not as a file
@@ -158,6 +157,14 @@ func validateMounts(where string, mounts []corev1.VolumeMount, volNames map[stri
 	for _, m := range mounts {
 		if !volNames[m.Name] {
 			return fmt.Errorf("%s: volumeMount %q references no volume named %q", where, m.MountPath, m.Name)
+		}
+		// Positive allowlist of mount fields the approve page renders. Anything else
+		// — subPathExpr (variable-expanded subpath), mountPropagation,
+		// recursiveReadOnly — would change what's mounted/written without the
+		// reviewer seeing it.
+		permitted := corev1.VolumeMount{Name: m.Name, MountPath: m.MountPath, SubPath: m.SubPath, ReadOnly: m.ReadOnly}
+		if !reflect.DeepEqual(m, permitted) {
+			return fmt.Errorf("%s: volumeMount %q may only set name, mountPath, subPath and readOnly", where, m.MountPath)
 		}
 		if seenPaths[m.MountPath] {
 			return fmt.Errorf("%s: duplicate mountPath %q", where, m.MountPath)

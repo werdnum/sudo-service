@@ -89,6 +89,30 @@ func TestValidateSpecExtrasInitContainerSecurityContext(t *testing.T) {
 	}
 }
 
+func TestValidateSpecExtrasRejectsHiddenFields(t *testing.T) {
+	// workingDir changes what relative commands do but isn't rendered -> rejected.
+	wd := []corev1.Container{{Name: "c", Image: "busybox", Command: []string{"sh"}, WorkingDir: "/x"}}
+	if err := validateSpecExtras(srWith(SudoRequestSpec{InitContainers: rawList(wd...)})); err == nil ||
+		!strings.Contains(err.Error(), "permitted") {
+		t.Errorf("init workingDir: got %v, want allowlist rejection", err)
+	}
+
+	// A mount with subPathExpr / mountPropagation isn't fully rendered -> rejected.
+	prop := corev1.MountPropagationBidirectional
+	for _, m := range []corev1.VolumeMount{
+		{Name: "v", MountPath: "/d", SubPathExpr: "$(POD_NAME)"},
+		{Name: "v", MountPath: "/d", MountPropagation: &prop},
+	} {
+		sr := srWith(SudoRequestSpec{
+			Volumes:      rawList(corev1.Volume{Name: "v", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}),
+			VolumeMounts: rawList(m),
+		})
+		if err := validateSpecExtras(sr); err == nil || !strings.Contains(err.Error(), "may only set") {
+			t.Errorf("hidden mount field: got %v, want rejection", err)
+		}
+	}
+}
+
 func TestValidateSpecExtrasInitContainerRequiresCommand(t *testing.T) {
 	noCmd := []corev1.Container{{Name: "c", Image: "busybox"}}
 	if err := validateSpecExtras(srWith(SudoRequestSpec{InitContainers: rawList(noCmd...)})); err == nil ||

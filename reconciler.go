@@ -288,9 +288,17 @@ func (r *SudoRequestReconciler) handlePending(ctx context.Context, sr *SudoReque
 // running (an unapproved or unreviewed workload) after we record Failed.
 func (r *SudoRequestReconciler) failApproved(ctx context.Context, sr *SudoRequest, reason string) (ctrl.Result, error) {
 	if sr.Status.ExecutorJobName != "" {
-		if job, err := r.getExecutorJob(ctx, sr); err == nil && job != nil {
+		job, err := r.getExecutorJob(ctx, sr)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if job != nil {
+			// Stopping the Job is a precondition for the terminal transition, not
+			// best-effort: once we record Failed there's no further reconcile, so a
+			// transient delete error must requeue rather than leave the (possibly
+			// foreign/unapproved or stuck) workload running.
 			if err := r.stopJob(ctx, job); err != nil {
-				ctrl.LoggerFrom(ctx).Error(err, "failApproved: stop executor job", "job", job.Name)
+				return ctrl.Result{}, fmt.Errorf("stop executor job before failing: %w", err)
 			}
 		}
 	}
