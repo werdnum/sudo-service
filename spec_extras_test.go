@@ -204,6 +204,111 @@ func TestInitContainerCommandSurfacedToReviewer(t *testing.T) {
 	}
 }
 
+func TestValidateSpecExtrasRejectsProjected(t *testing.T) {
+	v := []corev1.Volume{{Name: "p", VolumeSource: corev1.VolumeSource{Projected: &corev1.ProjectedVolumeSource{}}}}
+	err := validateSpecExtras(srWith(SudoRequestSpec{Volumes: v}))
+	if err == nil || !strings.Contains(err.Error(), "projected") {
+		t.Fatalf("projected volume: got %v, want projected rejection", err)
+	}
+	if _, allowed := describeVolumeSource(v[0]); allowed {
+		t.Error("describeVolumeSource marks projected allowed; must be false")
+	}
+}
+
+func TestValidateSpecExtrasMountReferences(t *testing.T) {
+	// Mount referencing an undefined volume is rejected.
+	err := validateSpecExtras(srWith(SudoRequestSpec{
+		VolumeMounts: []corev1.VolumeMount{{Name: "missing", MountPath: "/x"}},
+	}))
+	if err == nil || !strings.Contains(err.Error(), "no volume named") {
+		t.Fatalf("dangling mount: got %v, want rejection", err)
+	}
+
+	// Duplicate mountPath within a container is rejected.
+	err = validateSpecExtras(srWith(SudoRequestSpec{
+		Volumes: []corev1.Volume{
+			{Name: "a", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+			{Name: "b", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+		},
+		VolumeMounts: []corev1.VolumeMount{
+			{Name: "a", MountPath: "/same"},
+			{Name: "b", MountPath: "/same"},
+		},
+	}))
+	if err == nil || !strings.Contains(err.Error(), "duplicate mountPath") {
+		t.Fatalf("duplicate mountPath: got %v, want rejection", err)
+	}
+
+	// A mount referencing a defined volume (and the stdin volume) is accepted.
+	if err := validateSpecExtras(srWith(SudoRequestSpec{
+		Stdin:        "data",
+		Volumes:      []corev1.Volume{{Name: "a", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}},
+		VolumeMounts: []corev1.VolumeMount{{Name: "a", MountPath: "/a"}},
+	})); err != nil {
+		t.Fatalf("valid mounts rejected: %v", err)
+	}
+
+	// An init container referencing an undefined volume is rejected.
+	err = validateSpecExtras(srWith(SudoRequestSpec{
+		InitContainers: []corev1.Container{{
+			Name: "i", Image: "busybox",
+			VolumeMounts: []corev1.VolumeMount{{Name: "nope", MountPath: "/x"}},
+		}},
+	}))
+	if err == nil || !strings.Contains(err.Error(), "no volume named") {
+		t.Fatalf("init dangling mount: got %v, want rejection", err)
+	}
+}
+
+func TestDescribeEnvSurfacesValuesAndSources(t *testing.T) {
+	sr := srWith(SudoRequestSpec{Env: []corev1.EnvVar{
+		{Name: "LITERAL", Value: "KUBECONFIG=/x"},
+		{Name: "FROMSECRET", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+			LocalObjectReference: corev1.LocalObjectReference{Name: "creds"}, Key: "token"}}},
+	}})
+	v := newSpecExtrasView(sr)
+	joined := strings.Join(v.Env, " | ")
+	if !strings.Contains(joined, "LITERAL=KUBECONFIG=/x") {
+		t.Errorf("literal env value not surfaced: %q", joined)
+	}
+	if !strings.Contains(joined, "FROMSECRET <- secret/creds:token") {
+		t.Errorf("secret-ref env source not surfaced: %q", joined)
+	}
+}
+
+func TestContainerToReportPicksFailedInit(t *testing.T) {
+	pod := &corev1.Pod{Status: corev1.PodStatus{
+		InitContainerStatuses: []corev1.ContainerStatus{
+			{Name: "copy", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 3}}},
+		},
+		ContainerStatuses: []corev1.ContainerStatus{
+			{Name: "executor", State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "PodInitializing"}}},
+		},
+	}}
+	c, code, err := containerToReport(pod)
+	if err != nil || c != "copy" || code != 3 {
+		t.Fatalf("got (%q, %d, %v), want (copy, 3, nil)", c, code, err)
+	}
+
+	// Executor terminated -> report it.
+	pod.Status.ContainerStatuses[0].State = corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}}
+	c, code, err = containerToReport(pod)
+	if err != nil || c != "executor" || code != 0 {
+		t.Fatalf("got (%q, %d, %v), want (executor, 0, nil)", c, code, err)
+	}
+}
+
+func TestInitContainerResourcesAreStamped(t *testing.T) {
+	// A requester init container with no resources still ends up bounded.
+	r := &SudoRequestReconciler{}
+	sr := srWith(SudoRequestSpec{InitContainers: []corev1.Container{{Name: "i", Image: "busybox"}}})
+	job := r.buildExecutorJob(sr, ControllerNamespace, jobName(sr))
+	got := job.Spec.Template.Spec.InitContainers[0].Resources
+	if got.Limits.Memory().IsZero() || got.Limits.Cpu().IsZero() {
+		t.Errorf("init container resources not stamped: %+v", got)
+	}
+}
+
 func TestHasSpecExtras(t *testing.T) {
 	if hasSpecExtras(srWith(SudoRequestSpec{Command: "kubectl get nodes"})) {
 		t.Error("plain command reported as having extras")

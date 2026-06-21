@@ -274,6 +274,26 @@ func (r *SudoRequestReconciler) handlePending(ctx context.Context, sr *SudoReque
 	return ctrl.Result{RequeueAfter: PendingRequestTTL*time.Second - age + time.Second}, nil
 }
 
+// failApproved moves an Approved request to Failed with a reason, emitting the
+// event + broadcast the same way the other terminal transitions do. Used when a
+// permanent error means the executor Job can never run.
+func (r *SudoRequestReconciler) failApproved(ctx context.Context, sr *SudoRequest, reason string) (ctrl.Result, error) {
+	sr.Status.Phase = PhaseFailed
+	if err := r.Status().Update(ctx, sr); err != nil {
+		return ctrl.Result{}, err
+	}
+	r.Recorder.Eventf(sr, corev1.EventTypeWarning, "Failed", "%s", reason)
+	r.Broadcaster.Publish(string(sr.UID), Event{
+		Type:      "phase",
+		Phase:     PhaseFailed,
+		Requester: sr.Spec.Requester,
+		Reason:    sr.Spec.Reason,
+		Command:   sr.Spec.Command,
+		CreatedAt: sr.CreationTimestamp.Format("2006-01-02 15:04:05 UTC"),
+	})
+	return ctrl.Result{}, nil
+}
+
 func (r *SudoRequestReconciler) handleApproved(ctx context.Context, sr *SudoRequest) (ctrl.Result, error) {
 	log := ctrl.LoggerFrom(ctx)
 
@@ -293,6 +313,13 @@ func (r *SudoRequestReconciler) handleApproved(ctx context.Context, sr *SudoRequ
 	if sr.Status.ExecutorJobName == "" {
 		job, err := r.findOrCreateJob(ctx, sr)
 		if err != nil {
+			// A permanent rejection (the apiserver refused the Job spec, or RBAC
+			// forbids it) will never succeed on retry. Fail the request instead of
+			// looping forever in Approved. Validation catches the known cases up
+			// front; this is the backstop for anything that slips through.
+			if apierrors.IsInvalid(err) || apierrors.IsForbidden(err) {
+				return r.failApproved(ctx, sr, fmt.Sprintf("executor Job rejected: %v", err))
+			}
 			return ctrl.Result{}, err
 		}
 		sr.Status.ExecutorJobName = job.Name

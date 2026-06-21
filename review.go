@@ -48,26 +48,44 @@ func newSpecExtrasView(sr *SudoRequest) specExtrasView {
 	for _, m := range sr.Spec.VolumeMounts {
 		v.Mounts = append(v.Mounts, describeMount(m))
 	}
-	for _, e := range sr.Spec.Env {
-		v.Env = append(v.Env, e.Name)
-	}
+	v.Env = describeEnv(sr.Spec.Env)
 	v.EnvFrom = describeEnvFrom(sr.Spec.EnvFrom)
 	for _, c := range sr.Spec.InitContainers {
 		icv := initContainerView{
 			Name:    c.Name,
 			Image:   c.Image,
 			Command: strings.TrimSpace(strings.Join(append(append([]string{}, c.Command...), c.Args...), " ")),
+			Env:     describeEnv(c.Env),
 			EnvFrom: describeEnvFrom(c.EnvFrom),
 		}
 		for _, m := range c.VolumeMounts {
 			icv.Mounts = append(icv.Mounts, describeMount(m))
 		}
-		for _, e := range c.Env {
-			icv.Env = append(icv.Env, e.Name)
-		}
 		v.InitContainers = append(v.InitContainers, icv)
 	}
 	return v
+}
+
+// describeEnv renders each env var with its value or source, not just its name —
+// a literal value (KUBECONFIG=..., AWS_*) or a valueFrom secret/configMap key is
+// part of what the human is approving and must be visible.
+func describeEnv(env []corev1.EnvVar) []string {
+	var out []string
+	for _, e := range env {
+		switch {
+		case e.ValueFrom != nil && e.ValueFrom.SecretKeyRef != nil:
+			out = append(out, fmt.Sprintf("%s <- secret/%s:%s", e.Name, e.ValueFrom.SecretKeyRef.Name, e.ValueFrom.SecretKeyRef.Key))
+		case e.ValueFrom != nil && e.ValueFrom.ConfigMapKeyRef != nil:
+			out = append(out, fmt.Sprintf("%s <- configMap/%s:%s", e.Name, e.ValueFrom.ConfigMapKeyRef.Name, e.ValueFrom.ConfigMapKeyRef.Key))
+		case e.ValueFrom != nil && e.ValueFrom.FieldRef != nil:
+			out = append(out, fmt.Sprintf("%s <- field:%s", e.Name, e.ValueFrom.FieldRef.FieldPath))
+		case e.ValueFrom != nil && e.ValueFrom.ResourceFieldRef != nil:
+			out = append(out, fmt.Sprintf("%s <- resource:%s", e.Name, e.ValueFrom.ResourceFieldRef.Resource))
+		default:
+			out = append(out, fmt.Sprintf("%s=%s", e.Name, e.Value))
+		}
+	}
+	return out
 }
 
 func describeMount(m corev1.VolumeMount) string {
@@ -115,7 +133,11 @@ func describeVolumeSource(v corev1.Volume) (desc string, allowed bool) {
 		}
 		return "pvc/" + v.PersistentVolumeClaim.ClaimName + ro, true
 	case v.Projected != nil:
-		return "projected", true
+		// Not permitted: a projected volume can include a serviceAccountToken
+		// source, which would mint an API/cloud-capable token for the pod's
+		// namespace default SA — bypassing the "no privileges" guarantee for
+		// cross-namespace Jobs. Excluded until it has an explicit privilege toggle.
+		return "projected", false
 	case v.HostPath != nil:
 		return "hostPath:" + v.HostPath.Path, false
 	default:

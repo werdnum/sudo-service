@@ -92,8 +92,14 @@ into the pod), and `validateSpecExtras` is the single place that narrows them to
 a reviewable, non-escalating subset:
 
 - Volume sources are limited to `emptyDir`, `secret`, `configMap`,
-  `persistentVolumeClaim`, `projected`. `hostPath` (and anything else) is
-  rejected.
+  `persistentVolumeClaim`. `hostPath` is rejected, and so is `projected` — it can
+  carry a `serviceAccountToken` source that would mint an API/cloud-capable token
+  for the namespace default SA, bypassing the no-privileges guarantee.
+- Env vars (literal values and `valueFrom` secret/configMap refs) and each init
+  container's command and mounts are rendered on the approve page, so nothing
+  executable is hidden from the reviewer.
+- Init containers inherit the executor's locked-down securityContext **and** its
+  bounded CPU/memory, so a requester init container can't run unbounded.
 - Init containers may not set their own `securityContext`; the controller stamps
   the same locked-down profile as the executor container onto them.
 

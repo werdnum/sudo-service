@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"strings"
@@ -166,16 +167,7 @@ func (r *SudoRequestReconciler) buildExecutorJob(sr *SudoRequest, ns, name strin
 		// Copy so the stdin-mount append below never mutates the spec's slice.
 		VolumeMounts:    append([]corev1.VolumeMount(nil), sr.Spec.VolumeMounts...),
 		SecurityContext: hardenedContainerSecurityContext(),
-		Resources: corev1.ResourceRequirements{
-			Requests: corev1.ResourceList{
-				corev1.ResourceCPU:    resource.MustParse("50m"),
-				corev1.ResourceMemory: resource.MustParse("64Mi"),
-			},
-			Limits: corev1.ResourceList{
-				corev1.ResourceCPU:    resource.MustParse("500m"),
-				corev1.ResourceMemory: resource.MustParse("256Mi"),
-			},
-		},
+		Resources:       standardResources(),
 	}
 
 	volumes := append([]corev1.Volume(nil), sr.Spec.Volumes...)
@@ -197,13 +189,16 @@ func (r *SudoRequestReconciler) buildExecutorJob(sr *SudoRequest, ns, name strin
 		})
 	}
 
-	// Stamp the controller-owned hardened securityContext onto requester init
-	// containers (validateSpecExtras forbids them setting their own), so they
-	// inherit the same profile as the executor container.
+	// Stamp the controller-owned hardened securityContext and resource bounds onto
+	// requester init containers (validateSpecExtras forbids them setting their own
+	// securityContext), so they inherit the same locked-down, bounded profile as
+	// the executor container — an init container can't run unbounded in a
+	// namespace without a LimitRange.
 	initContainers := make([]corev1.Container, len(sr.Spec.InitContainers))
 	for i, c := range sr.Spec.InitContainers {
 		c.DeepCopyInto(&initContainers[i])
 		initContainers[i].SecurityContext = hardenedContainerSecurityContext()
+		initContainers[i].Resources = standardResources()
 	}
 
 	job := batchv1.Job{
@@ -260,6 +255,22 @@ func executorCommand(sr *SudoRequest) []string {
 	return []string{"/bin/sh", "-c", sr.Spec.Command}
 }
 
+// standardResources is the fixed request/limit profile applied to the executor
+// container and every requester init container, so requester-supplied (or
+// omitted) resources can't run unbounded.
+func standardResources() corev1.ResourceRequirements {
+	return corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("50m"),
+			corev1.ResourceMemory: resource.MustParse("64Mi"),
+		},
+		Limits: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("500m"),
+			corev1.ResourceMemory: resource.MustParse("256Mi"),
+		},
+	}
+}
+
 func hardenedContainerSecurityContext() *corev1.SecurityContext {
 	allowPrivilegeEscalation := false
 	readOnlyRootFS := true
@@ -297,10 +308,55 @@ func (r *SudoRequestReconciler) ensureStdinSecret(ctx context.Context, sr *SudoR
 		Type: corev1.SecretTypeOpaque,
 		Data: map[string][]byte{"stdin": []byte(sr.Spec.Stdin)},
 	}
-	if err := r.Create(ctx, sec); err != nil && !apierrors.IsAlreadyExists(err) {
+	err := r.Create(ctx, sec)
+	if err == nil {
+		return nil
+	}
+	if !apierrors.IsAlreadyExists(err) {
 		return fmt.Errorf("create stdin secret: %w", err)
 	}
+
+	// The Secret name is derived from the SudoRequest UID, which the requester
+	// learns at create time. In a target namespace where they can create Secrets,
+	// they could pre-create it with different content so the Job mounts an
+	// unapproved payload. So on AlreadyExists, fail closed unless the existing
+	// Secret is the one we own (ownerRef to *this* Job) with the approved bytes.
+	var existing corev1.Secret
+	if err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: job.Namespace, Name: sec.Name}, &existing); err != nil {
+		return fmt.Errorf("get existing stdin secret: %w", err)
+	}
+	ownedByJob := false
+	for _, o := range existing.OwnerReferences {
+		if o.UID == job.UID && o.Kind == "Job" {
+			ownedByJob = true
+			break
+		}
+	}
+	if !ownedByJob || !bytes.Equal(existing.Data["stdin"], sec.Data["stdin"]) {
+		return fmt.Errorf("stdin secret %s/%s already exists and is not the controller-owned approved payload; refusing to mount it", job.Namespace, sec.Name)
+	}
 	return nil
+}
+
+// containerToReport returns the container whose logs and exit code best explain
+// the outcome: the executor if it terminated, otherwise a failed init container
+// (whose nonzero exit prevented the executor from starting). It returns an error
+// if nothing has terminated yet (the caller should requeue).
+func containerToReport(pod *corev1.Pod) (container string, exitCode int32, err error) {
+	for i := range pod.Status.ContainerStatuses {
+		cs := pod.Status.ContainerStatuses[i]
+		if cs.Name == "executor" && cs.State.Terminated != nil {
+			return "executor", cs.State.Terminated.ExitCode, nil
+		}
+	}
+	// Executor never terminated — look for a failed init container.
+	for i := range pod.Status.InitContainerStatuses {
+		cs := pod.Status.InitContainerStatuses[i]
+		if cs.State.Terminated != nil && cs.State.Terminated.ExitCode != 0 {
+			return cs.Name, cs.State.Terminated.ExitCode, nil
+		}
+	}
+	return "", -1, fmt.Errorf("no terminated container to report yet")
 }
 
 func executorLabels() map[string]string {
@@ -328,21 +384,19 @@ func (r *SudoRequestReconciler) captureJobOutput(ctx context.Context, sr *SudoRe
 	}
 	pod := pods.Items[0]
 
-	// Exit code.
-	var exitCode int32 = -1
-	if len(pod.Status.ContainerStatuses) > 0 {
-		cs := pod.Status.ContainerStatuses[0]
-		if cs.State.Terminated != nil {
-			exitCode = cs.State.Terminated.ExitCode
-		} else {
-			return "", -1, fmt.Errorf("container not terminated")
-		}
+	// Pick which container's logs and exit code to report. Normally it's the
+	// executor; but if an init container failed, the executor never starts, so we
+	// report the failing init container's logs/exit code — that's where the
+	// requester's setup step actually broke.
+	logContainer, exitCode, err := containerToReport(&pod)
+	if err != nil {
+		return "", -1, err
 	}
 
 	// Read pod logs via the typed clientset (controller-runtime client doesn't expose subresources).
-	logs, err := getPodLogs(ctx, job.Namespace, pod.Name, "executor")
+	logs, err := getPodLogs(ctx, job.Namespace, pod.Name, logContainer)
 	if err != nil {
-		return "", exitCode, fmt.Errorf("fetch logs: %w", err)
+		return "", exitCode, fmt.Errorf("fetch logs from %s: %w", logContainer, err)
 	}
 
 	// Stuff logs into a Secret with ownerRef to the SudoRequest.

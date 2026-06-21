@@ -76,6 +76,22 @@ func validateSpecExtras(sr *SudoRequest) error {
 		}
 	}
 
+	// Build the set of volume names the pod will actually have: the requester's
+	// volumes plus the controller's stdin volume when stdin is set. A mount that
+	// references a name outside this set (or duplicates a path within a container)
+	// produces a pod the apiserver rejects at Job creation — which, post-approval,
+	// leaves the request stuck in Approved retrying forever. Catch it up front.
+	volNames := map[string]bool{}
+	for _, v := range sr.Spec.Volumes {
+		volNames[v.Name] = true
+	}
+	if sr.Spec.Stdin != "" {
+		volNames[stdinVolumeName] = true
+	}
+	if err := validateMounts("executor container", sr.Spec.VolumeMounts, volNames, sr.Spec.Stdin != ""); err != nil {
+		return err
+	}
+
 	for _, c := range sr.Spec.InitContainers {
 		if c.Name == "" || c.Image == "" {
 			return fmt.Errorf("initContainer must set both name and image")
@@ -86,8 +102,34 @@ func validateSpecExtras(sr *SudoRequest) error {
 		if c.SecurityContext != nil {
 			return fmt.Errorf("initContainer %q: securityContext is set by the controller and may not be specified", c.Name)
 		}
+		// Init containers don't get the stdin mount, so the path isn't reserved
+		// for them, but they still may only reference defined volumes.
+		if err := validateMounts(fmt.Sprintf("initContainer %q", c.Name), c.VolumeMounts, volNames, false); err != nil {
+			return err
+		}
 	}
 
+	return nil
+}
+
+// validateMounts checks that every mount references a defined volume and that no
+// two mounts in the same container share a mountPath. hasStdin marks the
+// controller's stdin volume/path as already taken so a requester mount can't
+// collide with it.
+func validateMounts(where string, mounts []corev1.VolumeMount, volNames map[string]bool, hasStdin bool) error {
+	seenPaths := map[string]bool{}
+	if hasStdin {
+		seenPaths[stdinMountDir] = true
+	}
+	for _, m := range mounts {
+		if !volNames[m.Name] {
+			return fmt.Errorf("%s: volumeMount %q references no volume named %q", where, m.MountPath, m.Name)
+		}
+		if seenPaths[m.MountPath] {
+			return fmt.Errorf("%s: duplicate mountPath %q", where, m.MountPath)
+		}
+		seenPaths[m.MountPath] = true
+	}
 	return nil
 }
 
@@ -103,8 +145,11 @@ func validateVolumeSource(v corev1.Volume) error {
 	if v.HostPath != nil {
 		return fmt.Errorf("volume %q: hostPath is not permitted (it would require an explicit privilege toggle, which does not exist yet)", v.Name)
 	}
+	if v.Projected != nil {
+		return fmt.Errorf("volume %q: projected volumes are not permitted (a serviceAccountToken source could mint an API/cloud token for the namespace default ServiceAccount, bypassing the no-privileges guarantee)", v.Name)
+	}
 	if _, allowed := describeVolumeSource(v); !allowed {
-		return fmt.Errorf("volume %q: only emptyDir, secret, configMap, persistentVolumeClaim and projected sources are permitted", v.Name)
+		return fmt.Errorf("volume %q: only emptyDir, secret, configMap and persistentVolumeClaim sources are permitted", v.Name)
 	}
 	return nil
 }

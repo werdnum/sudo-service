@@ -203,7 +203,8 @@ approve page):
   `default` ServiceAccount with **no cluster-admin** — which is exactly right for
   a "mount these files and run a script" task that doesn't call the API.
 - `volumes` / `volumeMounts` — sources limited to `emptyDir`, `secret`,
-  `configMap`, `persistentVolumeClaim`, `projected`. `hostPath` is rejected.
+  `configMap`, `persistentVolumeClaim`. `hostPath` and `projected` (which can
+  carry a serviceAccountToken) are rejected.
 - `env` / `envFrom` — e.g. a `secretRef` for credentials.
 - `initContainers` — e.g. to stage a tool binary into a shared `emptyDir`. They
   may **not** set their own `securityContext` (the controller locks it down).
