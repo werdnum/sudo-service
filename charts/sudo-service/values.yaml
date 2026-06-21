@@ -17,7 +17,7 @@ namespace: sudo-service
 image:
   repository: ghcr.io/werdnum/sudo-service
   # Either a digest (preferred, set by CI) or a tag. Digest wins if both set.
-  digest: "sha256:cb69111cc01fc7ad83c71a6c19e61c29021798f4933858a49acab02c5aa1b9bb"
+  digest: "sha256:a9def2b14b5c9cbcf5c1f6d8902063514713b4e117cb499750c19ee5a2ec04cb"
   tag: ""
   pullPolicy: IfNotPresent
 # imagePullSecrets are mirrored into the namespace out-of-band (e.g. by the
