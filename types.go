@@ -58,6 +58,14 @@ const (
 	// before we read its pod logs, losing the output and the exit code. The floor
 	// guarantees a capture window. It stays <= the executor VAP's 3600s guard.
 	ExecutorJobTTLFloor = 120 // seconds
+
+	// MaxStdinBytes caps spec.stdin so it always fits in the Secret that carries it.
+	// Kubernetes limits a Secret's data to 1 MiB total; stdin between that and the
+	// (~1.5 MiB) object limit would pass CRD storage and human review, then fail at
+	// Secret creation *after* approval. Rejecting oversized stdin at submission keeps
+	// the failure in front of the reviewer. Headroom is left for the data key name
+	// and any other Secret fields.
+	MaxStdinBytes = 1024*1024 - 4096
 )
 
 var GroupVersionResource = schema.GroupVersionResource{

@@ -56,6 +56,12 @@ func validateSpecExtras(sr *SudoRequest) error {
 		}
 	}
 
+	// Reject oversized stdin at submission rather than after approval — it is
+	// materialised into a Secret, which Kubernetes caps at 1 MiB.
+	if len(sr.Spec.Stdin) > MaxStdinBytes {
+		return fmt.Errorf("stdin is %d bytes; the limit is %d (it is stored in a Secret, which Kubernetes caps at 1 MiB)", len(sr.Spec.Stdin), MaxStdinBytes)
+	}
+
 	// Decode the raw-JSON pod fields into concrete types. A malformed item is a
 	// per-request validation error here, not a controller-wide decode failure.
 	extras, err := decodePodExtras(sr)

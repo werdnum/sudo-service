@@ -160,7 +160,18 @@ func (r *SudoRequestReconciler) rejectServiceAccountTokenSecrets(ctx context.Con
 		var sec corev1.Secret
 		if err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &sec); err != nil {
 			if apierrors.IsNotFound(err) {
-				continue
+				// Reject a missing reference rather than skip it: a non-privileged
+				// executor must not reference a name that doesn't exist yet, because a
+				// requester who can create Secrets in the target namespace could create a
+				// service-account-token Secret at that name after this check but before
+				// the kubelet mounts it, smuggling in API credentials. Requiring every
+				// referenced Secret to exist (and be non-SA-token) now reduces the
+				// residual to the same delete-and-recreate race as the accepted
+				// stdin-swap limitation, which is bounded by the Secret type being
+				// immutable. (A genuinely optional/missing secret ref is unsupported for
+				// non-cluster-admin executors; the mount-only use case always has the
+				// Secret present.)
+				return fmt.Errorf("%w: %q does not exist (a non-privileged executor requires every referenced secret to exist and not be a service-account-token)", errDisallowedSecret, name)
 			}
 			return err
 		}
@@ -332,6 +343,10 @@ func buildExecutorJob(sr *SudoRequest, ns, name string, extras *podExtras) batch
 					SecurityContext: &corev1.PodSecurityContext{
 						RunAsNonRoot: &runAsNonRoot,
 						RunAsUser:    &runAsUser,
+						// Required (together with the container hardening below) for the
+						// pod to be admitted into a namespace enforcing the PodSecurity
+						// `restricted` profile, which a cross-namespace target may run.
+						SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 					},
 					InitContainers: initContainers,
 					Containers:     []corev1.Container{executor},

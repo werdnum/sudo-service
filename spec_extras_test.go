@@ -674,8 +674,20 @@ func TestRejectServiceAccountTokenSecrets(t *testing.T) {
 		t.Errorf("sa-token init env: want errDisallowedSecret, got %v", err)
 	}
 
-	// Dangling reference: not rejected here (mount-time/start deadline handles it).
-	if err := r.rejectServiceAccountTokenSecrets(ctx, "team-a", secVol("missing")); err != nil {
-		t.Errorf("dangling secret: unexpected error %v", err)
+	// Missing reference: rejected, so a requester can't reference an absent name and
+	// create an SA-token Secret there before the kubelet mounts it.
+	if err := r.rejectServiceAccountTokenSecrets(ctx, "team-a", secVol("missing")); !errors.Is(err, errDisallowedSecret) {
+		t.Errorf("missing secret: want errDisallowedSecret, got %v", err)
+	}
+}
+
+func TestValidateSpecExtrasStdinSizeCap(t *testing.T) {
+	ok := srWith(SudoRequestSpec{Stdin: strings.Repeat("x", MaxStdinBytes)})
+	if err := validateSpecExtras(ok); err != nil {
+		t.Errorf("stdin at limit rejected: %v", err)
+	}
+	tooBig := srWith(SudoRequestSpec{Stdin: strings.Repeat("x", MaxStdinBytes+1)})
+	if err := validateSpecExtras(tooBig); err == nil || !strings.Contains(err.Error(), "stdin is") {
+		t.Errorf("oversized stdin: got %v, want size rejection", err)
 	}
 }
