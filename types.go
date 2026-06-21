@@ -44,6 +44,14 @@ const (
 	OutputSecretTTL     = 60 * 60 // 1 hour (seconds)
 	ExecutorJobTTL      = 60 * 60 // 1 hour (seconds)
 	DefaultPostApproval = 3600    // ttlSecondsAfterApproval default (1 hour)
+
+	// ExecutorJobTTLFloor is the minimum lifetime of a finished executor Job,
+	// independent of the requester's (output-retention) ttlSecondsAfterApproval.
+	// The reconciler polls the Job to capture output; if the requester asks for a
+	// tiny TTL (e.g. 0), kube-controller-manager could delete the finished Job
+	// before we read its pod logs, losing the output and the exit code. The floor
+	// guarantees a capture window. It stays <= the executor VAP's 3600s guard.
+	ExecutorJobTTLFloor = 120 // seconds
 )
 
 var GroupVersionResource = schema.GroupVersionResource{

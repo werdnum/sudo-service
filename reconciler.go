@@ -28,6 +28,11 @@ import (
 //	Approved     -> Failed   (job didn't finish or pod errored)
 type SudoRequestReconciler struct {
 	client.Client
+	// APIReader is an uncached, direct-to-apiserver reader. The manager's cache
+	// (and thus the embedded Client's reads) is scoped to ControllerNamespace, so
+	// reads of executor Jobs/Pods that may live in another namespace
+	// (spec.namespace) must go through this reader, not the cache.
+	APIReader     client.Reader
 	Scheme        *runtime.Scheme
 	Pushover      *PushoverClient
 	Summarizer    *Summarizer // optional; nil when AI summaries are disabled
@@ -138,8 +143,9 @@ func (r *SudoRequestReconciler) handleNew(ctx context.Context, sr *SudoRequest) 
 	}
 
 	// Auto-approve only reasons about command+image, so requests that use the
-	// widened pod fields or privilege toggles always require a human.
-	if _, ok := getAutoApproveParsedCommand(sr.Spec.Command, imageFor(sr)); ok && !hasSpecExtras(sr) {
+	// widened pod fields or privilege toggles always require a human
+	// (autoApproveTokens enforces that, shared with executorCommand).
+	if _, ok := autoApproveTokens(sr); ok {
 		now := metav1.NewTime(time.Now())
 		sr.Status.Phase = PhaseApproved
 		sr.Status.ApprovedBy = "auto-approve"
@@ -190,10 +196,13 @@ func (r *SudoRequestReconciler) handleNew(ctx context.Context, sr *SudoRequest) 
 	// summary, and a short timeout bounds it. (On a push retry the summary is
 	// regenerated; that wasted call on the rare error path is worth the
 	// correctness.)
+	// Derived once and shared by the summarizer and the push body below.
+	extras := specExtrasText(sr)
+
 	var summary string
 	if r.Summarizer != nil {
 		sumCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		s, err := r.Summarizer.Summarize(sumCtx, sr.Spec.Command, imageFor(sr), sr.Spec.Reason, specExtrasText(sr))
+		s, err := r.Summarizer.Summarize(sumCtx, sr.Spec.Command, imageFor(sr), sr.Spec.Reason, extras)
 		cancel()
 		if err != nil {
 			log.Error(err, "AI command summary failed; continuing without one")
@@ -206,7 +215,7 @@ func (r *SudoRequestReconciler) handleNew(ctx context.Context, sr *SudoRequest) 
 	title := fmt.Sprintf("sudo: %s wants to run %s", sr.Spec.Requester, truncate(sr.Spec.Command, 80))
 	body := fmt.Sprintf("reason: %s\ncommand: %s\nimage: %s",
 		sr.Spec.Reason, sr.Spec.Command, imageFor(sr))
-	if extras := specExtrasText(sr); extras != "" {
+	if extras != "" {
 		body += "\n" + extras
 	}
 	reqID, err := r.Pushover.SendApproval(ctx, title, body, approvalURL)

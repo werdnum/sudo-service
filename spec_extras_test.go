@@ -137,6 +137,73 @@ func TestExecutorCommandExtrasBypassAutoApprove(t *testing.T) {
 	}
 }
 
+func TestValidateSpecExtrasReservedStdinMount(t *testing.T) {
+	// A requester volume reusing the reserved stdin name is rejected.
+	v := []corev1.Volume{{Name: stdinVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}}
+	if err := validateSpecExtras(srWith(SudoRequestSpec{Volumes: v})); err == nil {
+		t.Error("reserved stdin volume name: got nil, want rejection")
+	}
+	// A mount reusing the reserved name or path is rejected.
+	if err := validateSpecExtras(srWith(SudoRequestSpec{VolumeMounts: []corev1.VolumeMount{{Name: stdinVolumeName, MountPath: "/x"}}})); err == nil {
+		t.Error("reserved stdin mount name: got nil, want rejection")
+	}
+	if err := validateSpecExtras(srWith(SudoRequestSpec{VolumeMounts: []corev1.VolumeMount{{Name: "ok", MountPath: stdinMountDir}}})); err == nil {
+		t.Error("reserved stdin mount path: got nil, want rejection")
+	}
+}
+
+func TestDescribeVolumeSourceMatchesValidation(t *testing.T) {
+	// describeVolumeSource is the single allowlist source of truth: anything it
+	// marks allowed must pass validateVolumeSource and vice versa.
+	cases := []struct {
+		v       corev1.Volume
+		allowed bool
+	}{
+		{corev1.Volume{Name: "a", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "s"}}}, true},
+		{corev1.Volume{Name: "b", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/"}}}, false},
+		{corev1.Volume{Name: "c", VolumeSource: corev1.VolumeSource{CSI: &corev1.CSIVolumeSource{Driver: "x"}}}, false},
+	}
+	for _, tc := range cases {
+		_, allowed := describeVolumeSource(tc.v)
+		if allowed != tc.allowed {
+			t.Errorf("describeVolumeSource(%q) allowed=%v, want %v", tc.v.Name, allowed, tc.allowed)
+		}
+		err := validateVolumeSource(tc.v)
+		if tc.allowed && err != nil {
+			t.Errorf("validateVolumeSource(%q) = %v, want nil", tc.v.Name, err)
+		}
+		if !tc.allowed && err == nil {
+			t.Errorf("validateVolumeSource(%q) = nil, want error", tc.v.Name)
+		}
+	}
+}
+
+func TestInitContainerCommandSurfacedToReviewer(t *testing.T) {
+	sr := srWith(SudoRequestSpec{
+		InitContainers: []corev1.Container{{
+			Name:         "copy",
+			Image:        "rclone/rclone",
+			Command:      []string{"/bin/sh", "-c", "cp x /tools/y"},
+			VolumeMounts: []corev1.VolumeMount{{Name: "tools", MountPath: "/tools"}},
+		}},
+	})
+	v := newSpecExtrasView(sr)
+	if len(v.InitContainers) != 1 {
+		t.Fatalf("expected 1 init container view, got %d", len(v.InitContainers))
+	}
+	ic := v.InitContainers[0]
+	if ic.Command != "/bin/sh -c cp x /tools/y" {
+		t.Errorf("init container command not surfaced: %q", ic.Command)
+	}
+	if len(ic.Mounts) != 1 {
+		t.Errorf("init container mounts not surfaced: %v", ic.Mounts)
+	}
+	// And the plain-text rendering (push + summarizer) includes the command.
+	if txt := specExtrasText(sr); !strings.Contains(txt, "cp x /tools/y") {
+		t.Errorf("specExtrasText omits init container command: %q", txt)
+	}
+}
+
 func TestHasSpecExtras(t *testing.T) {
 	if hasSpecExtras(srWith(SudoRequestSpec{Command: "kubectl get nodes"})) {
 		t.Error("plain command reported as having extras")

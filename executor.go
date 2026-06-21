@@ -18,6 +18,12 @@ import (
 // executor pod. The command's stdin is redirected from <dir>/stdin.
 const stdinMountDir = "/var/run/sudo-service"
 
+// stdinVolumeName is the controller-owned volume/mount name for the stdin
+// payload. It is reserved: validateSpecExtras rejects a request that reuses the
+// name or mounts at stdinMountDir, so the append in buildExecutorJob can't
+// collide with a requester-supplied volume.
+const stdinVolumeName = "sudo-service-stdin"
+
 // executorNamespace is the namespace the executor Job runs in: the requested
 // one, or the controller namespace by default. Targeting another namespace is
 // what lets the command mount that namespace's Secrets/PVCs as files.
@@ -57,6 +63,19 @@ func executorServiceAccount(sr *SudoRequest) (name string, automount *bool) {
 	return "default", &no
 }
 
+// autoApproveTokens returns the parsed auto-approve argv for the request, or
+// (nil, false) if it is not auto-approvable. This is the single source of truth
+// for that decision: both the reconciler's auto-approve gate and executorCommand's
+// argv selection go through it, so they can't drift. A request that uses any
+// widened pod field or privilege toggle is never auto-approvable — the allowlist
+// only reasons about command+image.
+func autoApproveTokens(sr *SudoRequest) ([]string, bool) {
+	if hasSpecExtras(sr) {
+		return nil, false
+	}
+	return getAutoApproveParsedCommand(sr.Spec.Command, imageFor(sr))
+}
+
 // hasSpecExtras reports whether the request uses any of the widened pod fields
 // or privilege toggles. Such requests always need a human: they are excluded
 // from the auto-approve allowlist, which only reasons about command+image.
@@ -77,7 +96,8 @@ func hasSpecExtras(sr *SudoRequest) bool {
 // the privileged command.
 func (r *SudoRequestReconciler) getExecutorJob(ctx context.Context, sr *SudoRequest) (*batchv1.Job, error) {
 	var job batchv1.Job
-	err := r.Get(ctx, client.ObjectKey{Namespace: executorNamespace(sr), Name: sr.Status.ExecutorJobName}, &job)
+	// Uncached: the Job may be in spec.namespace, which the cache doesn't watch.
+	err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: executorNamespace(sr), Name: sr.Status.ExecutorJobName}, &job)
 	if apierrors.IsNotFound(err) {
 		return nil, nil
 	}
@@ -93,7 +113,8 @@ func (r *SudoRequestReconciler) findOrCreateJob(ctx context.Context, sr *SudoReq
 	ns := executorNamespace(sr)
 	name := jobName(sr)
 	var job batchv1.Job
-	err := r.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &job)
+	// Uncached: the Job may be in spec.namespace, which the cache doesn't watch.
+	err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &job)
 	if err == nil {
 		// On requeue the Job already exists; make sure its stdin payload does too
 		// (it is owned by the Job, so this is a no-op once both are present).
@@ -125,7 +146,13 @@ func (r *SudoRequestReconciler) findOrCreateJob(ctx context.Context, sr *SudoReq
 // defaults. validateSpecExtras has already vetted everything spliced in here.
 func (r *SudoRequestReconciler) buildExecutorJob(sr *SudoRequest, ns, name string) batchv1.Job {
 	one := int32(0)
-	ttl := ttlSecondsAfterApproval(sr)
+	// Output retention is the requester's ttlSecondsAfterApproval, but the Job
+	// itself must outlive its completion long enough for the reconciler to capture
+	// the pod logs — hence the floor. (See ExecutorJobTTLFloor.)
+	jobTTL := ttlSecondsAfterApproval(sr)
+	if jobTTL < int32(ExecutorJobTTLFloor) {
+		jobTTL = int32(ExecutorJobTTLFloor)
+	}
 	runAsNonRoot := true
 	runAsUser := int64(1000)
 	saName, automount := executorServiceAccount(sr)
@@ -154,13 +181,13 @@ func (r *SudoRequestReconciler) buildExecutorJob(sr *SudoRequest, ns, name strin
 	volumes := append([]corev1.Volume(nil), sr.Spec.Volumes...)
 	if sr.Spec.Stdin != "" {
 		executor.VolumeMounts = append(executor.VolumeMounts, corev1.VolumeMount{
-			Name:      "sudo-service-stdin",
+			Name:      stdinVolumeName,
 			MountPath: stdinMountDir,
 			ReadOnly:  true,
 		})
 		mode := int32(0o444)
 		volumes = append(volumes, corev1.Volume{
-			Name: "sudo-service-stdin",
+			Name: stdinVolumeName,
 			VolumeSource: corev1.VolumeSource{
 				Secret: &corev1.SecretVolumeSource{
 					SecretName:  stdinSecretName(sr),
@@ -187,7 +214,7 @@ func (r *SudoRequestReconciler) buildExecutorJob(sr *SudoRequest, ns, name strin
 		},
 		Spec: batchv1.JobSpec{
 			BackoffLimit:            &one,
-			TTLSecondsAfterFinished: &ttl,
+			TTLSecondsAfterFinished: &jobTTL,
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: executorLabels(),
@@ -224,10 +251,8 @@ func (r *SudoRequestReconciler) buildExecutorJob(sr *SudoRequest, ns, name strin
 // script text, so there is no quoting to get wrong — and an outer shell
 // redirects fd 0 from the mounted payload before exec'ing it.
 func executorCommand(sr *SudoRequest) []string {
-	if !hasSpecExtras(sr) {
-		if tokens, ok := getAutoApproveParsedCommand(sr.Spec.Command, imageFor(sr)); ok {
-			return tokens
-		}
+	if tokens, ok := autoApproveTokens(sr); ok {
+		return tokens
 	}
 	if sr.Spec.Stdin != "" {
 		return []string{"/bin/sh", "-c", `exec /bin/sh -c "$1" < ` + stdinMountDir + "/stdin", "sudo-service", sr.Spec.Command}
@@ -289,9 +314,10 @@ func executorLabels() map[string]string {
 // owned by the SudoRequest, and returns the Secret name + exit code.
 func (r *SudoRequestReconciler) captureJobOutput(ctx context.Context, sr *SudoRequest, job *batchv1.Job) (string, int32, error) {
 	// Find the pod owned by the job (in the executor namespace, which may differ
-	// from the controller namespace for cross-namespace requests).
+	// from the controller namespace for cross-namespace requests). Uncached: the
+	// cache doesn't watch spec.namespace.
 	var pods corev1.PodList
-	if err := r.List(ctx, &pods,
+	if err := r.APIReader.List(ctx, &pods,
 		client.InNamespace(job.Namespace),
 		client.MatchingLabels{"job-name": job.Name},
 	); err != nil {
@@ -345,43 +371,26 @@ func (r *SudoRequestReconciler) captureJobOutput(ctx context.Context, sr *SudoRe
 	return secretName, exitCode, nil
 }
 
-func jobName(sr *SudoRequest) string {
-	// SudoRequest name is generateName-derived. Job name must be DNS-1123: lowercase, <=63 chars.
-	// Use a stable prefix + UID-suffix for determinism.
+// resourceName builds a deterministic DNS-1123 name (lowercase, <=63 chars) for a
+// per-request child resource: a stable prefix plus a 12-char slice of the
+// SudoRequest UID. jobName, stdinSecretName and outputSecretName must all agree
+// on this scheme so the Job and the Secrets it references derive the same suffix
+// from the same UID — hence the single helper.
+func resourceName(sr *SudoRequest, prefix string) string {
 	uid := strings.ReplaceAll(string(sr.UID), "-", "")
 	if len(uid) > 12 {
 		uid = uid[:12]
 	}
-	n := fmt.Sprintf("sudo-exec-%s", uid)
+	n := prefix + uid
 	if len(n) > 63 {
 		n = n[:63]
 	}
 	return n
 }
 
-func stdinSecretName(sr *SudoRequest) string {
-	uid := strings.ReplaceAll(string(sr.UID), "-", "")
-	if len(uid) > 12 {
-		uid = uid[:12]
-	}
-	n := fmt.Sprintf("sudo-stdin-%s", uid)
-	if len(n) > 63 {
-		n = n[:63]
-	}
-	return n
-}
-
-func outputSecretName(sr *SudoRequest) string {
-	uid := strings.ReplaceAll(string(sr.UID), "-", "")
-	if len(uid) > 12 {
-		uid = uid[:12]
-	}
-	n := fmt.Sprintf("sudo-out-%s", uid)
-	if len(n) > 63 {
-		n = n[:63]
-	}
-	return n
-}
+func jobName(sr *SudoRequest) string          { return resourceName(sr, "sudo-exec-") }
+func stdinSecretName(sr *SudoRequest) string  { return resourceName(sr, "sudo-stdin-") }
+func outputSecretName(sr *SudoRequest) string { return resourceName(sr, "sudo-out-") }
 
 // ttlSecondsAfterApproval returns the per-request TTL (capped at ExecutorJobTTL
 // to keep us under the executor VAP's <= 3600 guard) or DefaultPostApproval if

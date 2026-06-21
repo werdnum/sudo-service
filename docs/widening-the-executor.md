@@ -52,21 +52,38 @@ historical "every request is fully privileged" behaviour; it is unavailable
 a foreign-namespace mount is consciously out of scope — decompose it or fall back
 to a job-that-makes-a-job.
 
-### The executor VAP is deliberately unchanged
+### The executor VAP still scopes to the controller namespace
 
-`validatingadmissionpolicy-executor.yaml` still gates only **same-namespace,
-cluster-admin** executor Jobs: "only the controller SA may create a Job that runs
-as `sudo-service-executor-sa`", plus structural guards (ownerRef, `backoffLimit:
-0`, TTL, `restartPolicy: Never`, no host namespaces, not privileged, not UID 0).
-Cross-namespace mount-only Jobs run under a `default` SA and are **not** an
-escalation beyond what any namespace tenant could already do, so they don't need
-VAP protection. The VAP's job is to protect the cluster-admin SA, and that scope
-is unchanged.
+`validatingadmissionpolicy-executor.yaml` gates executor Jobs **in the controller
+namespace** only (its `namespaceSelector`): "only the controller SA may create
+one", plus structural guards (ownerRef, `backoffLimit: 0`, TTL, `restartPolicy:
+Never`, no host namespaces, not privileged, not UID 0). Cross-namespace
+mount-only Jobs run under a `default` SA and are **not** an escalation beyond what
+any namespace tenant could already do, so they don't need VAP protection.
+
+The one change: the match condition was broadened from "targets the executor SA"
+to "targets the executor SA **or** carries the executor role label". Without this,
+a non-cluster-admin in-namespace Job (`privileges.clusterAdmin: false`, which runs
+under the `default` SA) would slip past the policy entirely. Keeping the SA branch
+means a Job using the cluster-admin SA still can't dodge the policy by omitting the
+label.
 
 Note that cross-namespace ownerReferences are not honoured by Kubernetes GC, so
 the executor Job only carries an ownerRef to its SudoRequest in the controller
 namespace; cross-namespace Jobs are reclaimed by `ttlSecondsAfterFinished`
-instead.
+instead. That TTL is floored at `ExecutorJobTTLFloor` (independent of the
+requester's output-retention `ttlSecondsAfterApproval`) so a tiny requested TTL
+can't let kube-controller-manager delete a finished Job before the reconciler
+captures its pod logs.
+
+### Reading cross-namespace objects
+
+The manager's cache is scoped to the controller namespace (to keep its RBAC
+narrow), so the reconciler reads executor Jobs and their pods through the
+uncached `APIReader`, not the cached client — otherwise a `spec.namespace` the
+cache doesn't watch would read as empty/NotFound and the request could never
+complete (or be misreported as Failed). Writes always go straight to the
+apiserver, so only the read paths needed this.
 
 ### Curated subset enforced in Go, not the type system
 

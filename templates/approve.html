@@ -19,7 +19,14 @@
             {{if .Extras.Mounts}}<dt>Mounts</dt><dd>{{range .Extras.Mounts}}{{.}}<br>{{end}}</dd>{{end}}
             {{if .Extras.EnvFrom}}<dt>Env from</dt><dd>{{range .Extras.EnvFrom}}{{.}}<br>{{end}}</dd>{{end}}
             {{if .Extras.Env}}<dt>Env</dt><dd>{{range .Extras.Env}}{{.}}<br>{{end}}</dd>{{end}}
-            {{if .Extras.InitContainers}}<dt>Init containers</dt><dd>{{range .Extras.InitContainers}}{{.}}<br>{{end}}</dd>{{end}}
+            {{if .Extras.InitContainers}}<dt>Init containers</dt><dd>{{range .Extras.InitContainers}}
+                <div style="margin-bottom: 0.5rem;">
+                    <strong>{{.Name}}</strong> <span style="color: var(--text-muted);">({{.Image}})</span>
+                    {{if .Command}}<pre style="white-space: pre-wrap; word-break: break-word; margin: 0.25rem 0 0; font-family: ui-monospace, monospace;">{{.Command}}</pre>{{end}}
+                    {{if .Mounts}}<div style="font-size: 0.8125rem;">mounts: {{range .Mounts}}{{.}}; {{end}}</div>{{end}}
+                    {{if .EnvFrom}}<div style="font-size: 0.8125rem;">envFrom: {{range .EnvFrom}}{{.}}; {{end}}</div>{{end}}
+                    {{if .Env}}<div style="font-size: 0.8125rem;">env: {{range .Env}}{{.}}; {{end}}</div>{{end}}
+                </div>{{end}}</dd>{{end}}
             <dt>Created</dt><dd>{{.CreatedAt}}</dd>
         </dl>
 

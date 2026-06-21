@@ -56,8 +56,23 @@ func validateSpecExtras(sr *SudoRequest) error {
 	}
 
 	for _, v := range sr.Spec.Volumes {
+		if v.Name == stdinVolumeName {
+			return fmt.Errorf("volume name %q is reserved for the stdin payload", stdinVolumeName)
+		}
 		if err := validateVolumeSource(v); err != nil {
 			return err
+		}
+	}
+
+	// The controller appends its own stdin volume+mount (name stdinVolumeName at
+	// stdinMountDir); a requester mount reusing either would produce a duplicate
+	// volume name / mountPath that the apiserver rejects, or shadow the payload.
+	for _, m := range sr.Spec.VolumeMounts {
+		if m.Name == stdinVolumeName {
+			return fmt.Errorf("volumeMount name %q is reserved for the stdin payload", stdinVolumeName)
+		}
+		if m.MountPath == stdinMountDir {
+			return fmt.Errorf("volumeMount path %q is reserved for the stdin payload", stdinMountDir)
 		}
 	}
 
@@ -76,9 +91,11 @@ func validateSpecExtras(sr *SudoRequest) error {
 	return nil
 }
 
-// allowedVolumeSources is the reviewable set of volume sources a request may use
-// without a privilege toggle. hostPath and other escalation-capable sources are
-// intentionally excluded until they have an explicit approval-surfaced flag.
+// validateVolumeSource rejects any volume whose source is outside the reviewable
+// allowlist. The allowlist itself lives in describeVolumeSource, which is the
+// single source of truth shared with the approve-page renderer, so a source can
+// never be permitted by validation yet rendered as "unknown" to the reviewer
+// (or vice versa).
 func validateVolumeSource(v corev1.Volume) error {
 	if v.Name == "" {
 		return fmt.Errorf("volume must have a name")
@@ -86,10 +103,8 @@ func validateVolumeSource(v corev1.Volume) error {
 	if v.HostPath != nil {
 		return fmt.Errorf("volume %q: hostPath is not permitted (it would require an explicit privilege toggle, which does not exist yet)", v.Name)
 	}
-	switch {
-	case v.EmptyDir != nil, v.Secret != nil, v.ConfigMap != nil, v.PersistentVolumeClaim != nil, v.Projected != nil:
-		return nil
-	default:
+	if _, allowed := describeVolumeSource(v); !allowed {
 		return fmt.Errorf("volume %q: only emptyDir, secret, configMap, persistentVolumeClaim and projected sources are permitted", v.Name)
 	}
+	return nil
 }

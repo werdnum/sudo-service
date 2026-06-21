@@ -23,10 +23,17 @@ spec:
       matchLabels:
         kubernetes.io/metadata.name: {{ .Values.namespace }}
   matchConditions:
-    - name: targets-executor-sa
+    # Match an executor Job either by the cluster-admin executor SA (so a Job
+    # using that SA can never dodge the policy by omitting the label) OR by the
+    # executor role label (so a non-cluster-admin, default-SA executor Job in the
+    # controller namespace — privileges.clusterAdmin=false — is still subject to
+    # the structural guards below).
+    - name: is-executor-job
       expression: >-
-        has(object.spec.template.spec.serviceAccountName) &&
-        object.spec.template.spec.serviceAccountName == "sudo-service-executor-sa"
+        (has(object.spec.template.spec.serviceAccountName) &&
+         object.spec.template.spec.serviceAccountName == "sudo-service-executor-sa") ||
+        (has(object.metadata.labels) && has(object.metadata.labels.role) &&
+         object.metadata.labels.role == "executor")
   validations:
     - expression: >-
         request.userInfo.username == "{{ include "sudo-service.controllerUsername" . }}"

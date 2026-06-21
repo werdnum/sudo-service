@@ -20,10 +20,10 @@ func TestValidateCommandSyntax(t *testing.T) {
 
 	invalid := []string{
 		"kubectl get secret foo -o jsonpath='{.data.password}", // unterminated single quote
-		"kubectl get nodes |",                                  // dangling pipe
-		"kubectl get $(date",                                   // unterminated command substitution
-		`kubectl get "nodes`,                                   // unterminated double quote
-		"if true; then kubectl get nodes",                      // unterminated if
+		"kubectl get nodes |",             // dangling pipe
+		"kubectl get $(date",              // unterminated command substitution
+		`kubectl get "nodes`,              // unterminated double quote
+		"if true; then kubectl get nodes", // unterminated if
 	}
 	for _, cmd := range invalid {
 		if err := validateCommandSyntax(cmd); err == nil {
