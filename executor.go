@@ -406,10 +406,16 @@ func (r *SudoRequestReconciler) ensureStdinSecret(ctx context.Context, sr *SudoR
 
 // getJobPod returns the executor Job's pod, read uncached because the pod may be
 // in spec.namespace which the cache doesn't watch. Returns (nil, nil) when no pod
-// exists yet. The job-name label alone is not authoritative — in a tenant
-// namespace anyone who can create Pods could attach it — so we additionally
-// require the pod to be controlled by this Job (ownerRef UID), preventing a
-// spoofed pod from being read for logs/exit code or counted as progress.
+// exists yet. We require both the job-name label and the Job's controller ownerRef
+// (UID).
+//
+// In the controller namespace this is authoritative: tenants can't create Pods
+// there (it's operator-controlled and the executor VAP gates it), so only the Job
+// controller's pod matches. In a cross-namespace target where the requester holds
+// pod RBAC it is NOT a security boundary — job.UID is readable from that namespace
+// and an ownerRef is forgeable, so a tenant could present a spoofed pod for
+// logs/exit code. That is the inherent output-integrity limit of executing in a
+// namespace whose tenants you don't trust; see docs/widening-the-executor.md.
 func (r *SudoRequestReconciler) getJobPod(ctx context.Context, job *batchv1.Job) (*corev1.Pod, error) {
 	var pods corev1.PodList
 	if err := r.APIReader.List(ctx, &pods,

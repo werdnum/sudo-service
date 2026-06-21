@@ -19,7 +19,14 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
+
+// executorCleanupFinalizer guards deletion of a SudoRequest whose executor Job
+// runs in another namespace. Cross-namespace Jobs carry no ownerRef (cross-
+// namespace GC is not honoured by Kubernetes), so deleting the SudoRequest would
+// not cascade them; the finalizer lets the controller stop the Job first.
+const executorCleanupFinalizer = "sudo.andrewgarrett.dev/executor-cleanup"
 
 // SudoRequestReconciler drives the state machine:
 //
@@ -67,6 +74,30 @@ func (r *SudoRequestReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
+	}
+
+	// Being deleted: stop a still-running cross-namespace executor Job before
+	// releasing the object, then drop the finalizer. Without this the Job's pod
+	// keeps running with its mounted Secrets/PVCs after the request is gone.
+	if !sr.DeletionTimestamp.IsZero() {
+		if controllerutil.ContainsFinalizer(&sr, executorCleanupFinalizer) {
+			if sr.Status.ExecutorJobName != "" {
+				job, err := r.getExecutorJob(ctx, &sr)
+				if err != nil {
+					return ctrl.Result{}, fmt.Errorf("read executor job during finalize: %w", err)
+				}
+				if job != nil {
+					if err := r.stopJob(ctx, job); err != nil {
+						return ctrl.Result{}, fmt.Errorf("stop executor job during finalize: %w", err)
+					}
+				}
+			}
+			controllerutil.RemoveFinalizer(&sr, executorCleanupFinalizer)
+			if err := r.Update(ctx, &sr); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+		return ctrl.Result{}, nil
 	}
 
 	switch sr.Status.Phase {
@@ -330,6 +361,17 @@ func (r *SudoRequestReconciler) failApproved(ctx context.Context, sr *SudoReques
 func (r *SudoRequestReconciler) handleApproved(ctx context.Context, sr *SudoRequest) (ctrl.Result, error) {
 	log := ctrl.LoggerFrom(ctx)
 
+	// A cross-namespace executor Job carries no ownerRef, so it won't cascade when
+	// the SudoRequest is deleted. Add the cleanup finalizer before creating any
+	// Job (same-namespace Jobs cascade via their ownerRef and don't need it).
+	if executorNamespace(sr) != ControllerNamespace && !controllerutil.ContainsFinalizer(sr, executorCleanupFinalizer) {
+		controllerutil.AddFinalizer(sr, executorCleanupFinalizer)
+		if err := r.Update(ctx, sr); err != nil {
+			return ctrl.Result{}, fmt.Errorf("add executor-cleanup finalizer: %w", err)
+		}
+		return ctrl.Result{Requeue: true}, nil
+	}
+
 	// Replay-safe Job handling:
 	//
 	// First reconcile under Approved: status.executorJobName is empty —
@@ -461,9 +503,19 @@ func (r *SudoRequestReconciler) handleApproved(ctx context.Context, sr *SudoRequ
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 
-	// Job finished. Collect output and finalize.
+	// Job finished (or the executor terminated while an injected sidecar keeps the
+	// Job from finishing). Collect output and finalize.
 	outputSecret, exitCode, err := r.captureJobOutput(ctx, sr, job)
 	if err != nil {
+		// In the sidecar scenario the Job never finishes on its own, so it has no
+		// TTL to fall back on and a terminal SudoRequest is never reconciled again.
+		// Going terminal here would orphan the pod (and its mounted Secrets/PVCs)
+		// forever. The sidecar keeps the pod — and its logs — alive, so the capture
+		// is retriable; requeue instead of recording a terminal Failed on what is
+		// almost always a transient apiserver hiccup.
+		if !jobFinished {
+			return ctrl.Result{}, fmt.Errorf("capture output while sidecar holds job %s open: %w", job.Name, err)
+		}
 		log.Error(err, "capture job output")
 		sr.Status.Phase = PhaseFailed
 		if err := r.Status().Update(ctx, sr); err != nil {
@@ -483,10 +535,13 @@ func (r *SudoRequestReconciler) handleApproved(ctx context.Context, sr *SudoRequ
 
 	// If the executor finished but the Job hasn't (an injected sidecar is keeping
 	// the pod alive), delete the Job so the pod is torn down — it would otherwise
-	// never finish, so neither its TTL nor anything else would reclaim it.
+	// never finish, so neither its TTL nor anything else would reclaim it. A
+	// transient delete failure must not be swallowed: the request would go terminal
+	// (never reconciled again), leaving the privileged pod and its mounted data
+	// alive, so return the error and retry before finalizing.
 	if !jobFinished {
 		if err := r.stopJob(ctx, job); err != nil {
-			log.Error(err, "stop job after executor completion (injected sidecar?)", "job", job.Name)
+			return ctrl.Result{}, fmt.Errorf("stop job %s after executor completion (injected sidecar?): %w", job.Name, err)
 		}
 	}
 
