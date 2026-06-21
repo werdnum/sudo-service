@@ -190,6 +190,13 @@ Output is GC'd `ttlSecondsAfterApproval` seconds after execution (default 600s).
 - The image runs under `cluster-admin`. If you specify a non-default `image`,
   the human reviewer is the trust boundary — they see the image on the
   approve page next to the command. Don't expect server-side allowlisting.
+- Commands are syntax-checked before they reach the human. The HTTP API rejects
+  a syntactically-broken command with `400`; a CRD-created one is moved straight
+  to `Denied` (`deniedBy=syntax-check`, parse error in `denialReason`) before any
+  approval push is sent. The CLI runs the same check locally with `sh -n` before
+  submitting — bypass it with `--no-validate`. This only catches shell syntax
+  errors (unbalanced quotes, dangling pipes); it does **not** validate that the
+  command does anything sensible.
 
 ## Verification
 

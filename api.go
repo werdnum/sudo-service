@@ -97,6 +97,10 @@ func (a *APIServer) createRequestHandler(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "command and reason are required", http.StatusBadRequest)
 		return
 	}
+	if err := validateCommandSyntax(body.Command); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	sr := &SudoRequest{
 		ObjectMeta: metav1.ObjectMeta{
