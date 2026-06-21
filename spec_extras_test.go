@@ -481,6 +481,26 @@ func TestExecutorWaitStartAfterInitCompletion(t *testing.T) {
 	}
 }
 
+func TestExecutorContainerTerminated(t *testing.T) {
+	term := corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{}}
+	running := corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}
+	// Executor exited while an injected sidecar keeps running -> terminated=true
+	// (so the request completes instead of hanging on the never-finishing Job).
+	pod := &corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{
+		{Name: "executor", State: term},
+		{Name: "istio-proxy", State: running},
+	}}}
+	if !executorContainerTerminated(pod) {
+		t.Error("executor terminated + sidecar running: want terminated")
+	}
+	stillRunning := &corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{
+		{Name: "executor", State: running},
+	}}}
+	if executorContainerTerminated(stillRunning) {
+		t.Error("executor running: want not terminated")
+	}
+}
+
 func TestExecutorStarted(t *testing.T) {
 	waiting := corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "PodInitializing"}}
 	running := corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}

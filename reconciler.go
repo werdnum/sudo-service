@@ -430,13 +430,24 @@ func (r *SudoRequestReconciler) handleApproved(ctx context.Context, sr *SudoRequ
 		return ctrl.Result{}, nil
 	}
 
-	// If job is still running, requeue — but guard against a pod that never
-	// starts. An unsatisfiable mount (a Secret/ConfigMap/PVC that doesn't exist in
-	// the target namespace), an unschedulable pod, an image that won't pull, etc.
-	// leaves the pod in ContainerCreating without ever incrementing the Job's
-	// succeeded/failed counts, so without this the request would sit in Approved
-	// forever.
-	if job.Status.Succeeded == 0 && job.Status.Failed == 0 {
+	// Completion is signalled by the executor container terminating, OR the Job's
+	// counts advancing. We check the executor container directly because the Job's
+	// Succeeded/Failed never advance if a mutating webhook injected a sidecar that
+	// keeps the pod running after the executor exits — which would otherwise hang
+	// the request forever.
+	pod, err := r.getJobPod(ctx, job)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	jobFinished := job.Status.Succeeded > 0 || job.Status.Failed > 0
+	executorDone := pod != nil && executorContainerTerminated(pod)
+	if !jobFinished && !executorDone {
+		// Still running — requeue, but guard against a pod that never starts. An
+		// unsatisfiable mount (a Secret/ConfigMap/PVC that doesn't exist in the
+		// target namespace), an unschedulable pod, an image that won't pull, etc.
+		// leaves the pod in ContainerCreating without ever incrementing the Job's
+		// succeeded/failed counts, so without this the request would sit in Approved
+		// forever.
 		timedOut, reason, err := r.executorStartTimedOut(ctx, job)
 		if err != nil {
 			return ctrl.Result{}, err
@@ -468,6 +479,15 @@ func (r *SudoRequestReconciler) handleApproved(ctx context.Context, sr *SudoRequ
 			CreatedAt: sr.CreationTimestamp.Format("2006-01-02 15:04:05 UTC"),
 		})
 		return ctrl.Result{}, nil
+	}
+
+	// If the executor finished but the Job hasn't (an injected sidecar is keeping
+	// the pod alive), delete the Job so the pod is torn down — it would otherwise
+	// never finish, so neither its TTL nor anything else would reclaim it.
+	if !jobFinished {
+		if err := r.stopJob(ctx, job); err != nil {
+			log.Error(err, "stop job after executor completion (injected sidecar?)", "job", job.Name)
+		}
 	}
 
 	sr.Status.ExitCode = &exitCode

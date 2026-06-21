@@ -452,6 +452,19 @@ func (r *SudoRequestReconciler) executorStartTimedOut(ctx context.Context, job *
 	return time.Since(ref) > ExecutorStartDeadline*time.Second, podWaitReason(pod), nil
 }
 
+// executorContainerTerminated reports whether the executor container has exited.
+// This is the completion signal the reconciler uses, because the Job's
+// Succeeded/Failed counts never advance when a mutating webhook injects a sidecar
+// that keeps the pod running past the executor.
+func executorContainerTerminated(pod *corev1.Pod) bool {
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.Name == "executor" && cs.State.Terminated != nil {
+			return true
+		}
+	}
+	return false
+}
+
 // executorStarted reports whether the executor container has reached
 // Running/Terminated. A running *init* container does NOT count — otherwise an
 // init that never exits would keep the pod "progressing" and defeat the deadline.
