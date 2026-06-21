@@ -124,14 +124,15 @@ var errDisallowedSecret = errors.New("referenced secret has a disallowed type")
 // a Secret but can't express its type, so validateSpecExtras (which never reads the
 // cluster) can't catch this — we check at creation, where we have the namespace and a
 // reader. Mounting (or env-exposing) a real SA-token Secret would hand the command
-// that ServiceAccount's API credentials, defeating the no-API-privileges guarantee for
-// cross-namespace Jobs in exactly the way the already-rejected `projected`
-// serviceAccountToken volume source would. Scoped to cross-namespace executors: in the
-// controller namespace the executor is already cluster-admin, so the mount grants
-// nothing new. A dangling reference is left to fail at mount time (the start deadline
-// catches it). The residual delete-and-recreate-as-token race is the same accepted
-// untrusted-namespace limitation as the stdin swap, and is bounded anyway — recreating
-// a usable token Secret requires a token the requester already holds.
+// that ServiceAccount's API credentials, defeating the no-API-privileges guarantee in
+// exactly the way the already-rejected `projected` serviceAccountToken volume source
+// would. The caller scopes this to non-cluster-admin executors (any cross-namespace
+// Job, or an in-namespace clusterAdmin:false one): a cluster-admin executor already
+// holds the API, so the mount grants it nothing new. A dangling reference is left to
+// fail at mount time (the start deadline catches it). The residual delete-and-recreate-
+// as-token race is the same accepted untrusted-namespace limitation as the stdin swap,
+// and is bounded anyway — recreating a usable token Secret requires a token the
+// requester already holds.
 func (r *SudoRequestReconciler) rejectServiceAccountTokenSecrets(ctx context.Context, ns string, extras *podExtras) error {
 	names := map[string]struct{}{}
 	addEnv := func(env []corev1.EnvVar, envFrom []corev1.EnvFromSource) {
@@ -213,10 +214,12 @@ func (r *SudoRequestReconciler) findOrCreateJob(ctx context.Context, sr *SudoReq
 		// is unexpected; surface it rather than build a malformed pod.
 		return nil, fmt.Errorf("decode pod extras: %w", err)
 	}
-	if ns != ControllerNamespace {
-		// Cross-namespace Jobs run with no API privileges; a referenced SA-token
-		// Secret would smuggle some in (validation can't see Secret types). Reject
-		// before creating the Job.
+	if !clusterAdminEnabled(sr) {
+		// A non-cluster-admin executor (any cross-namespace Job, or an in-namespace
+		// clusterAdmin:false one) is supposed to have no API privileges; a referenced
+		// SA-token Secret would smuggle some in (validation can't see Secret types).
+		// Reject before creating the Job. Cluster-admin executors already hold the API,
+		// so the mount grants them nothing and the check is skipped.
 		if err := r.rejectServiceAccountTokenSecrets(ctx, ns, extras); err != nil {
 			return nil, err
 		}

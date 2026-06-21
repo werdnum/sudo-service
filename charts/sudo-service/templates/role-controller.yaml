@@ -4,7 +4,7 @@ metadata:
   name: sudo-service-controller
   namespace: {{ .Values.namespace }}
 rules:
-  # SudoRequest spec: full CRUD (also covers finalizer management on the parent resource).
+  # SudoRequest spec: full CRUD.
   - apiGroups: ["sudo.andrewgarrett.dev"]
     resources: ["sudorequests"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
@@ -13,6 +13,14 @@ rules:
   - apiGroups: ["sudo.andrewgarrett.dev"]
     resources: ["sudorequests/status"]
     verbs: ["get", "update", "patch"]
+  # SudoRequest finalizers subresource. The OwnerReferencesPermissionEnforcement
+  # admission plugin (enabled by default) gates writes to metadata.finalizers behind
+  # update on <resource>/finalizers, separately from the resource itself. The
+  # controller adds an executor-cleanup finalizer to cross-namespace requests, so
+  # without this that update 403s and the request wedges in Approved.
+  - apiGroups: ["sudo.andrewgarrett.dev"]
+    resources: ["sudorequests/finalizers"]
+    verbs: ["update"]
   # Executor Jobs.
   - apiGroups: ["batch"]
     resources: ["jobs"]

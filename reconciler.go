@@ -450,6 +450,13 @@ func (r *SudoRequestReconciler) handleApproved(ctx context.Context, sr *SudoRequ
 		return r.failApproved(ctx, sr, "executor Job was replaced by a different object; refusing to use it")
 	}
 	if job == nil {
+		// If we already captured the result (the sidecar two-phase below records
+		// outputSecret+exitCode before tearing the Job down), the Job being gone now
+		// is our own teardown, not a lost execution — finalize from the recorded
+		// result instead of failing.
+		if sr.Status.OutputSecretRef != "" && sr.Status.ExitCode != nil {
+			return r.finalizeFromRecordedResult(ctx, sr)
+		}
 		// Job has been GC'd before we observed completion. Treat as Failed
 		// rather than re-creating (which would re-run the privileged command).
 		log.Info("executor Job missing before completion; failing request to prevent replay",
@@ -534,12 +541,26 @@ func (r *SudoRequestReconciler) handleApproved(ctx context.Context, sr *SudoRequ
 	}
 
 	// If the executor finished but the Job hasn't (an injected sidecar is keeping
-	// the pod alive), delete the Job so the pod is torn down — it would otherwise
-	// never finish, so neither its TTL nor anything else would reclaim it. A
-	// transient delete failure must not be swallowed: the request would go terminal
-	// (never reconciled again), leaving the privileged pod and its mounted data
-	// alive, so return the error and retry before finalizing.
+	// the pod alive), we must tear the Job down — it would otherwise never finish, so
+	// neither its TTL nor anything else would reclaim the pod. Two phases, so a
+	// transient error neither loses the output nor strands the pod:
+	//
+	//  1. Persist outputSecret+exitCode while still in Approved. The pod (and its
+	//     logs) only live while the Job exists, so deleting first and then failing the
+	//     terminal status write would lose the captured result; recording it first
+	//     keeps it durable (and the missing-Job path above recovers from it).
+	//  2. Once the result is durable, delete the Job and finalize. The delete returns
+	//     its error to retry — the request is still Approved with the result recorded,
+	//     so retrying can't lose output, and we never go terminal with the pod alive.
 	if !jobFinished {
+		if sr.Status.OutputSecretRef == "" || sr.Status.ExitCode == nil {
+			sr.Status.OutputSecretRef = outputSecret
+			sr.Status.ExitCode = &exitCode
+			if err := r.Status().Update(ctx, sr); err != nil {
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{Requeue: true}, nil
+		}
 		if err := r.stopJob(ctx, job); err != nil {
 			return ctrl.Result{}, fmt.Errorf("stop job %s after executor completion (injected sidecar?): %w", job.Name, err)
 		}
@@ -547,6 +568,17 @@ func (r *SudoRequestReconciler) handleApproved(ctx context.Context, sr *SudoRequ
 
 	sr.Status.ExitCode = &exitCode
 	sr.Status.OutputSecretRef = outputSecret
+	return r.finalizeFromRecordedResult(ctx, sr)
+}
+
+// finalizeFromRecordedResult writes the terminal phase from a result already present
+// in status (outputSecret + exitCode). The normal completion path sets those fields
+// then calls this; the missing-Job path calls it to recover when the sidecar two-phase
+// had already persisted the result before the Job was torn down (so the Job being gone
+// is our own teardown, not a lost execution).
+func (r *SudoRequestReconciler) finalizeFromRecordedResult(ctx context.Context, sr *SudoRequest) (ctrl.Result, error) {
+	exitCode := *sr.Status.ExitCode
+	outputSecret := sr.Status.OutputSecretRef
 	if exitCode == 0 {
 		sr.Status.Phase = PhaseExecuted
 	} else {
