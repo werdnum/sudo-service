@@ -1,7 +1,6 @@
 package main
 
 import (
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -102,25 +101,25 @@ type SudoRequestSpec struct {
 	// Secret mounted into the executor pod, never interpolated into the shell.
 	Stdin string `json:"stdin,omitempty"`
 
-	// Env / EnvFrom are extra environment for the executor container, e.g. a
-	// secretRef for credentials. Curated subset of the upstream types; see
-	// validateSpecExtras for what is permitted.
-	Env     []corev1.EnvVar        `json:"env,omitempty"`
-	EnvFrom []corev1.EnvFromSource `json:"envFrom,omitempty"`
-
-	// Volumes / VolumeMounts let the command read Secrets, ConfigMaps, PVCs and
-	// scratch space as files. Volume sources are restricted to a reviewable
-	// allowlist (emptyDir, secret, configMap, persistentVolumeClaim, projected);
-	// escalation sources such as hostPath are rejected until they have an explicit
-	// approval-surfaced toggle. See validateSpecExtras.
-	Volumes      []corev1.Volume      `json:"volumes,omitempty"`
-	VolumeMounts []corev1.VolumeMount `json:"volumeMounts,omitempty"`
-
-	// InitContainers run before the executor container — e.g. to stage a tool
-	// binary into a shared emptyDir. Their securityContext is stamped by the
-	// controller (the requester may not set it), so they inherit the same locked
-	// down profile as the executor container.
-	InitContainers []corev1.Container `json:"initContainers,omitempty"`
+	// Env / EnvFrom / Volumes / VolumeMounts / InitContainers are the widened pod
+	// fields. They are stored as raw JSON (runtime.RawExtension) rather than the
+	// concrete corev1 types on purpose: the CRD schema uses
+	// x-kubernetes-preserve-unknown-fields, so a malformed-but-schema-valid object
+	// (e.g. an integer env[].name) written directly to the CRD must NOT make the
+	// controller's typed List decode fail — that would wedge the informer for every
+	// request. Each item is decoded per-object in decodePodExtras; a decode failure
+	// becomes a per-request Denied (via validateSpecExtras), not a cache-wide DoS.
+	//
+	// Env / EnvFrom: extra environment for the executor container (e.g. a secretRef
+	// for credentials). Volumes / VolumeMounts: read Secrets/ConfigMaps/PVCs and
+	// scratch space as files; sources are narrowed to a reviewable allowlist in
+	// validateSpecExtras (hostPath/projected rejected). InitContainers run before
+	// the executor with a controller-stamped securityContext and resource bounds.
+	Env            []runtime.RawExtension `json:"env,omitempty"`
+	EnvFrom        []runtime.RawExtension `json:"envFrom,omitempty"`
+	Volumes        []runtime.RawExtension `json:"volumes,omitempty"`
+	VolumeMounts   []runtime.RawExtension `json:"volumeMounts,omitempty"`
+	InitContainers []runtime.RawExtension `json:"initContainers,omitempty"`
 
 	// Privileges holds the explicit, approval-surfaced capability toggles. Each
 	// flag widens what the executor pod may do; the human reviewer sees them on
@@ -257,36 +256,21 @@ func (in *SudoRequestSpec) DeepCopyInto(out *SudoRequestSpec) {
 		v := *in.TTLSecondsAfterApproval
 		out.TTLSecondsAfterApproval = &v
 	}
-	if in.Env != nil {
-		out.Env = make([]corev1.EnvVar, len(in.Env))
-		for i := range in.Env {
-			in.Env[i].DeepCopyInto(&out.Env[i])
+	copyRaw := func(in []runtime.RawExtension) []runtime.RawExtension {
+		if in == nil {
+			return nil
 		}
-	}
-	if in.EnvFrom != nil {
-		out.EnvFrom = make([]corev1.EnvFromSource, len(in.EnvFrom))
-		for i := range in.EnvFrom {
-			in.EnvFrom[i].DeepCopyInto(&out.EnvFrom[i])
+		out := make([]runtime.RawExtension, len(in))
+		for i := range in {
+			in[i].DeepCopyInto(&out[i])
 		}
+		return out
 	}
-	if in.Volumes != nil {
-		out.Volumes = make([]corev1.Volume, len(in.Volumes))
-		for i := range in.Volumes {
-			in.Volumes[i].DeepCopyInto(&out.Volumes[i])
-		}
-	}
-	if in.VolumeMounts != nil {
-		out.VolumeMounts = make([]corev1.VolumeMount, len(in.VolumeMounts))
-		for i := range in.VolumeMounts {
-			in.VolumeMounts[i].DeepCopyInto(&out.VolumeMounts[i])
-		}
-	}
-	if in.InitContainers != nil {
-		out.InitContainers = make([]corev1.Container, len(in.InitContainers))
-		for i := range in.InitContainers {
-			in.InitContainers[i].DeepCopyInto(&out.InitContainers[i])
-		}
-	}
+	out.Env = copyRaw(in.Env)
+	out.EnvFrom = copyRaw(in.EnvFrom)
+	out.Volumes = copyRaw(in.Volumes)
+	out.VolumeMounts = copyRaw(in.VolumeMounts)
+	out.InitContainers = copyRaw(in.InitContainers)
 	if in.Privileges.ClusterAdmin != nil {
 		v := *in.Privileges.ClusterAdmin
 		out.Privileges.ClusterAdmin = &v

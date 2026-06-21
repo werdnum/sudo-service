@@ -14,6 +14,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -57,15 +58,16 @@ type createRequestBody struct {
 	Image                   string `json:"image,omitempty"`
 	TTLSecondsAfterApproval *int32 `json:"ttlSecondsAfterApproval,omitempty"`
 
-	// Widened pod fields — same shape as the CRD spec. Validated by
-	// validateSpecExtras before the request is created.
+	// Widened pod fields — same shape as the CRD spec, carried as raw JSON so a
+	// malformed item is rejected by validateSpecExtras (400) rather than failing
+	// the body decode in a way that diverges from the CRD path.
 	Namespace      string                 `json:"namespace,omitempty"`
 	Stdin          string                 `json:"stdin,omitempty"`
-	Env            []corev1.EnvVar        `json:"env,omitempty"`
-	EnvFrom        []corev1.EnvFromSource `json:"envFrom,omitempty"`
-	Volumes        []corev1.Volume        `json:"volumes,omitempty"`
-	VolumeMounts   []corev1.VolumeMount   `json:"volumeMounts,omitempty"`
-	InitContainers []corev1.Container     `json:"initContainers,omitempty"`
+	Env            []runtime.RawExtension `json:"env,omitempty"`
+	EnvFrom        []runtime.RawExtension `json:"envFrom,omitempty"`
+	Volumes        []runtime.RawExtension `json:"volumes,omitempty"`
+	VolumeMounts   []runtime.RawExtension `json:"volumeMounts,omitempty"`
+	InitContainers []runtime.RawExtension `json:"initContainers,omitempty"`
 	Privileges     SudoRequestPrivileges  `json:"privileges,omitempty"`
 }
 

@@ -41,16 +41,23 @@ func newSpecExtrasView(sr *SudoRequest) specExtrasView {
 		ClusterAdmin: clusterAdminEnabled(sr),
 		Stdin:        sr.Spec.Stdin != "",
 	}
-	for _, vol := range sr.Spec.Volumes {
+	// Best-effort decode: by the time the approve page or push renders, the spec
+	// has passed validateSpecExtras, so this succeeds; a (theoretical) decode
+	// failure just yields an empty extras view rather than panicking.
+	extras, err := decodePodExtras(sr)
+	if err != nil {
+		return v
+	}
+	for _, vol := range extras.Volumes {
 		desc, _ := describeVolumeSource(vol)
 		v.Volumes = append(v.Volumes, fmt.Sprintf("%s: %s", vol.Name, desc))
 	}
-	for _, m := range sr.Spec.VolumeMounts {
+	for _, m := range extras.VolumeMounts {
 		v.Mounts = append(v.Mounts, describeMount(m))
 	}
-	v.Env = describeEnv(sr.Spec.Env)
-	v.EnvFrom = describeEnvFrom(sr.Spec.EnvFrom)
-	for _, c := range sr.Spec.InitContainers {
+	v.Env = describeEnv(extras.Env)
+	v.EnvFrom = describeEnvFrom(extras.EnvFrom)
+	for _, c := range extras.InitContainers {
 		icv := initContainerView{
 			Name:    c.Name,
 			Image:   c.Image,
@@ -121,7 +128,13 @@ func describeEnvFrom(sources []corev1.EnvFromSource) []string {
 func describeVolumeSource(v corev1.Volume) (desc string, allowed bool) {
 	switch {
 	case v.EmptyDir != nil:
-		return "emptyDir", true
+		// Show the effective scratch cap so the reviewer sees how much node disk
+		// the command can use (the requester's sizeLimit, or the stamped default).
+		size := DefaultEmptyDirSizeLimit.String()
+		if v.EmptyDir.SizeLimit != nil {
+			size = v.EmptyDir.SizeLimit.String()
+		}
+		return "emptyDir (" + size + ")", true
 	case v.Secret != nil:
 		return "secret/" + v.Secret.SecretName, true
 	case v.ConfigMap != nil:

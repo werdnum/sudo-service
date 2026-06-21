@@ -127,7 +127,13 @@ func (r *SudoRequestReconciler) findOrCreateJob(ctx context.Context, sr *SudoReq
 		return nil, err
 	}
 
-	job = r.buildExecutorJob(sr, ns, name)
+	extras, err := decodePodExtras(sr)
+	if err != nil {
+		// validateSpecExtras already accepted this spec, so a decode failure here
+		// is unexpected; surface it rather than build a malformed pod.
+		return nil, fmt.Errorf("decode pod extras: %w", err)
+	}
+	job = r.buildExecutorJob(sr, ns, name, extras)
 	if err := r.Create(ctx, &job); err != nil {
 		return nil, fmt.Errorf("create job: %w", err)
 	}
@@ -144,7 +150,7 @@ func (r *SudoRequestReconciler) findOrCreateJob(ctx context.Context, sr *SudoReq
 // buildExecutorJob renders the executor Job, splicing in the request's curated
 // pod extras (env, volumes, init containers, stdin) on top of the locked-down
 // defaults. validateSpecExtras has already vetted everything spliced in here.
-func (r *SudoRequestReconciler) buildExecutorJob(sr *SudoRequest, ns, name string) batchv1.Job {
+func (r *SudoRequestReconciler) buildExecutorJob(sr *SudoRequest, ns, name string, extras *podExtras) batchv1.Job {
 	one := int32(0)
 	// Output retention is the requester's ttlSecondsAfterApproval, but the Job
 	// itself must outlive its completion long enough for the reconciler to capture
@@ -161,15 +167,19 @@ func (r *SudoRequestReconciler) buildExecutorJob(sr *SudoRequest, ns, name strin
 		Name:    "executor",
 		Image:   imageFor(sr),
 		Command: executorCommand(sr),
-		Env:     sr.Spec.Env,
-		EnvFrom: sr.Spec.EnvFrom,
+		Env:     extras.Env,
+		EnvFrom: extras.EnvFrom,
 		// Copy so the stdin-mount append below never mutates the spec's slice.
-		VolumeMounts:    append([]corev1.VolumeMount(nil), sr.Spec.VolumeMounts...),
+		VolumeMounts:    append([]corev1.VolumeMount(nil), extras.VolumeMounts...),
 		SecurityContext: hardenedContainerSecurityContext(),
 		Resources:       standardResources(),
 	}
 
-	volumes := append([]corev1.Volume(nil), sr.Spec.Volumes...)
+	volumes := make([]corev1.Volume, len(extras.Volumes))
+	for i := range extras.Volumes {
+		extras.Volumes[i].DeepCopyInto(&volumes[i])
+		boundEmptyDirSize(&volumes[i])
+	}
 	if sr.Spec.Stdin != "" {
 		executor.VolumeMounts = append(executor.VolumeMounts, corev1.VolumeMount{
 			Name:      stdinVolumeName,
@@ -193,9 +203,9 @@ func (r *SudoRequestReconciler) buildExecutorJob(sr *SudoRequest, ns, name strin
 	// securityContext), so they inherit the same locked-down, bounded profile as
 	// the executor container — an init container can't run unbounded in a
 	// namespace without a LimitRange.
-	initContainers := make([]corev1.Container, len(sr.Spec.InitContainers))
-	for i, c := range sr.Spec.InitContainers {
-		c.DeepCopyInto(&initContainers[i])
+	initContainers := make([]corev1.Container, len(extras.InitContainers))
+	for i := range extras.InitContainers {
+		extras.InitContainers[i].DeepCopyInto(&initContainers[i])
 		initContainers[i].SecurityContext = hardenedContainerSecurityContext()
 		initContainers[i].Resources = standardResources()
 	}
@@ -252,6 +262,23 @@ func executorCommand(sr *SudoRequest) []string {
 		return []string{"/bin/sh", "-c", `exec /bin/sh -c "$1" < ` + stdinMountDir + "/stdin", "sudo-service", sr.Spec.Command}
 	}
 	return []string{"/bin/sh", "-c", sr.Spec.Command}
+}
+
+// DefaultEmptyDirSizeLimit caps emptyDir scratch space when the requester didn't
+// set their own sizeLimit, so a command can't fill node disk in a namespace
+// without an ephemeral-storage quota. A requester may override it with a larger
+// (or smaller) sizeLimit, which is rendered on the approve page for the human.
+var DefaultEmptyDirSizeLimit = resource.MustParse("1Gi")
+
+// boundEmptyDirSize stamps the default sizeLimit onto an emptyDir volume that
+// doesn't already declare one. No-op for non-emptyDir volumes and for emptyDir
+// volumes the requester already bounded.
+func boundEmptyDirSize(v *corev1.Volume) {
+	if v.EmptyDir == nil || v.EmptyDir.SizeLimit != nil {
+		return
+	}
+	size := DefaultEmptyDirSizeLimit.DeepCopy()
+	v.EmptyDir.SizeLimit = &size
 }
 
 // standardResources is the fixed request/limit profile applied to the executor

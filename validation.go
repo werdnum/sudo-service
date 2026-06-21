@@ -55,7 +55,14 @@ func validateSpecExtras(sr *SudoRequest) error {
 		}
 	}
 
-	for _, v := range sr.Spec.Volumes {
+	// Decode the raw-JSON pod fields into concrete types. A malformed item is a
+	// per-request validation error here, not a controller-wide decode failure.
+	extras, err := decodePodExtras(sr)
+	if err != nil {
+		return fmt.Errorf("invalid pod field: %w", err)
+	}
+
+	for _, v := range extras.Volumes {
 		if v.Name == stdinVolumeName {
 			return fmt.Errorf("volume name %q is reserved for the stdin payload", stdinVolumeName)
 		}
@@ -67,7 +74,7 @@ func validateSpecExtras(sr *SudoRequest) error {
 	// The controller appends its own stdin volume+mount (name stdinVolumeName at
 	// stdinMountDir); a requester mount reusing either would produce a duplicate
 	// volume name / mountPath that the apiserver rejects, or shadow the payload.
-	for _, m := range sr.Spec.VolumeMounts {
+	for _, m := range extras.VolumeMounts {
 		if m.Name == stdinVolumeName {
 			return fmt.Errorf("volumeMount name %q is reserved for the stdin payload", stdinVolumeName)
 		}
@@ -82,17 +89,17 @@ func validateSpecExtras(sr *SudoRequest) error {
 	// produces a pod the apiserver rejects at Job creation — which, post-approval,
 	// leaves the request stuck in Approved retrying forever. Catch it up front.
 	volNames := map[string]bool{}
-	for _, v := range sr.Spec.Volumes {
+	for _, v := range extras.Volumes {
 		volNames[v.Name] = true
 	}
 	if sr.Spec.Stdin != "" {
 		volNames[stdinVolumeName] = true
 	}
-	if err := validateMounts("executor container", sr.Spec.VolumeMounts, volNames, sr.Spec.Stdin != ""); err != nil {
+	if err := validateMounts("executor container", extras.VolumeMounts, volNames, sr.Spec.Stdin != ""); err != nil {
 		return err
 	}
 
-	for _, c := range sr.Spec.InitContainers {
+	for _, c := range extras.InitContainers {
 		if c.Name == "" || c.Image == "" {
 			return fmt.Errorf("initContainer must set both name and image")
 		}

@@ -1,13 +1,16 @@
 package main
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 func srWith(spec SudoRequestSpec) *SudoRequest {
@@ -16,6 +19,20 @@ func srWith(spec SudoRequestSpec) *SudoRequest {
 
 func boolPtr(b bool) *bool { return &b }
 
+// rawList marshals typed pod-field items into the runtime.RawExtension slices the
+// spec now stores, so tests can keep writing concrete corev1 values.
+func rawList[T any](items ...T) []runtime.RawExtension {
+	out := make([]runtime.RawExtension, len(items))
+	for i := range items {
+		b, err := json.Marshal(items[i])
+		if err != nil {
+			panic(err)
+		}
+		out[i] = runtime.RawExtension{Raw: b}
+	}
+	return out
+}
+
 func TestValidateSpecExtrasVolumeAllowlist(t *testing.T) {
 	allowed := []corev1.Volume{
 		{Name: "work", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
@@ -23,19 +40,19 @@ func TestValidateSpecExtrasVolumeAllowlist(t *testing.T) {
 		{Name: "cfg", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{}}},
 		{Name: "data", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "data-0"}}},
 	}
-	if err := validateSpecExtras(srWith(SudoRequestSpec{Volumes: allowed})); err != nil {
+	if err := validateSpecExtras(srWith(SudoRequestSpec{Volumes: rawList(allowed...)})); err != nil {
 		t.Fatalf("allowed volumes rejected: %v", err)
 	}
 
 	hostPath := []corev1.Volume{{Name: "h", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/"}}}}
-	err := validateSpecExtras(srWith(SudoRequestSpec{Volumes: hostPath}))
+	err := validateSpecExtras(srWith(SudoRequestSpec{Volumes: rawList(hostPath...)}))
 	if err == nil || !strings.Contains(err.Error(), "hostPath") {
 		t.Fatalf("hostPath volume: got %v, want hostPath rejection", err)
 	}
 
 	// A source outside the allowlist (e.g. an inline CSI volume) is rejected.
 	csi := []corev1.Volume{{Name: "c", VolumeSource: corev1.VolumeSource{CSI: &corev1.CSIVolumeSource{Driver: "x"}}}}
-	if err := validateSpecExtras(srWith(SudoRequestSpec{Volumes: csi})); err == nil {
+	if err := validateSpecExtras(srWith(SudoRequestSpec{Volumes: rawList(csi...)})); err == nil {
 		t.Fatal("CSI volume: got nil, want rejection")
 	}
 }
@@ -43,13 +60,13 @@ func TestValidateSpecExtrasVolumeAllowlist(t *testing.T) {
 func TestValidateSpecExtrasInitContainerSidecarAndDevices(t *testing.T) {
 	always := corev1.ContainerRestartPolicyAlways
 	sidecar := []corev1.Container{{Name: "s", Image: "busybox", RestartPolicy: &always}}
-	if err := validateSpecExtras(srWith(SudoRequestSpec{InitContainers: sidecar})); err == nil ||
+	if err := validateSpecExtras(srWith(SudoRequestSpec{InitContainers: rawList(sidecar...)})); err == nil ||
 		!strings.Contains(err.Error(), "restartPolicy") {
 		t.Errorf("sidecar init container: got %v, want restartPolicy rejection", err)
 	}
 
 	devices := []corev1.Container{{Name: "d", Image: "busybox", VolumeDevices: []corev1.VolumeDevice{{Name: "blk", DevicePath: "/dev/xvda"}}}}
-	if err := validateSpecExtras(srWith(SudoRequestSpec{InitContainers: devices})); err == nil ||
+	if err := validateSpecExtras(srWith(SudoRequestSpec{InitContainers: rawList(devices...)})); err == nil ||
 		!strings.Contains(err.Error(), "volumeDevices") {
 		t.Errorf("init container volumeDevices: got %v, want rejection", err)
 	}
@@ -57,17 +74,17 @@ func TestValidateSpecExtrasInitContainerSidecarAndDevices(t *testing.T) {
 
 func TestValidateSpecExtrasInitContainerSecurityContext(t *testing.T) {
 	ok := []corev1.Container{{Name: "copy", Image: "busybox"}}
-	if err := validateSpecExtras(srWith(SudoRequestSpec{InitContainers: ok})); err != nil {
+	if err := validateSpecExtras(srWith(SudoRequestSpec{InitContainers: rawList(ok...)})); err != nil {
 		t.Fatalf("plain init container rejected: %v", err)
 	}
 
 	withSC := []corev1.Container{{Name: "copy", Image: "busybox", SecurityContext: &corev1.SecurityContext{}}}
-	if err := validateSpecExtras(srWith(SudoRequestSpec{InitContainers: withSC})); err == nil {
+	if err := validateSpecExtras(srWith(SudoRequestSpec{InitContainers: rawList(withSC...)})); err == nil {
 		t.Fatal("init container securityContext: got nil, want rejection")
 	}
 
 	missingImage := []corev1.Container{{Name: "copy"}}
-	if err := validateSpecExtras(srWith(SudoRequestSpec{InitContainers: missingImage})); err == nil {
+	if err := validateSpecExtras(srWith(SudoRequestSpec{InitContainers: rawList(missingImage...)})); err == nil {
 		t.Fatal("init container without image: got nil, want rejection")
 	}
 }
@@ -158,14 +175,14 @@ func TestExecutorCommandExtrasBypassAutoApprove(t *testing.T) {
 func TestValidateSpecExtrasReservedStdinMount(t *testing.T) {
 	// A requester volume reusing the reserved stdin name is rejected.
 	v := []corev1.Volume{{Name: stdinVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}}
-	if err := validateSpecExtras(srWith(SudoRequestSpec{Volumes: v})); err == nil {
+	if err := validateSpecExtras(srWith(SudoRequestSpec{Volumes: rawList(v...)})); err == nil {
 		t.Error("reserved stdin volume name: got nil, want rejection")
 	}
 	// A mount reusing the reserved name or path is rejected.
-	if err := validateSpecExtras(srWith(SudoRequestSpec{VolumeMounts: []corev1.VolumeMount{{Name: stdinVolumeName, MountPath: "/x"}}})); err == nil {
+	if err := validateSpecExtras(srWith(SudoRequestSpec{VolumeMounts: rawList(corev1.VolumeMount{Name: stdinVolumeName, MountPath: "/x"})})); err == nil {
 		t.Error("reserved stdin mount name: got nil, want rejection")
 	}
-	if err := validateSpecExtras(srWith(SudoRequestSpec{VolumeMounts: []corev1.VolumeMount{{Name: "ok", MountPath: stdinMountDir}}})); err == nil {
+	if err := validateSpecExtras(srWith(SudoRequestSpec{VolumeMounts: rawList(corev1.VolumeMount{Name: "ok", MountPath: stdinMountDir})})); err == nil {
 		t.Error("reserved stdin mount path: got nil, want rejection")
 	}
 }
@@ -198,12 +215,12 @@ func TestDescribeVolumeSourceMatchesValidation(t *testing.T) {
 
 func TestInitContainerCommandSurfacedToReviewer(t *testing.T) {
 	sr := srWith(SudoRequestSpec{
-		InitContainers: []corev1.Container{{
+		InitContainers: rawList(corev1.Container{
 			Name:         "copy",
 			Image:        "rclone/rclone",
 			Command:      []string{"/bin/sh", "-c", "cp x /tools/y"},
 			VolumeMounts: []corev1.VolumeMount{{Name: "tools", MountPath: "/tools"}},
-		}},
+		}),
 	})
 	v := newSpecExtrasView(sr)
 	if len(v.InitContainers) != 1 {
@@ -222,9 +239,20 @@ func TestInitContainerCommandSurfacedToReviewer(t *testing.T) {
 	}
 }
 
+func TestValidateSpecExtrasRejectsMalformedItem(t *testing.T) {
+	// A type-confused field (integer env name) is stored raw by the apiserver
+	// (preserve-unknown-fields); the controller must reject it per-request, not
+	// fail to decode the whole object.
+	sr := srWith(SudoRequestSpec{Env: []runtime.RawExtension{{Raw: []byte(`{"name":123}`)}}})
+	err := validateSpecExtras(sr)
+	if err == nil || !strings.Contains(err.Error(), "invalid pod field") {
+		t.Fatalf("malformed env item: got %v, want decode rejection", err)
+	}
+}
+
 func TestValidateSpecExtrasRejectsProjected(t *testing.T) {
 	v := []corev1.Volume{{Name: "p", VolumeSource: corev1.VolumeSource{Projected: &corev1.ProjectedVolumeSource{}}}}
-	err := validateSpecExtras(srWith(SudoRequestSpec{Volumes: v}))
+	err := validateSpecExtras(srWith(SudoRequestSpec{Volumes: rawList(v...)}))
 	if err == nil || !strings.Contains(err.Error(), "projected") {
 		t.Fatalf("projected volume: got %v, want projected rejection", err)
 	}
@@ -236,7 +264,7 @@ func TestValidateSpecExtrasRejectsProjected(t *testing.T) {
 func TestValidateSpecExtrasMountReferences(t *testing.T) {
 	// Mount referencing an undefined volume is rejected.
 	err := validateSpecExtras(srWith(SudoRequestSpec{
-		VolumeMounts: []corev1.VolumeMount{{Name: "missing", MountPath: "/x"}},
+		VolumeMounts: rawList(corev1.VolumeMount{Name: "missing", MountPath: "/x"}),
 	}))
 	if err == nil || !strings.Contains(err.Error(), "no volume named") {
 		t.Fatalf("dangling mount: got %v, want rejection", err)
@@ -244,14 +272,14 @@ func TestValidateSpecExtrasMountReferences(t *testing.T) {
 
 	// Duplicate mountPath within a container is rejected.
 	err = validateSpecExtras(srWith(SudoRequestSpec{
-		Volumes: []corev1.Volume{
-			{Name: "a", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
-			{Name: "b", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
-		},
-		VolumeMounts: []corev1.VolumeMount{
-			{Name: "a", MountPath: "/same"},
-			{Name: "b", MountPath: "/same"},
-		},
+		Volumes: rawList(
+			corev1.Volume{Name: "a", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+			corev1.Volume{Name: "b", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+		),
+		VolumeMounts: rawList(
+			corev1.VolumeMount{Name: "a", MountPath: "/same"},
+			corev1.VolumeMount{Name: "b", MountPath: "/same"},
+		),
 	}))
 	if err == nil || !strings.Contains(err.Error(), "duplicate mountPath") {
 		t.Fatalf("duplicate mountPath: got %v, want rejection", err)
@@ -260,18 +288,18 @@ func TestValidateSpecExtrasMountReferences(t *testing.T) {
 	// A mount referencing a defined volume (and the stdin volume) is accepted.
 	if err := validateSpecExtras(srWith(SudoRequestSpec{
 		Stdin:        "data",
-		Volumes:      []corev1.Volume{{Name: "a", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}},
-		VolumeMounts: []corev1.VolumeMount{{Name: "a", MountPath: "/a"}},
+		Volumes:      rawList(corev1.Volume{Name: "a", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}),
+		VolumeMounts: rawList(corev1.VolumeMount{Name: "a", MountPath: "/a"}),
 	})); err != nil {
 		t.Fatalf("valid mounts rejected: %v", err)
 	}
 
 	// An init container referencing an undefined volume is rejected.
 	err = validateSpecExtras(srWith(SudoRequestSpec{
-		InitContainers: []corev1.Container{{
+		InitContainers: rawList(corev1.Container{
 			Name: "i", Image: "busybox",
 			VolumeMounts: []corev1.VolumeMount{{Name: "nope", MountPath: "/x"}},
-		}},
+		}),
 	}))
 	if err == nil || !strings.Contains(err.Error(), "no volume named") {
 		t.Fatalf("init dangling mount: got %v, want rejection", err)
@@ -279,11 +307,11 @@ func TestValidateSpecExtrasMountReferences(t *testing.T) {
 }
 
 func TestDescribeEnvSurfacesValuesAndSources(t *testing.T) {
-	sr := srWith(SudoRequestSpec{Env: []corev1.EnvVar{
-		{Name: "LITERAL", Value: "KUBECONFIG=/x"},
-		{Name: "FROMSECRET", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+	sr := srWith(SudoRequestSpec{Env: rawList(
+		corev1.EnvVar{Name: "LITERAL", Value: "KUBECONFIG=/x"},
+		corev1.EnvVar{Name: "FROMSECRET", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
 			LocalObjectReference: corev1.LocalObjectReference{Name: "creds"}, Key: "token"}}},
-	}})
+	)})
 	v := newSpecExtrasView(sr)
 	joined := strings.Join(v.Env, " | ")
 	if !strings.Contains(joined, "LITERAL=KUBECONFIG=/x") {
@@ -399,11 +427,36 @@ func TestContainerToReportPicksFailedInit(t *testing.T) {
 func TestInitContainerResourcesAreStamped(t *testing.T) {
 	// A requester init container with no resources still ends up bounded.
 	r := &SudoRequestReconciler{}
-	sr := srWith(SudoRequestSpec{InitContainers: []corev1.Container{{Name: "i", Image: "busybox"}}})
-	job := r.buildExecutorJob(sr, ControllerNamespace, jobName(sr))
+	sr := srWith(SudoRequestSpec{InitContainers: rawList(corev1.Container{Name: "i", Image: "busybox"})})
+	extras, err := decodePodExtras(sr)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	job := r.buildExecutorJob(sr, ControllerNamespace, jobName(sr), extras)
 	got := job.Spec.Template.Spec.InitContainers[0].Resources
 	if got.Limits.Memory().IsZero() || got.Limits.Cpu().IsZero() {
 		t.Errorf("init container resources not stamped: %+v", got)
+	}
+}
+
+func TestEmptyDirSizeLimitDefaultAndOverride(t *testing.T) {
+	r := &SudoRequestReconciler{}
+	custom := resource.MustParse("5Gi")
+	sr := srWith(SudoRequestSpec{Volumes: rawList(
+		corev1.Volume{Name: "scratch", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+		corev1.Volume{Name: "big", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: &custom}}},
+	)})
+	extras, err := decodePodExtras(sr)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	job := r.buildExecutorJob(sr, ControllerNamespace, jobName(sr), extras)
+	vols := job.Spec.Template.Spec.Volumes
+	if vols[0].EmptyDir.SizeLimit == nil || !vols[0].EmptyDir.SizeLimit.Equal(DefaultEmptyDirSizeLimit) {
+		t.Errorf("unbounded emptyDir not defaulted: %v", vols[0].EmptyDir.SizeLimit)
+	}
+	if vols[1].EmptyDir.SizeLimit == nil || !vols[1].EmptyDir.SizeLimit.Equal(custom) {
+		t.Errorf("requester sizeLimit not preserved: %v", vols[1].EmptyDir.SizeLimit)
 	}
 }
 
