@@ -278,9 +278,22 @@ func (r *SudoRequestReconciler) handlePending(ctx context.Context, sr *SudoReque
 }
 
 // failApproved moves an Approved request to Failed with a reason, emitting the
-// event + broadcast the same way the other terminal transitions do. Used when a
-// permanent error means the executor Job can never run.
+// event + broadcast the same way the other terminal transitions do.
+//
+// It first best-effort stops any executor Job sitting at the minted name. That
+// Job may be one we must not leave running: a foreign/pre-created Job, a Job that
+// replaced ours (UID mismatch), our own Job that ended up mounting a foreign
+// stdin Secret, or a stuck pod past its start deadline. None of these have an
+// ownerRef/activeDeadlineSeconds to stop them, so without this they'd keep
+// running (an unapproved or unreviewed workload) after we record Failed.
 func (r *SudoRequestReconciler) failApproved(ctx context.Context, sr *SudoRequest, reason string) (ctrl.Result, error) {
+	if sr.Status.ExecutorJobName != "" {
+		if job, err := r.getExecutorJob(ctx, sr); err == nil && job != nil {
+			if err := r.stopJob(ctx, job); err != nil {
+				ctrl.LoggerFrom(ctx).Error(err, "failApproved: stop executor job", "job", job.Name)
+			}
+		}
+	}
 	sr.Status.Phase = PhaseFailed
 	if err := r.Status().Update(ctx, sr); err != nil {
 		return ctrl.Result{}, err
@@ -355,6 +368,14 @@ func (r *SudoRequestReconciler) handleApproved(ctx context.Context, sr *SudoRequ
 		}
 		sr.Status.ExecutorJobUID = string(job.UID)
 		if err := r.Status().Update(ctx, sr); err != nil {
+			// Roll back the Job we just created. Otherwise the next reconcile
+			// re-enters with ExecutorJobUID still empty, finds this un-recorded Job,
+			// and (cross-namespace, where we can't authenticate it) fails the request
+			// as "foreign" — a transient status-write error would spuriously fail a
+			// legitimate request. Deleting it gives the retry a clean create.
+			if delErr := r.stopJob(ctx, job); delErr != nil {
+				log.Error(delErr, "failed to roll back executor Job after UID-record failure", "job", job.Name)
+			}
 			return ctrl.Result{}, fmt.Errorf("record executorJobUID: %w", err)
 		}
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
@@ -404,13 +425,9 @@ func (r *SudoRequestReconciler) handleApproved(ctx context.Context, sr *SudoRequ
 			return ctrl.Result{}, err
 		}
 		if timedOut {
-			// Stop the Job first: it has no activeDeadlineSeconds and (cross
-			// namespace) no ownerRef, so leaving it would let the pod start and
-			// run the privileged command after we've recorded Failed, and would
-			// leak the Job + its stdin Secret.
-			if err := r.stopJob(ctx, job); err != nil {
-				return ctrl.Result{}, fmt.Errorf("stop stuck executor job: %w", err)
-			}
+			// failApproved stops the Job (it has no activeDeadlineSeconds and, cross
+			// namespace, no ownerRef, so leaving it would let the pod start and run
+			// the privileged command after we record Failed).
 			return r.failApproved(ctx, sr, fmt.Sprintf("executor pod did not start within %ds: %s", ExecutorStartDeadline, reason))
 		}
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil

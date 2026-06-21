@@ -409,14 +409,15 @@ func (r *SudoRequestReconciler) getJobPod(ctx context.Context, job *batchv1.Job)
 
 // executorStartTimedOut reports whether the executor Job's pod has failed to make
 // progress within ExecutorStartDeadline, so a stuck pod (unsatisfiable mount,
-// unschedulable, image won't pull) doesn't leave the request in Approved forever.
+// unschedulable, image won't pull, or an init container that never exits) doesn't
+// leave the request in Approved forever.
 //
-// The deadline is measured from when the *executor's* start window opened, not
-// from Job creation: a legitimately long init container shouldn't eat into the
-// executor's own pull/create budget. So once all init containers have completed,
-// the clock restarts from the last init's finish time. While anything is still
-// actively running (an init or the executor) the pod is progressing and the
-// deadline does not apply.
+// Once the executor container itself is Running/Terminated the pod has started and
+// the deadline no longer applies. Otherwise the clock runs from the executor's
+// start window: Job creation while any init container is still
+// running/pending — so a never-exiting init is caught at the deadline — and the
+// last init's finish time once all inits have completed, giving the executor its
+// own pull/create budget after a legitimately long init.
 func (r *SudoRequestReconciler) executorStartTimedOut(ctx context.Context, job *batchv1.Job) (bool, string, error) {
 	pod, err := r.getJobPod(ctx, job)
 	if err != nil {
@@ -425,12 +426,39 @@ func (r *SudoRequestReconciler) executorStartTimedOut(ctx context.Context, job *
 	if pod == nil {
 		return time.Since(job.CreationTimestamp.Time) > ExecutorStartDeadline*time.Second, "no pod scheduled", nil
 	}
-	progressing, reason := podMadeProgress(pod)
-	if progressing {
+	if executorStarted(pod) {
 		return false, "", nil
 	}
 	ref := executorWaitStart(pod, job)
-	return time.Since(ref) > ExecutorStartDeadline*time.Second, reason, nil
+	return time.Since(ref) > ExecutorStartDeadline*time.Second, podWaitReason(pod), nil
+}
+
+// executorStarted reports whether the executor container has reached
+// Running/Terminated. A running *init* container does NOT count — otherwise an
+// init that never exits would keep the pod "progressing" and defeat the deadline.
+func executorStarted(pod *corev1.Pod) bool {
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.Name == "executor" && (cs.State.Running != nil || cs.State.Terminated != nil) {
+			return true
+		}
+	}
+	return false
+}
+
+// podWaitReason returns the first waiting container's reason/message, for the
+// timeout diagnostic (e.g. a missing Secret behind ContainerCreating).
+func podWaitReason(pod *corev1.Pod) string {
+	reason := "pod pending"
+	allStatuses := append(append([]corev1.ContainerStatus{}, pod.Status.InitContainerStatuses...), pod.Status.ContainerStatuses...)
+	for _, cs := range allStatuses {
+		if cs.State.Waiting != nil && cs.State.Waiting.Reason != "" {
+			reason = cs.State.Waiting.Reason
+			if cs.State.Waiting.Message != "" {
+				reason += ": " + cs.State.Waiting.Message
+			}
+		}
+	}
+	return reason
 }
 
 // executorWaitStart returns the moment the executor container's start window
@@ -455,34 +483,6 @@ func executorWaitStart(pod *corev1.Pod, job *batchv1.Job) time.Time {
 		return ref
 	}
 	return latest
-}
-
-// podMadeProgress is the pure progress check: the executor
-// container reached Running/Terminated, OR some container is currently Running (a
-// slow init step still executing). A merely terminated init container does NOT
-// count — a completed init followed by an executor stuck in ImagePullBackOff is
-// the stuck state the deadline must catch. Returns the first waiting reason when
-// not progressed, for diagnostics.
-func podMadeProgress(pod *corev1.Pod) (bool, string) {
-	for _, cs := range pod.Status.ContainerStatuses {
-		if cs.Name == "executor" && (cs.State.Running != nil || cs.State.Terminated != nil) {
-			return true, ""
-		}
-	}
-	reason := "pod pending"
-	allStatuses := append(append([]corev1.ContainerStatus{}, pod.Status.InitContainerStatuses...), pod.Status.ContainerStatuses...)
-	for _, cs := range allStatuses {
-		if cs.State.Running != nil {
-			return true, ""
-		}
-		if cs.State.Waiting != nil && cs.State.Waiting.Reason != "" {
-			reason = cs.State.Waiting.Reason
-			if cs.State.Waiting.Message != "" {
-				reason += ": " + cs.State.Waiting.Message
-			}
-		}
-	}
-	return false, reason
 }
 
 // containerToReport returns the container whose logs and exit code best explain

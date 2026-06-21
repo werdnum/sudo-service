@@ -404,36 +404,29 @@ func TestExecutorWaitStartAfterInitCompletion(t *testing.T) {
 	}
 }
 
-func TestPodMadeProgress(t *testing.T) {
-	waiting := func(reason string) corev1.ContainerState {
-		return corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: reason}}
-	}
+func TestExecutorStarted(t *testing.T) {
+	waiting := corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "PodInitializing"}}
 	running := corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}
 	term := corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{}}
 
-	// Terminated init + executor stuck waiting -> NOT progressed (the bug fix:
-	// a completed init must not mask an executor stuck on ImagePullBackOff).
-	stuck := &corev1.Pod{Status: corev1.PodStatus{
+	// Executor running/terminated -> started.
+	if !executorStarted(&corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{Name: "executor", State: running}}}}) {
+		t.Error("running executor: want started")
+	}
+	// A merely-terminated init with the executor still waiting is NOT started.
+	if executorStarted(&corev1.Pod{Status: corev1.PodStatus{
 		InitContainerStatuses: []corev1.ContainerStatus{{Name: "copy", State: term}},
-		ContainerStatuses:     []corev1.ContainerStatus{{Name: "executor", State: waiting("ImagePullBackOff")}},
-	}}
-	if ok, reason := podMadeProgress(stuck); ok || reason != "ImagePullBackOff" {
-		t.Errorf("terminated-init + stuck-executor: got (%v, %q), want (false, ImagePullBackOff)", ok, reason)
+		ContainerStatuses:     []corev1.ContainerStatus{{Name: "executor", State: waiting}},
+	}}) {
+		t.Error("terminated-init + waiting-executor: want NOT started")
 	}
-
-	// Executor running -> progressed.
-	exec := &corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{Name: "executor", State: running}}}}
-	if ok, _ := podMadeProgress(exec); !ok {
-		t.Error("running executor: want progressed")
-	}
-
-	// Init currently running (slow setup) -> progressed, don't kill it.
-	initRun := &corev1.Pod{Status: corev1.PodStatus{
+	// A still-running init does NOT count as the executor having started — so a
+	// never-exiting init can't defeat the deadline.
+	if executorStarted(&corev1.Pod{Status: corev1.PodStatus{
 		InitContainerStatuses: []corev1.ContainerStatus{{Name: "copy", State: running}},
-		ContainerStatuses:     []corev1.ContainerStatus{{Name: "executor", State: waiting("PodInitializing")}},
-	}}
-	if ok, _ := podMadeProgress(initRun); !ok {
-		t.Error("running init: want progressed")
+		ContainerStatuses:     []corev1.ContainerStatus{{Name: "executor", State: waiting}},
+	}}) {
+		t.Error("running init + waiting executor: want NOT started")
 	}
 }
 
