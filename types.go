@@ -149,6 +149,14 @@ type SudoRequestStatus struct {
 	ExitCode        *int32 `json:"exitCode,omitempty"`
 	OutputSecretRef string `json:"outputSecretRef,omitempty"`
 
+	// StdinSecretName is the controller-minted, unguessable name of the Secret
+	// holding spec.stdin. It is generated randomly (not derived from the request
+	// UID, which the requester learns at create time) and recorded before the
+	// executor Job is created, so a requester who can create Secrets in the target
+	// namespace cannot pre-create it to swap in an unapproved payload. Empty when
+	// the request has no stdin.
+	StdinSecretName string `json:"stdinSecretName,omitempty"`
+
 	// Summary is an optional, AI-generated human-readable review aid for the
 	// command, produced once when the request enters Pending and cached here
 	// (the object is the natural machine-readable cache). Empty when the

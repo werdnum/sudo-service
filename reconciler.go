@@ -310,14 +310,30 @@ func (r *SudoRequestReconciler) handleApproved(ctx context.Context, sr *SudoRequ
 	// controller-manager already GC'd it), we have to assume it already ran
 	// — fail the request rather than re-create and replay the privileged
 	// command. We have no output to capture in that case.
+	// Mint the unguessable stdin Secret name BEFORE the Job is created (the Job
+	// references it). Persisting it first makes it replay-safe and means a
+	// requester can't pre-create a predictable Secret to swap the payload.
+	if sr.Spec.Stdin != "" && sr.Status.StdinSecretName == "" {
+		suffix, err := randomToken(8)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("mint stdin secret name: %w", err)
+		}
+		sr.Status.StdinSecretName = "sudo-stdin-" + suffix
+		if err := r.Status().Update(ctx, sr); err != nil {
+			return ctrl.Result{}, fmt.Errorf("record stdinSecretName: %w", err)
+		}
+		return ctrl.Result{Requeue: true}, nil
+	}
+
 	if sr.Status.ExecutorJobName == "" {
 		job, err := r.findOrCreateJob(ctx, sr)
 		if err != nil {
-			// A permanent rejection (the apiserver refused the Job spec, or RBAC
-			// forbids it) will never succeed on retry. Fail the request instead of
-			// looping forever in Approved. Validation catches the known cases up
-			// front; this is the backstop for anything that slips through.
-			if apierrors.IsInvalid(err) || apierrors.IsForbidden(err) {
+			// A permanent rejection (the apiserver refused the Job spec, RBAC
+			// forbids it, or the target namespace doesn't exist) will never succeed
+			// on retry. Fail the request instead of looping forever in Approved.
+			// Validation catches the known cases up front; this is the backstop for
+			// anything that slips through.
+			if apierrors.IsInvalid(err) || apierrors.IsForbidden(err) || apierrors.IsNotFound(err) {
 				return r.failApproved(ctx, sr, fmt.Sprintf("executor Job rejected: %v", err))
 			}
 			return ctrl.Result{}, err

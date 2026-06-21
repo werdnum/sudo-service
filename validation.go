@@ -102,6 +102,19 @@ func validateSpecExtras(sr *SudoRequest) error {
 		if c.SecurityContext != nil {
 			return fmt.Errorf("initContainer %q: securityContext is set by the controller and may not be specified", c.Name)
 		}
+		// restartPolicy=Always turns an init container into a native sidecar that
+		// runs concurrently with the executor, not a sequential setup step — which
+		// is how the approve page presents it. Reject it so the reviewer isn't
+		// misled.
+		if c.RestartPolicy != nil {
+			return fmt.Errorf("initContainer %q: restartPolicy may not be set (a sidecar would run concurrently with the approved command)", c.Name)
+		}
+		// volumeDevices grants raw block-device access to a PVC and is not rendered
+		// on the approve page (only VolumeMounts are), so it would be invisible to
+		// the reviewer. Reject it.
+		if len(c.VolumeDevices) > 0 {
+			return fmt.Errorf("initContainer %q: volumeDevices (raw block devices) are not permitted", c.Name)
+		}
 		// Init containers don't get the stdin mount, so the path isn't reserved
 		// for them, but they still may only reference defined volumes.
 		if err := validateMounts(fmt.Sprintf("initContainer %q", c.Name), c.VolumeMounts, volNames, false); err != nil {

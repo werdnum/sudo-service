@@ -37,6 +37,21 @@ func TestValidateSpecExtrasVolumeAllowlist(t *testing.T) {
 	}
 }
 
+func TestValidateSpecExtrasInitContainerSidecarAndDevices(t *testing.T) {
+	always := corev1.ContainerRestartPolicyAlways
+	sidecar := []corev1.Container{{Name: "s", Image: "busybox", RestartPolicy: &always}}
+	if err := validateSpecExtras(srWith(SudoRequestSpec{InitContainers: sidecar})); err == nil ||
+		!strings.Contains(err.Error(), "restartPolicy") {
+		t.Errorf("sidecar init container: got %v, want restartPolicy rejection", err)
+	}
+
+	devices := []corev1.Container{{Name: "d", Image: "busybox", VolumeDevices: []corev1.VolumeDevice{{Name: "blk", DevicePath: "/dev/xvda"}}}}
+	if err := validateSpecExtras(srWith(SudoRequestSpec{InitContainers: devices})); err == nil ||
+		!strings.Contains(err.Error(), "volumeDevices") {
+		t.Errorf("init container volumeDevices: got %v, want rejection", err)
+	}
+}
+
 func TestValidateSpecExtrasInitContainerSecurityContext(t *testing.T) {
 	ok := []corev1.Container{{Name: "copy", Image: "busybox"}}
 	if err := validateSpecExtras(srWith(SudoRequestSpec{InitContainers: ok})); err != nil {

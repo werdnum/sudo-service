@@ -207,7 +207,10 @@ approve page):
   carry a serviceAccountToken) are rejected.
 - `env` / `envFrom` — e.g. a `secretRef` for credentials.
 - `initContainers` — e.g. to stage a tool binary into a shared `emptyDir`. They
-  may **not** set their own `securityContext` (the controller locks it down).
+  run sequentially before the executor and inherit its locked-down
+  securityContext and resource bounds. They may **not** set their own
+  `securityContext`, a `restartPolicy` (no sidecars), or `volumeDevices` (raw
+  block devices); their command, mounts and env are shown on the approve page.
 - `stdin` — fed to the command's stdin. Use this instead of a heredoc to pipe a
   manifest to `kubectl apply -f -`; it travels as literal bytes, no shell quoting.
 - `privileges.clusterAdmin` — defaults `true` in `sudo-service`, where it grants

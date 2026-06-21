@@ -147,6 +147,13 @@ spec:
                     Name of the short-TTL Secret in sudo-service namespace holding
                     stdout/stderr. Reads go through the controller HTTP API, not
                     direct RBAC.
+                stdinSecretName:
+                  type: string
+                  description: >-
+                    Controller-minted, unguessable name of the Secret holding
+                    spec.stdin, recorded before the executor Job is created so a
+                    requester cannot pre-create a predictable Secret to swap the
+                    approved payload.
                 summary:
                   type: string
                   description: >-

@@ -182,7 +182,7 @@ func (r *SudoRequestReconciler) buildExecutorJob(sr *SudoRequest, ns, name strin
 			Name: stdinVolumeName,
 			VolumeSource: corev1.VolumeSource{
 				Secret: &corev1.SecretVolumeSource{
-					SecretName:  stdinSecretName(sr),
+					SecretName:  sr.Status.StdinSecretName,
 					DefaultMode: &mode,
 				},
 			},
@@ -293,7 +293,7 @@ func (r *SudoRequestReconciler) ensureStdinSecret(ctx context.Context, sr *SudoR
 	tru := true
 	sec := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      stdinSecretName(sr),
+			Name:      sr.Status.StdinSecretName,
 			Namespace: job.Namespace,
 			Labels:    map[string]string{"app": "sudo-service", "role": "stdin"},
 			OwnerReferences: []metav1.OwnerReference{{
@@ -443,7 +443,6 @@ func resourceName(sr *SudoRequest, prefix string) string {
 }
 
 func jobName(sr *SudoRequest) string          { return resourceName(sr, "sudo-exec-") }
-func stdinSecretName(sr *SudoRequest) string  { return resourceName(sr, "sudo-stdin-") }
 func outputSecretName(sr *SudoRequest) string { return resourceName(sr, "sudo-out-") }
 
 // ttlSecondsAfterApproval returns the per-request TTL (capped at ExecutorJobTTL
