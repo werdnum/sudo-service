@@ -117,17 +117,16 @@ func validateSpecExtras(sr *SudoRequest) error {
 		// than denied field-by-field), so what runs can always be faithfully shown
 		// to the human. securityContext and resources are stamped by the controller.
 		permitted := corev1.Container{
-			Name:            c.Name,
-			Image:           c.Image,
-			Command:         c.Command,
-			Args:            c.Args,
-			Env:             c.Env,
-			EnvFrom:         c.EnvFrom,
-			VolumeMounts:    c.VolumeMounts,
-			ImagePullPolicy: c.ImagePullPolicy,
+			Name:         c.Name,
+			Image:        c.Image,
+			Command:      c.Command,
+			Args:         c.Args,
+			Env:          c.Env,
+			EnvFrom:      c.EnvFrom,
+			VolumeMounts: c.VolumeMounts,
 		}
 		if !reflect.DeepEqual(c, permitted) {
-			return fmt.Errorf("initContainer %q: only name, image, command, args, env, envFrom, volumeMounts and imagePullPolicy are permitted", c.Name)
+			return fmt.Errorf("initContainer %q: only name, image, command, args, env, envFrom and volumeMounts are permitted", c.Name)
 		}
 		// Init containers may not mount the controller-owned stdin volume (the
 		// approve page presents stdin as fed to the executor command, not as a file

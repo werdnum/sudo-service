@@ -113,6 +113,27 @@ func TestValidateSpecExtrasRejectsHiddenFields(t *testing.T) {
 	}
 }
 
+func TestVolumeAndArgvRenderingFaithful(t *testing.T) {
+	// secret.items key->path mappings are surfaced.
+	vol := corev1.Volume{Name: "creds", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+		SecretName: "backup", Items: []corev1.KeyToPath{{Key: "admin-token", Path: "innocuous.txt"}}}}}
+	if desc, _ := describeVolumeSource(vol); !strings.Contains(desc, "admin-token->innocuous.txt") {
+		t.Errorf("secret items not rendered: %q", desc)
+	}
+	// argv boundaries preserved by shell quoting.
+	if got := shellJoin([]string{"sh", "-c", "rm -rf /x"}); got != "sh -c 'rm -rf /x'" {
+		t.Errorf("shellJoin = %q, want quoted script token", got)
+	}
+}
+
+func TestValidateSpecExtrasRejectsImagePullPolicy(t *testing.T) {
+	c := []corev1.Container{{Name: "c", Image: "busybox", Command: []string{"sh"}, ImagePullPolicy: corev1.PullNever}}
+	if err := validateSpecExtras(srWith(SudoRequestSpec{InitContainers: rawList(c...)})); err == nil ||
+		!strings.Contains(err.Error(), "permitted") {
+		t.Errorf("init imagePullPolicy: got %v, want allowlist rejection", err)
+	}
+}
+
 func TestValidateSpecExtrasInitContainerRequiresCommand(t *testing.T) {
 	noCmd := []corev1.Container{{Name: "c", Image: "busybox"}}
 	if err := validateSpecExtras(srWith(SudoRequestSpec{InitContainers: rawList(noCmd...)})); err == nil ||
@@ -265,8 +286,9 @@ func TestInitContainerCommandSurfacedToReviewer(t *testing.T) {
 		t.Fatalf("expected 1 init container view, got %d", len(v.InitContainers))
 	}
 	ic := v.InitContainers[0]
-	if ic.Command != "/bin/sh -c cp x /tools/y" {
-		t.Errorf("init container command not surfaced: %q", ic.Command)
+	// argv boundaries are preserved: the multi-word script stays one token.
+	if ic.Command != "/bin/sh -c 'cp x /tools/y'" {
+		t.Errorf("init container command not surfaced faithfully: %q", ic.Command)
 	}
 	if len(ic.Mounts) != 1 {
 		t.Errorf("init container mounts not surfaced: %v", ic.Mounts)

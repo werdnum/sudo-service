@@ -65,7 +65,7 @@ func newSpecExtrasView(sr *SudoRequest, redactEnv bool) specExtrasView {
 		icv := initContainerView{
 			Name:    c.Name,
 			Image:   c.Image,
-			Command: strings.TrimSpace(strings.Join(append(append([]string{}, c.Command...), c.Args...), " ")),
+			Command: shellJoin(append(append([]string{}, c.Command...), c.Args...)),
 			Env:     describeEnv(c.Env, redactEnv),
 			EnvFrom: describeEnvFrom(c.EnvFrom),
 		}
@@ -133,6 +133,46 @@ func describeEnvFrom(sources []corev1.EnvFromSource) []string {
 	return out
 }
 
+// keyPathItems renders a secret/configMap volume's key->path projections, so the
+// reviewer sees e.g. that the key "admin-token" is mounted at an innocuous path,
+// not just the object name. Empty when the volume projects all keys at default
+// paths.
+func keyPathItems(items []corev1.KeyToPath) string {
+	if len(items) == 0 {
+		return ""
+	}
+	parts := make([]string, len(items))
+	for i, it := range items {
+		parts[i] = it.Key + "->" + it.Path
+	}
+	return " [" + strings.Join(parts, ", ") + "]"
+}
+
+// shellJoin renders an argv slice so the reviewer can see token boundaries — a
+// multi-word `sh -c '<script>'` argument stays visibly one token rather than
+// blurring into the surrounding flags. Tokens with shell-significant characters
+// are single-quoted.
+func shellJoin(argv []string) string {
+	out := make([]string, len(argv))
+	for i, a := range argv {
+		out[i] = shellQuote(a)
+	}
+	return strings.Join(out, " ")
+}
+
+func shellQuote(s string) string {
+	if s == "" {
+		return "''"
+	}
+	if strings.IndexFunc(s, func(r rune) bool {
+		return !(r == '_' || r == '-' || r == '.' || r == '/' || r == ':' ||
+			(r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9'))
+	}) < 0 {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
 // describeVolumeSource is the single source of truth for the reviewable volume
 // allowlist: it returns a human description of v's source and whether that source
 // is permitted. validateVolumeSource gates on the bool; the approve page renders
@@ -149,9 +189,9 @@ func describeVolumeSource(v corev1.Volume) (desc string, allowed bool) {
 		}
 		return "emptyDir (" + size + ")", true
 	case v.Secret != nil:
-		return "secret/" + v.Secret.SecretName, true
+		return "secret/" + v.Secret.SecretName + keyPathItems(v.Secret.Items), true
 	case v.ConfigMap != nil:
-		return "configMap/" + v.ConfigMap.Name, true
+		return "configMap/" + v.ConfigMap.Name + keyPathItems(v.ConfigMap.Items), true
 	case v.PersistentVolumeClaim != nil:
 		ro := ""
 		if v.PersistentVolumeClaim.ReadOnly {
