@@ -115,8 +115,14 @@ func validateSpecExtras(sr *SudoRequest) error {
 		if len(c.VolumeDevices) > 0 {
 			return fmt.Errorf("initContainer %q: volumeDevices (raw block devices) are not permitted", c.Name)
 		}
-		// Init containers don't get the stdin mount, so the path isn't reserved
-		// for them, but they still may only reference defined volumes.
+		// Init containers may only reference defined volumes, and may not mount the
+		// controller-owned stdin volume (the approve page presents stdin as fed to
+		// the executor command, not as a file other containers read).
+		for _, m := range c.VolumeMounts {
+			if m.Name == stdinVolumeName {
+				return fmt.Errorf("initContainer %q: volumeMount name %q is reserved for the stdin payload", c.Name, stdinVolumeName)
+			}
+		}
 		if err := validateMounts(fmt.Sprintf("initContainer %q", c.Name), c.VolumeMounts, volNames, false); err != nil {
 			return err
 		}

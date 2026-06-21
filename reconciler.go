@@ -386,6 +386,13 @@ func (r *SudoRequestReconciler) handleApproved(ctx context.Context, sr *SudoRequ
 				return ctrl.Result{}, err
 			}
 			if !started {
+				// Stop the Job first: it has no activeDeadlineSeconds and (cross
+				// namespace) no ownerRef, so leaving it would let the pod start and
+				// run the privileged command after we've recorded Failed, and would
+				// leak the Job + its stdin Secret.
+				if err := r.stopJob(ctx, job); err != nil {
+					return ctrl.Result{}, fmt.Errorf("stop stuck executor job: %w", err)
+				}
 				return r.failApproved(ctx, sr, fmt.Sprintf("executor pod did not start within %ds: %s", ExecutorStartDeadline, reason))
 			}
 		}

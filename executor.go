@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"strings"
@@ -285,7 +284,13 @@ func hardenedContainerSecurityContext() *corev1.SecurityContext {
 
 // ensureStdinSecret creates the Secret holding spec.stdin, owned by the executor
 // Job so it is garbage-collected when the Job's TTL elapses. No-op when the
-// request has no stdin. Idempotent on requeue.
+// request has no stdin.
+//
+// The Secret name is sr.Status.StdinSecretName — a random token minted into
+// status before the Job exists (see handleApproved), not derived from the
+// request UID. Because the name is unguessable, a requester cannot pre-create it
+// to swap the payload, so AlreadyExists can only mean our own prior create on a
+// requeue: idempotent, treated as success.
 func (r *SudoRequestReconciler) ensureStdinSecret(ctx context.Context, sr *SudoRequest, job *batchv1.Job) error {
 	if sr.Spec.Stdin == "" {
 		return nil
@@ -308,57 +313,66 @@ func (r *SudoRequestReconciler) ensureStdinSecret(ctx context.Context, sr *SudoR
 		Type: corev1.SecretTypeOpaque,
 		Data: map[string][]byte{"stdin": []byte(sr.Spec.Stdin)},
 	}
-	err := r.Create(ctx, sec)
-	if err == nil {
-		return nil
-	}
-	if !apierrors.IsAlreadyExists(err) {
+	if err := r.Create(ctx, sec); err != nil && !apierrors.IsAlreadyExists(err) {
 		return fmt.Errorf("create stdin secret: %w", err)
-	}
-
-	// The Secret name is derived from the SudoRequest UID, which the requester
-	// learns at create time. In a target namespace where they can create Secrets,
-	// they could pre-create it with different content so the Job mounts an
-	// unapproved payload. So on AlreadyExists, fail closed unless the existing
-	// Secret is the one we own (ownerRef to *this* Job) with the approved bytes.
-	var existing corev1.Secret
-	if err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: job.Namespace, Name: sec.Name}, &existing); err != nil {
-		return fmt.Errorf("get existing stdin secret: %w", err)
-	}
-	ownedByJob := false
-	for _, o := range existing.OwnerReferences {
-		if o.UID == job.UID && o.Kind == "Job" {
-			ownedByJob = true
-			break
-		}
-	}
-	if !ownedByJob || !bytes.Equal(existing.Data["stdin"], sec.Data["stdin"]) {
-		return fmt.Errorf("stdin secret %s/%s already exists and is not the controller-owned approved payload; refusing to mount it", job.Namespace, sec.Name)
 	}
 	return nil
 }
 
-// executorPodStarted reports whether the executor Job's pod has made progress —
-// i.e. any init or main container has reached Running or Terminated. If nothing
-// has started it also returns a human-readable waiting reason (the first waiting
-// container's reason/message, e.g. a missing Secret) for the failure diagnostic.
-func (r *SudoRequestReconciler) executorPodStarted(ctx context.Context, job *batchv1.Job) (bool, string, error) {
+// getJobPod returns the (first) pod of the executor Job, read uncached because
+// the pod may be in spec.namespace which the cache doesn't watch. Returns
+// (nil, nil) when no pod exists yet.
+func (r *SudoRequestReconciler) getJobPod(ctx context.Context, job *batchv1.Job) (*corev1.Pod, error) {
 	var pods corev1.PodList
 	if err := r.APIReader.List(ctx, &pods,
 		client.InNamespace(job.Namespace),
 		client.MatchingLabels{"job-name": job.Name},
 	); err != nil {
-		return false, "", fmt.Errorf("list job pods: %w", err)
+		return nil, fmt.Errorf("list job pods: %w", err)
 	}
 	if len(pods.Items) == 0 {
+		return nil, nil
+	}
+	return &pods.Items[0], nil
+}
+
+// executorPodStarted reports whether the executor Job's pod has made real
+// progress, so the start-deadline doesn't fire on a pod that is genuinely
+// pulling/initialising. "Progress" means the executor container itself has
+// reached Running or Terminated, OR some container is currently Running (e.g. a
+// slow init step still executing). A merely *terminated* init container does NOT
+// count: a completed init followed by an executor stuck in ImagePullBackOff is
+// exactly the stuck state we must catch. When nothing has progressed it also
+// returns the first waiting container's reason for the failure diagnostic.
+func (r *SudoRequestReconciler) executorPodStarted(ctx context.Context, job *batchv1.Job) (bool, string, error) {
+	pod, err := r.getJobPod(ctx, job)
+	if err != nil {
+		return false, "", err
+	}
+	if pod == nil {
 		return false, "no pod scheduled", nil
 	}
-	pod := pods.Items[0]
+	started, reason := podMadeProgress(pod)
+	return started, reason, nil
+}
+
+// podMadeProgress is the pure decision behind executorPodStarted: the executor
+// container reached Running/Terminated, OR some container is currently Running (a
+// slow init step still executing). A merely terminated init container does NOT
+// count — a completed init followed by an executor stuck in ImagePullBackOff is
+// the stuck state the deadline must catch. Returns the first waiting reason when
+// not progressed, for diagnostics.
+func podMadeProgress(pod *corev1.Pod) (bool, string) {
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.Name == "executor" && (cs.State.Running != nil || cs.State.Terminated != nil) {
+			return true, ""
+		}
+	}
 	reason := "pod pending"
 	allStatuses := append(append([]corev1.ContainerStatus{}, pod.Status.InitContainerStatuses...), pod.Status.ContainerStatuses...)
 	for _, cs := range allStatuses {
-		if cs.State.Running != nil || cs.State.Terminated != nil {
-			return true, "", nil
+		if cs.State.Running != nil {
+			return true, ""
 		}
 		if cs.State.Waiting != nil && cs.State.Waiting.Reason != "" {
 			reason = cs.State.Waiting.Reason
@@ -367,7 +381,7 @@ func (r *SudoRequestReconciler) executorPodStarted(ctx context.Context, job *bat
 			}
 		}
 	}
-	return false, reason, nil
+	return false, reason
 }
 
 // containerToReport returns the container whose logs and exit code best explain
@@ -391,6 +405,20 @@ func containerToReport(pod *corev1.Pod) (container string, exitCode int32, err e
 	return "", -1, fmt.Errorf("no terminated container to report yet")
 }
 
+// stopJob deletes the executor Job with background propagation, terminating its
+// pod and cascading its owned stdin Secret. Used when we fail a request whose pod
+// never started: without this the Job (which has no activeDeadlineSeconds, and no
+// ownerRef when cross-namespace) would keep its pod and could still run the
+// privileged command after the request is recorded Failed, and would leak in the
+// target namespace. Best-effort: a NotFound (already gone) is fine.
+func (r *SudoRequestReconciler) stopJob(ctx context.Context, job *batchv1.Job) error {
+	policy := metav1.DeletePropagationBackground
+	if err := r.Delete(ctx, job, &client.DeleteOptions{PropagationPolicy: &policy}); err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+	return nil
+}
+
 func executorLabels() map[string]string {
 	return map[string]string{
 		AppLabelKey:  ExecutorAppLabelValue,
@@ -404,23 +432,19 @@ func (r *SudoRequestReconciler) captureJobOutput(ctx context.Context, sr *SudoRe
 	// Find the pod owned by the job (in the executor namespace, which may differ
 	// from the controller namespace for cross-namespace requests). Uncached: the
 	// cache doesn't watch spec.namespace.
-	var pods corev1.PodList
-	if err := r.APIReader.List(ctx, &pods,
-		client.InNamespace(job.Namespace),
-		client.MatchingLabels{"job-name": job.Name},
-	); err != nil {
-		return "", -1, fmt.Errorf("list job pods: %w", err)
+	pod, err := r.getJobPod(ctx, job)
+	if err != nil {
+		return "", -1, err
 	}
-	if len(pods.Items) == 0 {
+	if pod == nil {
 		return "", -1, fmt.Errorf("no pods for job %s yet", job.Name)
 	}
-	pod := pods.Items[0]
 
 	// Pick which container's logs and exit code to report. Normally it's the
 	// executor; but if an init container failed, the executor never starts, so we
 	// report the failing init container's logs/exit code — that's where the
 	// requester's setup step actually broke.
-	logContainer, exitCode, err := containerToReport(&pod)
+	logContainer, exitCode, err := containerToReport(pod)
 	if err != nil {
 		return "", -1, err
 	}
@@ -459,9 +483,9 @@ func (r *SudoRequestReconciler) captureJobOutput(ctx context.Context, sr *SudoRe
 
 // resourceName builds a deterministic DNS-1123 name (lowercase, <=63 chars) for a
 // per-request child resource: a stable prefix plus a 12-char slice of the
-// SudoRequest UID. jobName, stdinSecretName and outputSecretName must all agree
-// on this scheme so the Job and the Secrets it references derive the same suffix
-// from the same UID — hence the single helper.
+// SudoRequest UID. Used by jobName and outputSecretName. (The stdin Secret name
+// is deliberately NOT built here — it is randomly minted into status so a
+// requester can't pre-create it; see SudoRequestStatus.StdinSecretName.)
 func resourceName(sr *SudoRequest, prefix string) string {
 	uid := strings.ReplaceAll(string(sr.UID), "-", "")
 	if len(uid) > 12 {

@@ -291,6 +291,39 @@ func TestDescribeEnvSurfacesValuesAndSources(t *testing.T) {
 	}
 }
 
+func TestPodMadeProgress(t *testing.T) {
+	waiting := func(reason string) corev1.ContainerState {
+		return corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: reason}}
+	}
+	running := corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}
+	term := corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{}}
+
+	// Terminated init + executor stuck waiting -> NOT progressed (the bug fix:
+	// a completed init must not mask an executor stuck on ImagePullBackOff).
+	stuck := &corev1.Pod{Status: corev1.PodStatus{
+		InitContainerStatuses: []corev1.ContainerStatus{{Name: "copy", State: term}},
+		ContainerStatuses:     []corev1.ContainerStatus{{Name: "executor", State: waiting("ImagePullBackOff")}},
+	}}
+	if ok, reason := podMadeProgress(stuck); ok || reason != "ImagePullBackOff" {
+		t.Errorf("terminated-init + stuck-executor: got (%v, %q), want (false, ImagePullBackOff)", ok, reason)
+	}
+
+	// Executor running -> progressed.
+	exec := &corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{Name: "executor", State: running}}}}
+	if ok, _ := podMadeProgress(exec); !ok {
+		t.Error("running executor: want progressed")
+	}
+
+	// Init currently running (slow setup) -> progressed, don't kill it.
+	initRun := &corev1.Pod{Status: corev1.PodStatus{
+		InitContainerStatuses: []corev1.ContainerStatus{{Name: "copy", State: running}},
+		ContainerStatuses:     []corev1.ContainerStatus{{Name: "executor", State: waiting("PodInitializing")}},
+	}}
+	if ok, _ := podMadeProgress(initRun); !ok {
+		t.Error("running init: want progressed")
+	}
+}
+
 func TestContainerToReportInitStillRunning(t *testing.T) {
 	// Executor waiting, init still running -> nothing terminated yet, requeue.
 	pod := &corev1.Pod{Status: corev1.PodStatus{
