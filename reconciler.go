@@ -372,8 +372,23 @@ func (r *SudoRequestReconciler) handleApproved(ctx context.Context, sr *SudoRequ
 		return ctrl.Result{}, nil
 	}
 
-	// If job is still running, requeue.
+	// If job is still running, requeue — but guard against a pod that never
+	// starts. An unsatisfiable mount (a Secret/ConfigMap/PVC that doesn't exist in
+	// the target namespace), an unschedulable pod, an image that won't pull, etc.
+	// leaves the pod in ContainerCreating without ever incrementing the Job's
+	// succeeded/failed counts, so without this the request would sit in Approved
+	// forever. If no container has started within ExecutorStartDeadline of Job
+	// creation, fail the request with the pod's waiting reason.
 	if job.Status.Succeeded == 0 && job.Status.Failed == 0 {
+		if time.Since(job.CreationTimestamp.Time) > ExecutorStartDeadline*time.Second {
+			started, reason, err := r.executorPodStarted(ctx, job)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			if !started {
+				return r.failApproved(ctx, sr, fmt.Sprintf("executor pod did not start within %ds: %s", ExecutorStartDeadline, reason))
+			}
+		}
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 

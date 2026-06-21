@@ -45,6 +45,13 @@ const (
 	ExecutorJobTTL      = 60 * 60 // 1 hour (seconds)
 	DefaultPostApproval = 3600    // ttlSecondsAfterApproval default (1 hour)
 
+	// ExecutorStartDeadline bounds how long an approved request waits for its
+	// executor pod to start running. A pod stuck in ContainerCreating (an
+	// unsatisfiable mount, an unschedulable pod, an image that won't pull) never
+	// increments the Job's succeeded/failed counts, so without this the request
+	// would sit in Approved forever. Generous, since it includes image-pull time.
+	ExecutorStartDeadline = 600 // seconds (10 minutes)
+
 	// ExecutorJobTTLFloor is the minimum lifetime of a finished executor Job,
 	// independent of the requester's (output-retention) ttlSecondsAfterApproval.
 	// The reconciler polls the Job to capture output; if the requester asks for a

@@ -291,6 +291,21 @@ func TestDescribeEnvSurfacesValuesAndSources(t *testing.T) {
 	}
 }
 
+func TestContainerToReportInitStillRunning(t *testing.T) {
+	// Executor waiting, init still running -> nothing terminated yet, requeue.
+	pod := &corev1.Pod{Status: corev1.PodStatus{
+		InitContainerStatuses: []corev1.ContainerStatus{
+			{Name: "copy", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
+		},
+		ContainerStatuses: []corev1.ContainerStatus{
+			{Name: "executor", State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "PodInitializing"}}},
+		},
+	}}
+	if _, _, err := containerToReport(pod); err == nil {
+		t.Error("expected error (nothing terminated yet), got nil")
+	}
+}
+
 func TestContainerToReportPicksFailedInit(t *testing.T) {
 	pod := &corev1.Pod{Status: corev1.PodStatus{
 		InitContainerStatuses: []corev1.ContainerStatus{

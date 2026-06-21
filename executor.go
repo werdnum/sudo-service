@@ -338,6 +338,38 @@ func (r *SudoRequestReconciler) ensureStdinSecret(ctx context.Context, sr *SudoR
 	return nil
 }
 
+// executorPodStarted reports whether the executor Job's pod has made progress —
+// i.e. any init or main container has reached Running or Terminated. If nothing
+// has started it also returns a human-readable waiting reason (the first waiting
+// container's reason/message, e.g. a missing Secret) for the failure diagnostic.
+func (r *SudoRequestReconciler) executorPodStarted(ctx context.Context, job *batchv1.Job) (bool, string, error) {
+	var pods corev1.PodList
+	if err := r.APIReader.List(ctx, &pods,
+		client.InNamespace(job.Namespace),
+		client.MatchingLabels{"job-name": job.Name},
+	); err != nil {
+		return false, "", fmt.Errorf("list job pods: %w", err)
+	}
+	if len(pods.Items) == 0 {
+		return false, "no pod scheduled", nil
+	}
+	pod := pods.Items[0]
+	reason := "pod pending"
+	allStatuses := append(append([]corev1.ContainerStatus{}, pod.Status.InitContainerStatuses...), pod.Status.ContainerStatuses...)
+	for _, cs := range allStatuses {
+		if cs.State.Running != nil || cs.State.Terminated != nil {
+			return true, "", nil
+		}
+		if cs.State.Waiting != nil && cs.State.Waiting.Reason != "" {
+			reason = cs.State.Waiting.Reason
+			if cs.State.Waiting.Message != "" {
+				reason += ": " + cs.State.Waiting.Message
+			}
+		}
+	}
+	return false, reason, nil
+}
+
 // containerToReport returns the container whose logs and exit code best explain
 // the outcome: the executor if it terminated, otherwise a failed init container
 // (whose nonzero exit prevented the executor from starting). It returns an error
