@@ -364,19 +364,20 @@ func (a *APIServer) indexHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 type approveView struct {
-	UID       string
-	Token     string
-	Requester string
-	Reason    string
-	Command   string
-	Image     string
-	Stdin     string
-	Extras    specExtrasView
-	Summary   string
-	CreatedAt string
-	User      string
-	UserEmail string
-	Error     string
+	UID         string
+	Token       string
+	Requester   string
+	Reason      string
+	Command     string
+	Image       string
+	Stdin       string
+	Extras      specExtrasView
+	PodTemplate string
+	Summary     string
+	CreatedAt   string
+	User        string
+	UserEmail   string
+	Error       string
 }
 
 // resultView backs result.html, the styled confirmation page shown after an
@@ -443,6 +444,11 @@ func (a *APIServer) renderApprovePage(w http.ResponseWriter, r *http.Request, cl
 		view.Image = imageFor(sr)
 		view.Stdin = sr.Spec.Stdin
 		view.Extras = newSpecExtrasView(sr, false)
+		// Ground-truth pod spec (raw — the approve page is OIDC-protected). On the
+		// off chance it can't render, the curated rows above still stand.
+		if tmpl, err := displayPodTemplate(sr, false); err == nil {
+			view.PodTemplate = tmpl
+		}
 		view.Summary = sr.Status.Summary
 		view.CreatedAt = sr.CreationTimestamp.UTC().Format("2006-01-02T15:04:05Z")
 	}

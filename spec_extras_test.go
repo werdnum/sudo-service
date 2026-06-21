@@ -89,6 +89,37 @@ func TestValidateSpecExtrasInitContainerSecurityContext(t *testing.T) {
 	}
 }
 
+func TestDisplayPodTemplate(t *testing.T) {
+	sr := srWith(SudoRequestSpec{
+		Command: "weed export",
+		Image:   "chrislusf/seaweedfs:3.84",
+		Env:     rawList(corev1.EnvVar{Name: "AWS_SECRET", Value: "super-secret"}),
+		Volumes: rawList(corev1.Volume{Name: "data", VolumeSource: corev1.VolumeSource{
+			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "data-0"}}}),
+		VolumeMounts: rawList(corev1.VolumeMount{Name: "data", MountPath: "/data", ReadOnly: true}),
+	})
+
+	raw, err := displayPodTemplate(sr, false)
+	if err != nil {
+		t.Fatalf("displayPodTemplate: %v", err)
+	}
+	for _, want := range []string{"chrislusf/seaweedfs:3.84", "weed export", "/data", "data-0", "super-secret"} {
+		if !strings.Contains(raw, want) {
+			t.Errorf("pod template missing %q:\n%s", want, raw)
+		}
+	}
+	red, err := displayPodTemplate(sr, true)
+	if err != nil {
+		t.Fatalf("displayPodTemplate redacted: %v", err)
+	}
+	if strings.Contains(red, "super-secret") || !strings.Contains(red, "<redacted>") {
+		t.Errorf("redacted template leaked env value:\n%s", red)
+	}
+	if !strings.Contains(red, "data-0") {
+		t.Errorf("redaction dropped non-env content:\n%s", red)
+	}
+}
+
 func TestValidateSpecExtrasRejectsHiddenFields(t *testing.T) {
 	// workingDir changes what relative commands do but isn't rendered -> rejected.
 	wd := []corev1.Container{{Name: "c", Image: "busybox", Command: []string{"sh"}, WorkingDir: "/x"}}
@@ -515,13 +546,12 @@ func TestContainerToReportPicksFailedInit(t *testing.T) {
 
 func TestInitContainerResourcesAreStamped(t *testing.T) {
 	// A requester init container with no resources still ends up bounded.
-	r := &SudoRequestReconciler{}
 	sr := srWith(SudoRequestSpec{InitContainers: rawList(corev1.Container{Name: "i", Image: "busybox", Command: []string{"sh"}})})
 	extras, err := decodePodExtras(sr)
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	job := r.buildExecutorJob(sr, ControllerNamespace, "sudo-exec-test", extras)
+	job := buildExecutorJob(sr, ControllerNamespace, "sudo-exec-test", extras)
 	got := job.Spec.Template.Spec.InitContainers[0].Resources
 	if got.Limits.Memory().IsZero() || got.Limits.Cpu().IsZero() {
 		t.Errorf("init container resources not stamped: %+v", got)
@@ -529,7 +559,6 @@ func TestInitContainerResourcesAreStamped(t *testing.T) {
 }
 
 func TestEmptyDirSizeLimitDefaultAndOverride(t *testing.T) {
-	r := &SudoRequestReconciler{}
 	custom := resource.MustParse("5Gi")
 	sr := srWith(SudoRequestSpec{Volumes: rawList(
 		corev1.Volume{Name: "scratch", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
@@ -539,7 +568,7 @@ func TestEmptyDirSizeLimitDefaultAndOverride(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	job := r.buildExecutorJob(sr, ControllerNamespace, "sudo-exec-test", extras)
+	job := buildExecutorJob(sr, ControllerNamespace, "sudo-exec-test", extras)
 	vols := job.Spec.Template.Spec.Volumes
 	if vols[0].EmptyDir.SizeLimit == nil || !vols[0].EmptyDir.SizeLimit.Equal(DefaultEmptyDirSizeLimit) {
 		t.Errorf("unbounded emptyDir not defaulted: %v", vols[0].EmptyDir.SizeLimit)

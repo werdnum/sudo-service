@@ -157,7 +157,7 @@ func (r *SudoRequestReconciler) findOrCreateJob(ctx context.Context, sr *SudoReq
 		// is unexpected; surface it rather than build a malformed pod.
 		return nil, fmt.Errorf("decode pod extras: %w", err)
 	}
-	job = r.buildExecutorJob(sr, ns, name, extras)
+	job = buildExecutorJob(sr, ns, name, extras)
 	if err := r.Create(ctx, &job); err != nil {
 		return nil, fmt.Errorf("create job: %w", err)
 	}
@@ -183,7 +183,9 @@ func (r *SudoRequestReconciler) findOrCreateJob(ctx context.Context, sr *SudoReq
 // buildExecutorJob renders the executor Job, splicing in the request's curated
 // pod extras (env, volumes, init containers, stdin) on top of the locked-down
 // defaults. validateSpecExtras has already vetted everything spliced in here.
-func (r *SudoRequestReconciler) buildExecutorJob(sr *SudoRequest, ns, name string, extras *podExtras) batchv1.Job {
+// Pure (no API access), so the approve page reuses it to show the ground-truth
+// pod spec.
+func buildExecutorJob(sr *SudoRequest, ns, name string, extras *podExtras) batchv1.Job {
 	one := int32(0)
 	// Output retention is the requester's ttlSecondsAfterApproval, but the Job
 	// itself must outlive its completion long enough for the reconciler to capture

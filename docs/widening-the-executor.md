@@ -26,9 +26,13 @@ creates one:
   Kubernetes shapes, narrowed to a reviewable allowlist in Go.
 - `privileges.clusterAdmin` — the first explicit capability toggle.
 
-The approve page now renders the namespace, the privilege level, and every mount
-/ init container, so the human approves the actual action rather than inferring
-it from a command string.
+The approve page is layered so the reviewer can't miss anything: prominent
+callouts for the security-sensitive fields (namespace, privilege level, mounts,
+env, init containers), the AI review aid, and — collapsible underneath — the
+**full generated pod spec** (`displayPodTemplate`, the same `buildExecutorJob`
+the controller runs) as ground truth. The callouts draw the eye; the full spec
+guarantees no field is ever hidden by a curation gap. The AI aid reviews the same
+ground-truth spec (with literal env values redacted, since it leaves the cluster).
 
 ## Design decisions
 

@@ -199,11 +199,20 @@ func (r *SudoRequestReconciler) handleNew(ctx context.Context, sr *SudoRequest) 
 	// correctness.)
 	var summary string
 	if r.Summarizer != nil {
+		// Give the AI the ground-truth pod spec to review (not just the curated
+		// summary), but redact literal env values — the summary goes to a
+		// third-party endpoint, so credentials in spec.env must not leave the
+		// cluster. The human push and approve page still show the raw values.
+		aiContext := ""
+		if hasSpecExtras(sr) {
+			if tmpl, err := displayPodTemplate(sr, true); err == nil {
+				aiContext = tmpl
+			} else {
+				aiContext = specExtrasText(sr, true)
+			}
+		}
 		sumCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		// Redact literal env values: the summary goes to a third-party AI endpoint,
-		// so credentials in spec.env must not leave the cluster. The human push and
-		// approve page (below / in the API) still show the raw values.
-		s, err := r.Summarizer.Summarize(sumCtx, sr.Spec.Command, imageFor(sr), sr.Spec.Reason, specExtrasText(sr, true))
+		s, err := r.Summarizer.Summarize(sumCtx, sr.Spec.Command, imageFor(sr), sr.Spec.Reason, aiContext)
 		cancel()
 		if err != nil {
 			log.Error(err, "AI command summary failed; continuing without one")

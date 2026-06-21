@@ -5,7 +5,49 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	"sigs.k8s.io/yaml"
 )
+
+// displayPodTemplate renders the exact pod spec the executor Job will run, as
+// YAML, for the ground-truth section of the approve page. It is the same
+// buildExecutorJob the controller uses, so the reviewer sees the real thing — no
+// curation gap is possible. Names minted at approval time (the Job, the stdin
+// Secret) aren't known yet, so placeholders stand in. With redactEnv set, literal
+// env values are masked (for the off-cluster AI aid; the human page passes false).
+func displayPodTemplate(sr *SudoRequest, redactEnv bool) (string, error) {
+	extras, err := decodePodExtras(sr)
+	if err != nil {
+		return "", err
+	}
+	d := sr.DeepCopy()
+	if d.Spec.Stdin != "" && d.Status.StdinSecretName == "" {
+		d.Status.StdinSecretName = "<minted-at-approval>"
+	}
+	job := buildExecutorJob(d, executorNamespace(d), "<minted-at-approval>", extras)
+	pod := job.Spec.Template.Spec
+	if redactEnv {
+		redactPodEnv(&pod)
+	}
+	out, err := yaml.Marshal(pod)
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
+}
+
+func redactPodEnv(pod *corev1.PodSpec) {
+	redact := func(cs []corev1.Container) {
+		for i := range cs {
+			for j := range cs[i].Env {
+				if cs[i].Env[j].Value != "" && cs[i].Env[j].ValueFrom == nil {
+					cs[i].Env[j].Value = "<redacted>"
+				}
+			}
+		}
+	}
+	redact(pod.InitContainers)
+	redact(pod.Containers)
+}
 
 // specExtrasView is the reviewer-facing summary of a request's widened pod
 // fields: where it runs, what privilege it holds, and what it mounts and runs.
