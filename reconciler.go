@@ -377,24 +377,21 @@ func (r *SudoRequestReconciler) handleApproved(ctx context.Context, sr *SudoRequ
 	// the target namespace), an unschedulable pod, an image that won't pull, etc.
 	// leaves the pod in ContainerCreating without ever incrementing the Job's
 	// succeeded/failed counts, so without this the request would sit in Approved
-	// forever. If no container has started within ExecutorStartDeadline of Job
-	// creation, fail the request with the pod's waiting reason.
+	// forever.
 	if job.Status.Succeeded == 0 && job.Status.Failed == 0 {
-		if time.Since(job.CreationTimestamp.Time) > ExecutorStartDeadline*time.Second {
-			started, reason, err := r.executorPodStarted(ctx, job)
-			if err != nil {
-				return ctrl.Result{}, err
+		timedOut, reason, err := r.executorStartTimedOut(ctx, job)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if timedOut {
+			// Stop the Job first: it has no activeDeadlineSeconds and (cross
+			// namespace) no ownerRef, so leaving it would let the pod start and
+			// run the privileged command after we've recorded Failed, and would
+			// leak the Job + its stdin Secret.
+			if err := r.stopJob(ctx, job); err != nil {
+				return ctrl.Result{}, fmt.Errorf("stop stuck executor job: %w", err)
 			}
-			if !started {
-				// Stop the Job first: it has no activeDeadlineSeconds and (cross
-				// namespace) no ownerRef, so leaving it would let the pod start and
-				// run the privileged command after we've recorded Failed, and would
-				// leak the Job + its stdin Secret.
-				if err := r.stopJob(ctx, job); err != nil {
-					return ctrl.Result{}, fmt.Errorf("stop stuck executor job: %w", err)
-				}
-				return r.failApproved(ctx, sr, fmt.Sprintf("executor pod did not start within %ds: %s", ExecutorStartDeadline, reason))
-			}
+			return r.failApproved(ctx, sr, fmt.Sprintf("executor pod did not start within %ds: %s", ExecutorStartDeadline, reason))
 		}
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}

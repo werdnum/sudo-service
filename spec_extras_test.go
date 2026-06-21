@@ -3,8 +3,11 @@ package main
 import (
 	"strings"
 	"testing"
+	"time"
 
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func srWith(spec SudoRequestSpec) *SudoRequest {
@@ -288,6 +291,38 @@ func TestDescribeEnvSurfacesValuesAndSources(t *testing.T) {
 	}
 	if !strings.Contains(joined, "FROMSECRET <- secret/creds:token") {
 		t.Errorf("secret-ref env source not surfaced: %q", joined)
+	}
+}
+
+func TestExecutorWaitStartAfterInitCompletion(t *testing.T) {
+	created := metav1.NewTime(time.Now().Add(-20 * time.Minute))
+	initDone := metav1.NewTime(time.Now().Add(-2 * time.Minute))
+	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{CreationTimestamp: created}}
+
+	// All inits terminated -> reference is the latest init finish, giving the
+	// executor its own start window (not the 20-min-old job creation).
+	pod := &corev1.Pod{Status: corev1.PodStatus{
+		InitContainerStatuses: []corev1.ContainerStatus{
+			{Name: "copy", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{FinishedAt: initDone}}},
+		},
+	}}
+	if got := executorWaitStart(pod, job); !got.Equal(initDone.Time) {
+		t.Errorf("all-inits-done: ref = %v, want init finish %v", got, initDone.Time)
+	}
+
+	// No init containers -> reference is job creation.
+	if got := executorWaitStart(&corev1.Pod{}, job); !got.Equal(created.Time) {
+		t.Errorf("no-inits: ref = %v, want job creation %v", got, created.Time)
+	}
+
+	// An init still running/waiting -> fall back to job creation (window not open).
+	podRunning := &corev1.Pod{Status: corev1.PodStatus{
+		InitContainerStatuses: []corev1.ContainerStatus{
+			{Name: "copy", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
+		},
+	}}
+	if got := executorWaitStart(podRunning, job); !got.Equal(created.Time) {
+		t.Errorf("init-not-finished: ref = %v, want job creation %v", got, created.Time)
 	}
 }
 

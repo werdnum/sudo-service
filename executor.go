@@ -296,18 +296,21 @@ func (r *SudoRequestReconciler) ensureStdinSecret(ctx context.Context, sr *SudoR
 		return nil
 	}
 	tru := true
+	fls := false
 	sec := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      sr.Status.StdinSecretName,
 			Namespace: job.Namespace,
 			Labels:    map[string]string{"app": "sudo-service", "role": "stdin"},
 			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion:         "batch/v1",
-				Kind:               "Job",
-				Name:               job.Name,
-				UID:                job.UID,
-				Controller:         &tru,
-				BlockOwnerDeletion: &tru,
+				APIVersion: "batch/v1",
+				Kind:       "Job",
+				Name:       job.Name,
+				UID:        job.UID,
+				Controller: &tru,
+				// Not BlockOwnerDeletion (see ownerRef): avoids needing update on
+				// jobs/finalizers under OwnerReferencesPermissionEnforcement.
+				BlockOwnerDeletion: &fls,
 			}},
 		},
 		Type: corev1.SecretTypeOpaque,
@@ -319,9 +322,12 @@ func (r *SudoRequestReconciler) ensureStdinSecret(ctx context.Context, sr *SudoR
 	return nil
 }
 
-// getJobPod returns the (first) pod of the executor Job, read uncached because
-// the pod may be in spec.namespace which the cache doesn't watch. Returns
-// (nil, nil) when no pod exists yet.
+// getJobPod returns the executor Job's pod, read uncached because the pod may be
+// in spec.namespace which the cache doesn't watch. Returns (nil, nil) when no pod
+// exists yet. The job-name label alone is not authoritative — in a tenant
+// namespace anyone who can create Pods could attach it — so we additionally
+// require the pod to be controlled by this Job (ownerRef UID), preventing a
+// spoofed pod from being read for logs/exit code or counted as progress.
 func (r *SudoRequestReconciler) getJobPod(ctx context.Context, job *batchv1.Job) (*corev1.Pod, error) {
 	var pods corev1.PodList
 	if err := r.APIReader.List(ctx, &pods,
@@ -330,33 +336,65 @@ func (r *SudoRequestReconciler) getJobPod(ctx context.Context, job *batchv1.Job)
 	); err != nil {
 		return nil, fmt.Errorf("list job pods: %w", err)
 	}
-	if len(pods.Items) == 0 {
-		return nil, nil
+	for i := range pods.Items {
+		if metav1.IsControlledBy(&pods.Items[i], job) {
+			return &pods.Items[i], nil
+		}
 	}
-	return &pods.Items[0], nil
+	return nil, nil
 }
 
-// executorPodStarted reports whether the executor Job's pod has made real
-// progress, so the start-deadline doesn't fire on a pod that is genuinely
-// pulling/initialising. "Progress" means the executor container itself has
-// reached Running or Terminated, OR some container is currently Running (e.g. a
-// slow init step still executing). A merely *terminated* init container does NOT
-// count: a completed init followed by an executor stuck in ImagePullBackOff is
-// exactly the stuck state we must catch. When nothing has progressed it also
-// returns the first waiting container's reason for the failure diagnostic.
-func (r *SudoRequestReconciler) executorPodStarted(ctx context.Context, job *batchv1.Job) (bool, string, error) {
+// executorStartTimedOut reports whether the executor Job's pod has failed to make
+// progress within ExecutorStartDeadline, so a stuck pod (unsatisfiable mount,
+// unschedulable, image won't pull) doesn't leave the request in Approved forever.
+//
+// The deadline is measured from when the *executor's* start window opened, not
+// from Job creation: a legitimately long init container shouldn't eat into the
+// executor's own pull/create budget. So once all init containers have completed,
+// the clock restarts from the last init's finish time. While anything is still
+// actively running (an init or the executor) the pod is progressing and the
+// deadline does not apply.
+func (r *SudoRequestReconciler) executorStartTimedOut(ctx context.Context, job *batchv1.Job) (bool, string, error) {
 	pod, err := r.getJobPod(ctx, job)
 	if err != nil {
 		return false, "", err
 	}
 	if pod == nil {
-		return false, "no pod scheduled", nil
+		return time.Since(job.CreationTimestamp.Time) > ExecutorStartDeadline*time.Second, "no pod scheduled", nil
 	}
-	started, reason := podMadeProgress(pod)
-	return started, reason, nil
+	progressing, reason := podMadeProgress(pod)
+	if progressing {
+		return false, "", nil
+	}
+	ref := executorWaitStart(pod, job)
+	return time.Since(ref) > ExecutorStartDeadline*time.Second, reason, nil
 }
 
-// podMadeProgress is the pure decision behind executorPodStarted: the executor
+// executorWaitStart returns the moment the executor container's start window
+// began: the latest init container finish time when all inits have completed,
+// otherwise Job creation (the first init — or the executor when there are none —
+// hasn't started yet, so the original deadline applies).
+func executorWaitStart(pod *corev1.Pod, job *batchv1.Job) time.Time {
+	ref := job.CreationTimestamp.Time
+	if len(pod.Status.InitContainerStatuses) == 0 {
+		return ref
+	}
+	latest := time.Time{}
+	for _, cs := range pod.Status.InitContainerStatuses {
+		if cs.State.Terminated == nil {
+			return ref // an init hasn't finished yet; executor window not open.
+		}
+		if cs.State.Terminated.FinishedAt.Time.After(latest) {
+			latest = cs.State.Terminated.FinishedAt.Time
+		}
+	}
+	if latest.IsZero() {
+		return ref
+	}
+	return latest
+}
+
+// podMadeProgress is the pure progress check: the executor
 // container reached Running/Terminated, OR some container is currently Running (a
 // slow init step still executing). A merely terminated init container does NOT
 // count — a completed init followed by an executor stuck in ImagePullBackOff is
@@ -522,12 +560,16 @@ func ttlSecondsAfterApproval(sr *SudoRequest) int32 {
 
 func ownerRef(sr *SudoRequest) metav1.OwnerReference {
 	tru := true
+	fls := false
 	return metav1.OwnerReference{
-		APIVersion:         GroupName + "/" + GroupVersion,
-		Kind:               "SudoRequest",
-		Name:               sr.Name,
-		UID:                sr.UID,
-		Controller:         &tru,
-		BlockOwnerDeletion: &tru,
+		APIVersion: GroupName + "/" + GroupVersion,
+		Kind:       "SudoRequest",
+		Name:       sr.Name,
+		UID:        sr.UID,
+		Controller: &tru,
+		// Not BlockOwnerDeletion: we only want cascade GC, not delete-ordering.
+		// Setting it true would require update on sudorequests/finalizers under the
+		// OwnerReferencesPermissionEnforcement admission plugin, which we don't grant.
+		BlockOwnerDeletion: &fls,
 	}
 }
