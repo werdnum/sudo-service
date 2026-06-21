@@ -114,6 +114,62 @@ func (r *SudoRequestReconciler) getExecutorJob(ctx context.Context, sr *SudoRequ
 // (fail the request) rather than adopting a possibly attacker-planted object.
 var errForeignChildObject = errors.New("pre-existing child object is not controller-created; refusing to adopt it")
 
+// errDisallowedSecret means a referenced Secret is of a type we refuse to mount
+// (a service-account-token). Like errForeignChildObject it is a permanent
+// rejection — the Secret's type is immutable, so retrying won't help.
+var errDisallowedSecret = errors.New("referenced secret has a disallowed type")
+
+// rejectServiceAccountTokenSecrets fails the request if any referenced Secret is of
+// type kubernetes.io/service-account-token. A plain secret volume/env reference names
+// a Secret but can't express its type, so validateSpecExtras (which never reads the
+// cluster) can't catch this — we check at creation, where we have the namespace and a
+// reader. Mounting (or env-exposing) a real SA-token Secret would hand the command
+// that ServiceAccount's API credentials, defeating the no-API-privileges guarantee for
+// cross-namespace Jobs in exactly the way the already-rejected `projected`
+// serviceAccountToken volume source would. Scoped to cross-namespace executors: in the
+// controller namespace the executor is already cluster-admin, so the mount grants
+// nothing new. A dangling reference is left to fail at mount time (the start deadline
+// catches it). The residual delete-and-recreate-as-token race is the same accepted
+// untrusted-namespace limitation as the stdin swap, and is bounded anyway — recreating
+// a usable token Secret requires a token the requester already holds.
+func (r *SudoRequestReconciler) rejectServiceAccountTokenSecrets(ctx context.Context, ns string, extras *podExtras) error {
+	names := map[string]struct{}{}
+	addEnv := func(env []corev1.EnvVar, envFrom []corev1.EnvFromSource) {
+		for _, e := range env {
+			if e.ValueFrom != nil && e.ValueFrom.SecretKeyRef != nil {
+				names[e.ValueFrom.SecretKeyRef.Name] = struct{}{}
+			}
+		}
+		for _, ef := range envFrom {
+			if ef.SecretRef != nil {
+				names[ef.SecretRef.Name] = struct{}{}
+			}
+		}
+	}
+	for _, v := range extras.Volumes {
+		if v.Secret != nil && v.Secret.SecretName != "" {
+			names[v.Secret.SecretName] = struct{}{}
+		}
+	}
+	addEnv(extras.Env, extras.EnvFrom)
+	for _, c := range extras.InitContainers {
+		addEnv(c.Env, c.EnvFrom)
+	}
+	for name := range names {
+		var sec corev1.Secret
+		if err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &sec); err != nil {
+			if apierrors.IsNotFound(err) {
+				continue
+			}
+			return err
+		}
+		if sec.Type == corev1.SecretTypeServiceAccountToken {
+			return fmt.Errorf("%w: %q is a service-account-token secret", errDisallowedSecret, name)
+		}
+	}
+	return nil
+}
+
 // findOrCreateJob returns the existing executor Job for the SudoRequest, or creates one.
 // The Job is named by the controller-minted status.ExecutorJobName. A Get that finds
 // one on requeue would normally be our own prior create — but in a target namespace
@@ -156,6 +212,14 @@ func (r *SudoRequestReconciler) findOrCreateJob(ctx context.Context, sr *SudoReq
 		// validateSpecExtras already accepted this spec, so a decode failure here
 		// is unexpected; surface it rather than build a malformed pod.
 		return nil, fmt.Errorf("decode pod extras: %w", err)
+	}
+	if ns != ControllerNamespace {
+		// Cross-namespace Jobs run with no API privileges; a referenced SA-token
+		// Secret would smuggle some in (validation can't see Secret types). Reject
+		// before creating the Job.
+		if err := r.rejectServiceAccountTokenSecrets(ctx, ns, extras); err != nil {
+			return nil, err
+		}
 	}
 	job = buildExecutorJob(sr, ns, name, extras)
 	if err := r.Create(ctx, &job); err != nil {

@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 func srWith(spec SudoRequestSpec) *SudoRequest {
@@ -620,4 +623,59 @@ func equalSlice(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+func TestRejectServiceAccountTokenSecrets(t *testing.T) {
+	ctx := context.Background()
+	tokenSec := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "sa-token", Namespace: "team-a"},
+		Type:       corev1.SecretTypeServiceAccountToken,
+	}
+	opaqueSec := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "creds", Namespace: "team-a"},
+		Type:       corev1.SecretTypeOpaque,
+	}
+	cl := fake.NewClientBuilder().WithObjects(tokenSec, opaqueSec).Build()
+	r := &SudoRequestReconciler{APIReader: cl}
+
+	secVol := func(name string) *podExtras {
+		return &podExtras{Volumes: []corev1.Volume{{
+			Name:         "v",
+			VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: name}},
+		}}}
+	}
+
+	// Opaque secret mounted as a volume: allowed.
+	if err := r.rejectServiceAccountTokenSecrets(ctx, "team-a", secVol("creds")); err != nil {
+		t.Errorf("opaque secret volume: unexpected error %v", err)
+	}
+
+	// SA-token secret via volume: rejected (permanently).
+	if err := r.rejectServiceAccountTokenSecrets(ctx, "team-a", secVol("sa-token")); !errors.Is(err, errDisallowedSecret) {
+		t.Errorf("sa-token volume: want errDisallowedSecret, got %v", err)
+	}
+
+	// SA-token via envFrom: rejected.
+	badEnvFrom := &podExtras{EnvFrom: []corev1.EnvFromSource{{
+		SecretRef: &corev1.SecretEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: "sa-token"}},
+	}}}
+	if err := r.rejectServiceAccountTokenSecrets(ctx, "team-a", badEnvFrom); !errors.Is(err, errDisallowedSecret) {
+		t.Errorf("sa-token envFrom: want errDisallowedSecret, got %v", err)
+	}
+
+	// SA-token via an init container's env secretKeyRef: rejected.
+	badInit := &podExtras{InitContainers: []corev1.Container{{Env: []corev1.EnvVar{{
+		Name: "T",
+		ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+			LocalObjectReference: corev1.LocalObjectReference{Name: "sa-token"}, Key: "token",
+		}},
+	}}}}}
+	if err := r.rejectServiceAccountTokenSecrets(ctx, "team-a", badInit); !errors.Is(err, errDisallowedSecret) {
+		t.Errorf("sa-token init env: want errDisallowedSecret, got %v", err)
+	}
+
+	// Dangling reference: not rejected here (mount-time/start deadline handles it).
+	if err := r.rejectServiceAccountTokenSecrets(ctx, "team-a", secVol("missing")); err != nil {
+		t.Errorf("dangling secret: unexpected error %v", err)
+	}
 }

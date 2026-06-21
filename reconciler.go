@@ -420,7 +420,7 @@ func (r *SudoRequestReconciler) handleApproved(ctx context.Context, sr *SudoRequ
 			// Validation catches the known cases up front; this is the backstop for
 			// anything that slips through.
 			if apierrors.IsInvalid(err) || apierrors.IsForbidden(err) || apierrors.IsNotFound(err) ||
-				errors.Is(err, errForeignChildObject) {
+				errors.Is(err, errForeignChildObject) || errors.Is(err, errDisallowedSecret) {
 				return r.failApproved(ctx, sr, fmt.Sprintf("executor Job rejected: %v", err))
 			}
 			return ctrl.Result{}, err

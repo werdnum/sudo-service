@@ -80,6 +80,22 @@ requester's output-retention `ttlSecondsAfterApproval`) so a tiny requested TTL
 can't let kube-controller-manager delete a finished Job before the reconciler
 captures its pod logs.
 
+`ttlSecondsAfterFinished` only fires once the Job *finishes*, so it does nothing
+for a Job still running when its SudoRequest is deleted — and with no ownerRef
+the deletion doesn't cascade either, leaving the pod (and its mounted Secrets/
+PVCs) running indefinitely. So a cross-namespace SudoRequest carries an
+`executor-cleanup` finalizer (added before its Job is created): on deletion the
+controller stops the still-running Job before releasing the object. Same-
+namespace requests keep relying on the ownerRef cascade and get no finalizer.
+
+A Job can also be kept from finishing by a **mutating admission webhook that
+injects a sidecar** (a service mesh, say): the sidecar outlives the executor
+container, so the Job's `Succeeded`/`Failed` counts never advance and neither its
+TTL nor the completion logic would ever fire. The reconciler therefore treats the
+*executor container terminating* as completion (`executorContainerTerminated`),
+independently of the Job counts, and deletes the Job afterwards to tear down the
+lingering sidecar pod.
+
 ### Reading cross-namespace objects
 
 The manager's cache is scoped to the controller namespace (to keep its RBAC
@@ -99,6 +115,16 @@ a reviewable, non-escalating subset:
   `persistentVolumeClaim`. `hostPath` is rejected, and so is `projected` — it can
   carry a `serviceAccountToken` source that would mint an API/cloud-capable token
   for the namespace default SA, bypassing the no-privileges guarantee.
+- A `secret` volume/env/`envFrom` reference names a Secret but can't express its
+  *type*, so the type-blind `validateSpecExtras` can't tell a credentials Secret
+  from a `kubernetes.io/service-account-token` Secret. Mounting (or env-exposing)
+  a real SA-token Secret is the same escalation as the rejected `projected`
+  `serviceAccountToken` source by a different door. The controller therefore reads
+  every referenced Secret's type at Job-creation time (it has the namespace and a
+  reader there) and **rejects** service-account-token Secrets — but only for
+  cross-namespace Jobs, since the controller-namespace executor is already
+  cluster-admin and the mount grants it nothing new. This is the one allowlist
+  guard that needs a cluster read; the rest are pure spec inspection.
 - Env vars (literal values and `valueFrom` secret/configMap refs) and each init
   container's command and mounts are rendered on the approve page, so nothing
   executable is hidden from the reviewer.
@@ -124,6 +150,38 @@ piped to `kubectl apply -f -` travels as literal bytes with zero shell quoting.
 The auto-approve allowlist only reasons about `command` + `image`, so any request
 that uses the widened fields or a privilege toggle (`hasSpecExtras`) always
 requires a human.
+
+### Accepted limitations: executing in a namespace you don't trust
+
+A cross-namespace executor Job runs under the target namespace's `default`
+ServiceAccount and (necessarily) shares that namespace with whatever tenants live
+there. A tenant who holds Pod/Secret RBAC in that namespace can interfere with our
+objects in ways the controller can't fully prevent:
+
+- **Output integrity.** `getJobPod` matches the executor pod by its `job-name`
+  label and the Job's controller ownerRef (UID). In the controller namespace that
+  is authoritative (tenants can't create Pods there and the executor VAP gates it).
+  In a target namespace, `job.UID` is readable and an ownerRef is forgeable, so a
+  tenant could present a spoofed pod and have its logs/exit code recorded as the
+  request's result.
+- **Adoption crash window.** The executor Job's name is an unguessable minted
+  token and a pre-existing Job at that name is failed closed, but a same-name
+  collision inside a narrow controller-crash window is theoretically possible.
+- **stdin swap.** The stdin payload Secret lives in the target namespace; a tenant
+  with Secret write there could delete and recreate it between our create and the
+  kubelet's projection, so the command could run with stdin other than what was
+  approved.
+
+These are all **bounded by the fact that the cross-namespace Job is
+non-privileged** — it can do nothing a tenant of that namespace couldn't already
+do directly — so none is an escalation; they are integrity/audit edges, not new
+capabilities. (The SA-token mount above *would* have been an escalation, which is
+why it is actually rejected rather than merely documented.) They are accepted as
+documented residuals. The proper structural fix is a **per-namespace opt-in**: gate
+executor Jobs in the target namespace with the same ValidatingAdmissionPolicy the
+controller namespace uses, so only namespaces the operator has vouched for (and
+locked down) can host cross-namespace executors. That is future work, not wired up
+here.
 
 ## Future direction
 
