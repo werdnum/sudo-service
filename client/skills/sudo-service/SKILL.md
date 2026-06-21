@@ -208,9 +208,13 @@ approve page):
 - `env` / `envFrom` — e.g. a `secretRef` for credentials.
 - `initContainers` — e.g. to stage a tool binary into a shared `emptyDir`. They
   run sequentially before the executor and inherit its locked-down
-  securityContext and resource bounds. They may **not** set their own
-  `securityContext`, a `restartPolicy` (no sidecars), or `volumeDevices` (raw
-  block devices); their command, mounts and env are shown on the approve page.
+  securityContext and resource bounds. Only a reviewable subset of fields is
+  permitted — `name`, `image`, **`command` (required)**, `args`, `workingDir`,
+  `env`, `envFrom`, `volumeMounts`, `imagePullPolicy` — and anything else
+  (securityContext, lifecycle hooks, volumeDevices, restartPolicy/sidecars,
+  probes, ports, ...) is rejected, so the approve page can faithfully show what
+  runs. An explicit `command` is required because the image's default entrypoint
+  isn't shown to the reviewer.
 - `stdin` — fed to the command's stdin. Use this instead of a heredoc to pipe a
   manifest to `kubectl apply -f -`; it travels as literal bytes, no shell quoting.
 - `privileges.clusterAdmin` — defaults `true` in `sudo-service`, where it grants

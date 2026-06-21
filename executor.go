@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -107,10 +109,19 @@ func (r *SudoRequestReconciler) getExecutorJob(ctx context.Context, sr *SudoRequ
 	return &job, nil
 }
 
+// errForeignChildObject means a Job/Secret already exists at the name we'd use but
+// can't be confirmed as controller-created. handleApproved treats it as permanent
+// (fail the request) rather than adopting a possibly attacker-planted object.
+var errForeignChildObject = errors.New("pre-existing child object is not controller-created; refusing to adopt it")
+
 // findOrCreateJob returns the existing executor Job for the SudoRequest, or creates one.
-// The Job is named by the controller-minted status.ExecutorJobName (unguessable),
-// so a Get that finds one on requeue is necessarily our own prior create, not a
-// requester-planted Job; adopting it is safe.
+// The Job is named by the controller-minted status.ExecutorJobName. A Get that finds
+// one on requeue would normally be our own prior create — but in a target namespace
+// the name could in principle be learned (status read) and pre-created. We can't
+// authenticate an arbitrary pod spec by inspection, so we only adopt a pre-existing
+// Job in the controller namespace, where the executor VAP guarantees only the
+// controller SA can create executor Jobs. Cross-namespace, a pre-existing Job is
+// failed closed.
 func (r *SudoRequestReconciler) findOrCreateJob(ctx context.Context, sr *SudoRequest) (*batchv1.Job, error) {
 	ns := executorNamespace(sr)
 	name := sr.Status.ExecutorJobName
@@ -118,8 +129,11 @@ func (r *SudoRequestReconciler) findOrCreateJob(ctx context.Context, sr *SudoReq
 	// Uncached: the Job may be in spec.namespace, which the cache doesn't watch.
 	err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &job)
 	if err == nil {
-		// On requeue the Job already exists; make sure its stdin payload does too
-		// (it is owned by the Job, so this is a no-op once both are present).
+		if ns != ControllerNamespace {
+			return nil, errForeignChildObject
+		}
+		// Controller namespace: the executor VAP guarantees this Job is ours.
+		// On requeue make sure its stdin payload exists too (owned by the Job).
 		if err := r.ensureStdinSecret(ctx, sr, &job); err != nil {
 			return nil, err
 		}
@@ -316,10 +330,11 @@ func hardenedContainerSecurityContext() *corev1.SecurityContext {
 // request has no stdin.
 //
 // The Secret name is sr.Status.StdinSecretName — a random token minted into
-// status before the Job exists (see handleApproved), not derived from the
-// request UID. Because the name is unguessable, a requester cannot pre-create it
-// to swap the payload, so AlreadyExists can only mean our own prior create on a
-// requeue: idempotent, treated as success.
+// status before the Job exists. The name is also unguessable, but we don't rely
+// on that: on AlreadyExists we verify the existing Secret is owned by *this* Job
+// and carries the approved bytes, failing closed otherwise. So even if the name
+// leaked (e.g. a requester with status read) and was pre-created, the Job never
+// mounts an unapproved payload.
 func (r *SudoRequestReconciler) ensureStdinSecret(ctx context.Context, sr *SudoRequest, job *batchv1.Job) error {
 	if sr.Spec.Stdin == "" {
 		return nil
@@ -345,8 +360,27 @@ func (r *SudoRequestReconciler) ensureStdinSecret(ctx context.Context, sr *SudoR
 		Type: corev1.SecretTypeOpaque,
 		Data: map[string][]byte{"stdin": []byte(sr.Spec.Stdin)},
 	}
-	if err := r.Create(ctx, sec); err != nil && !apierrors.IsAlreadyExists(err) {
+	err := r.Create(ctx, sec)
+	if err == nil {
+		return nil
+	}
+	if !apierrors.IsAlreadyExists(err) {
 		return fmt.Errorf("create stdin secret: %w", err)
+	}
+	// Already exists: confirm it's the Secret we own with the approved content.
+	var existing corev1.Secret
+	if err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: job.Namespace, Name: sec.Name}, &existing); err != nil {
+		return fmt.Errorf("get existing stdin secret: %w", err)
+	}
+	ownedByJob := false
+	for _, o := range existing.OwnerReferences {
+		if o.UID == job.UID && o.Kind == "Job" {
+			ownedByJob = true
+			break
+		}
+	}
+	if !ownedByJob || !bytes.Equal(existing.Data["stdin"], sec.Data["stdin"]) {
+		return errForeignChildObject
 	}
 	return nil
 }

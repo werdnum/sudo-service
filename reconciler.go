@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/url"
 	"time"
@@ -215,7 +216,9 @@ func (r *SudoRequestReconciler) handleNew(ctx context.Context, sr *SudoRequest) 
 	title := fmt.Sprintf("sudo: %s wants to run %s", sr.Spec.Requester, truncate(sr.Spec.Command, 80))
 	body := fmt.Sprintf("reason: %s\ncommand: %s\nimage: %s",
 		sr.Spec.Reason, sr.Spec.Command, imageFor(sr))
-	if extras := specExtrasText(sr, false); extras != "" {
+	// Redact literal env values: the push goes to the external Pushover service.
+	// The OIDC-protected approve page still shows the raw values for review.
+	if extras := specExtrasText(sr, true); extras != "" {
 		body += "\n" + extras
 	}
 	reqID, err := r.Pushover.SendApproval(ctx, title, body, approvalURL)
@@ -344,7 +347,8 @@ func (r *SudoRequestReconciler) handleApproved(ctx context.Context, sr *SudoRequ
 			// on retry. Fail the request instead of looping forever in Approved.
 			// Validation catches the known cases up front; this is the backstop for
 			// anything that slips through.
-			if apierrors.IsInvalid(err) || apierrors.IsForbidden(err) || apierrors.IsNotFound(err) {
+			if apierrors.IsInvalid(err) || apierrors.IsForbidden(err) || apierrors.IsNotFound(err) ||
+				errors.Is(err, errForeignChildObject) {
 				return r.failApproved(ctx, sr, fmt.Sprintf("executor Job rejected: %v", err))
 			}
 			return ctrl.Result{}, err

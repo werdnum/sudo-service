@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"reflect"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -103,33 +104,35 @@ func validateSpecExtras(sr *SudoRequest) error {
 		if c.Name == "" || c.Image == "" {
 			return fmt.Errorf("initContainer must set both name and image")
 		}
-		// The controller stamps the locked-down securityContext onto init
-		// containers; letting the requester set it would be an escalation path
-		// that bypasses the privilege toggles.
-		if c.SecurityContext != nil {
-			return fmt.Errorf("initContainer %q: securityContext is set by the controller and may not be specified", c.Name)
+		// Require an explicit command: without one the image's default entrypoint
+		// runs, which the approve page can't show, so the reviewer would approve an
+		// init step they can't see.
+		if len(c.Command) == 0 {
+			return fmt.Errorf("initContainer %q: an explicit command is required (the image's default entrypoint is not shown to the reviewer)", c.Name)
 		}
-		// restartPolicy=Always turns an init container into a native sidecar that
-		// runs concurrently with the executor, not a sequential setup step — which
-		// is how the approve page presents it. Reject it so the reviewer isn't
-		// misled.
-		if c.RestartPolicy != nil {
-			return fmt.Errorf("initContainer %q: restartPolicy may not be set (a sidecar would run concurrently with the approved command)", c.Name)
+		// Positive allowlist: an init container may only use the reviewable subset
+		// of fields the approve page renders. Everything else — securityContext,
+		// lifecycle hooks, volumeDevices, restartPolicy (sidecars), probes, ports,
+		// requester-set resources, ... — is rejected by this single rule (rather
+		// than denied field-by-field), so what runs can always be faithfully shown
+		// to the human. securityContext and resources are stamped by the controller.
+		permitted := corev1.Container{
+			Name:            c.Name,
+			Image:           c.Image,
+			Command:         c.Command,
+			Args:            c.Args,
+			WorkingDir:      c.WorkingDir,
+			Env:             c.Env,
+			EnvFrom:         c.EnvFrom,
+			VolumeMounts:    c.VolumeMounts,
+			ImagePullPolicy: c.ImagePullPolicy,
 		}
-		// volumeDevices grants raw block-device access to a PVC and is not rendered
-		// on the approve page (only VolumeMounts are), so it would be invisible to
-		// the reviewer. Reject it.
-		if len(c.VolumeDevices) > 0 {
-			return fmt.Errorf("initContainer %q: volumeDevices (raw block devices) are not permitted", c.Name)
+		if !reflect.DeepEqual(c, permitted) {
+			return fmt.Errorf("initContainer %q: only name, image, command, args, workingDir, env, envFrom, volumeMounts and imagePullPolicy are permitted", c.Name)
 		}
-		// Lifecycle postStart/preStop hooks run extra commands the approve page
-		// doesn't render, so a hook could touch a mounted PVC/credential unseen.
-		if c.Lifecycle != nil {
-			return fmt.Errorf("initContainer %q: lifecycle hooks are not permitted (they would run commands the reviewer can't see)", c.Name)
-		}
-		// Init containers may only reference defined volumes, and may not mount the
-		// controller-owned stdin volume (the approve page presents stdin as fed to
-		// the executor command, not as a file other containers read).
+		// Init containers may not mount the controller-owned stdin volume (the
+		// approve page presents stdin as fed to the executor command, not as a file
+		// other containers read), and may only reference defined volumes.
 		for _, m := range c.VolumeMounts {
 			if m.Name == stdinVolumeName {
 				return fmt.Errorf("initContainer %q: volumeMount name %q is reserved for the stdin payload", c.Name, stdinVolumeName)

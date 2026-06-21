@@ -59,26 +59,26 @@ func TestValidateSpecExtrasVolumeAllowlist(t *testing.T) {
 
 func TestValidateSpecExtrasInitContainerSidecarAndDevices(t *testing.T) {
 	always := corev1.ContainerRestartPolicyAlways
-	sidecar := []corev1.Container{{Name: "s", Image: "busybox", RestartPolicy: &always}}
+	sidecar := []corev1.Container{{Name: "s", Image: "busybox", Command: []string{"sh"}, RestartPolicy: &always}}
 	if err := validateSpecExtras(srWith(SudoRequestSpec{InitContainers: rawList(sidecar...)})); err == nil ||
-		!strings.Contains(err.Error(), "restartPolicy") {
-		t.Errorf("sidecar init container: got %v, want restartPolicy rejection", err)
+		!strings.Contains(err.Error(), "permitted") {
+		t.Errorf("sidecar init container: got %v, want allowlist rejection", err)
 	}
 
-	devices := []corev1.Container{{Name: "d", Image: "busybox", VolumeDevices: []corev1.VolumeDevice{{Name: "blk", DevicePath: "/dev/xvda"}}}}
+	devices := []corev1.Container{{Name: "d", Image: "busybox", Command: []string{"sh"}, VolumeDevices: []corev1.VolumeDevice{{Name: "blk", DevicePath: "/dev/xvda"}}}}
 	if err := validateSpecExtras(srWith(SudoRequestSpec{InitContainers: rawList(devices...)})); err == nil ||
-		!strings.Contains(err.Error(), "volumeDevices") {
-		t.Errorf("init container volumeDevices: got %v, want rejection", err)
+		!strings.Contains(err.Error(), "permitted") {
+		t.Errorf("init container volumeDevices: got %v, want allowlist rejection", err)
 	}
 }
 
 func TestValidateSpecExtrasInitContainerSecurityContext(t *testing.T) {
-	ok := []corev1.Container{{Name: "copy", Image: "busybox"}}
+	ok := []corev1.Container{{Name: "copy", Image: "busybox", Command: []string{"sh"}}}
 	if err := validateSpecExtras(srWith(SudoRequestSpec{InitContainers: rawList(ok...)})); err != nil {
 		t.Fatalf("plain init container rejected: %v", err)
 	}
 
-	withSC := []corev1.Container{{Name: "copy", Image: "busybox", SecurityContext: &corev1.SecurityContext{}}}
+	withSC := []corev1.Container{{Name: "copy", Image: "busybox", Command: []string{"sh"}, SecurityContext: &corev1.SecurityContext{}}}
 	if err := validateSpecExtras(srWith(SudoRequestSpec{InitContainers: rawList(withSC...)})); err == nil {
 		t.Fatal("init container securityContext: got nil, want rejection")
 	}
@@ -86,6 +86,20 @@ func TestValidateSpecExtrasInitContainerSecurityContext(t *testing.T) {
 	missingImage := []corev1.Container{{Name: "copy"}}
 	if err := validateSpecExtras(srWith(SudoRequestSpec{InitContainers: rawList(missingImage...)})); err == nil {
 		t.Fatal("init container without image: got nil, want rejection")
+	}
+}
+
+func TestValidateSpecExtrasInitContainerRequiresCommand(t *testing.T) {
+	noCmd := []corev1.Container{{Name: "c", Image: "busybox"}}
+	if err := validateSpecExtras(srWith(SudoRequestSpec{InitContainers: rawList(noCmd...)})); err == nil ||
+		!strings.Contains(err.Error(), "explicit command") {
+		t.Errorf("init without command: got %v, want command rejection", err)
+	}
+	ports := []corev1.Container{{Name: "c", Image: "busybox", Command: []string{"sh"},
+		Ports: []corev1.ContainerPort{{ContainerPort: 80}}}}
+	if err := validateSpecExtras(srWith(SudoRequestSpec{InitContainers: rawList(ports...)})); err == nil ||
+		!strings.Contains(err.Error(), "permitted") {
+		t.Errorf("init with ports: got %v, want allowlist rejection", err)
 	}
 }
 
@@ -297,7 +311,7 @@ func TestValidateSpecExtrasMountReferences(t *testing.T) {
 	// An init container referencing an undefined volume is rejected.
 	err = validateSpecExtras(srWith(SudoRequestSpec{
 		InitContainers: rawList(corev1.Container{
-			Name: "i", Image: "busybox",
+			Name: "i", Image: "busybox", Command: []string{"sh"},
 			VolumeMounts: []corev1.VolumeMount{{Name: "nope", MountPath: "/x"}},
 		}),
 	}))
@@ -334,11 +348,11 @@ func TestDescribeEnvFromShowsPrefix(t *testing.T) {
 }
 
 func TestValidateSpecExtrasRejectsLifecycle(t *testing.T) {
-	ic := corev1.Container{Name: "i", Image: "busybox", Lifecycle: &corev1.Lifecycle{
+	ic := corev1.Container{Name: "i", Image: "busybox", Command: []string{"sh"}, Lifecycle: &corev1.Lifecycle{
 		PostStart: &corev1.LifecycleHandler{Exec: &corev1.ExecAction{Command: []string{"sh", "-c", "evil"}}}}}
 	if err := validateSpecExtras(srWith(SudoRequestSpec{InitContainers: rawList(ic)})); err == nil ||
-		!strings.Contains(err.Error(), "lifecycle") {
-		t.Fatalf("init lifecycle hook: got %v, want rejection", err)
+		!strings.Contains(err.Error(), "permitted") {
+		t.Fatalf("init lifecycle hook: got %v, want allowlist rejection", err)
 	}
 }
 
@@ -463,7 +477,7 @@ func TestContainerToReportPicksFailedInit(t *testing.T) {
 func TestInitContainerResourcesAreStamped(t *testing.T) {
 	// A requester init container with no resources still ends up bounded.
 	r := &SudoRequestReconciler{}
-	sr := srWith(SudoRequestSpec{InitContainers: rawList(corev1.Container{Name: "i", Image: "busybox"})})
+	sr := srWith(SudoRequestSpec{InitContainers: rawList(corev1.Container{Name: "i", Image: "busybox", Command: []string{"sh"}})})
 	extras, err := decodePodExtras(sr)
 	if err != nil {
 		t.Fatalf("decode: %v", err)
