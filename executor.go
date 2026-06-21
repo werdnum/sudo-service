@@ -108,10 +108,12 @@ func (r *SudoRequestReconciler) getExecutorJob(ctx context.Context, sr *SudoRequ
 }
 
 // findOrCreateJob returns the existing executor Job for the SudoRequest, or creates one.
-// Job naming is deterministic so we don't double-create on requeue.
+// The Job is named by the controller-minted status.ExecutorJobName (unguessable),
+// so a Get that finds one on requeue is necessarily our own prior create, not a
+// requester-planted Job; adopting it is safe.
 func (r *SudoRequestReconciler) findOrCreateJob(ctx context.Context, sr *SudoRequest) (*batchv1.Job, error) {
 	ns := executorNamespace(sr)
-	name := jobName(sr)
+	name := sr.Status.ExecutorJobName
 	var job batchv1.Job
 	// Uncached: the Job may be in spec.namespace, which the cache doesn't watch.
 	err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &job)
@@ -563,7 +565,6 @@ func resourceName(sr *SudoRequest, prefix string) string {
 	return n
 }
 
-func jobName(sr *SudoRequest) string          { return resourceName(sr, "sudo-exec-") }
 func outputSecretName(sr *SudoRequest) string { return resourceName(sr, "sudo-out-") }
 
 // ttlSecondsAfterApproval returns the per-request TTL (capped at ExecutorJobTTL

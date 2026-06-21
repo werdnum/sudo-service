@@ -165,11 +165,15 @@ spec:
                 executorJobName:
                   type: string
                   description: >-
-                    Name of the executor Job, recorded the moment the Job is
-                    created. If the Job is GC'd by its TTL before the controller
-                    observes completion, the reconciler uses this as proof that
-                    the command already ran and fails the request rather than
-                    re-creating the Job and replaying privileged execution.
+                    Controller-minted, unguessable name of the executor Job,
+                    recorded before the Job is created so a requester can't
+                    pre-create a predictable Job for the controller to adopt.
+                executorJobUID:
+                  type: string
+                  description: >-
+                    UID of the created executor Job. Distinguishes "not yet
+                    created" from "created then GC'd" (in which case the request
+                    is failed rather than replayed), and detects a replaced Job.
                 pushoverRequestID: {type: string}
                 approvalTokenHash:
                   type: string

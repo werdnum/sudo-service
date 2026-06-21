@@ -122,6 +122,11 @@ func validateSpecExtras(sr *SudoRequest) error {
 		if len(c.VolumeDevices) > 0 {
 			return fmt.Errorf("initContainer %q: volumeDevices (raw block devices) are not permitted", c.Name)
 		}
+		// Lifecycle postStart/preStop hooks run extra commands the approve page
+		// doesn't render, so a hook could touch a mounted PVC/credential unseen.
+		if c.Lifecycle != nil {
+			return fmt.Errorf("initContainer %q: lifecycle hooks are not permitted (they would run commands the reviewer can't see)", c.Name)
+		}
 		// Init containers may only reference defined volumes, and may not mount the
 		// controller-owned stdin volume (the approve page presents stdin as fed to
 		// the executor command, not as a file other containers read).

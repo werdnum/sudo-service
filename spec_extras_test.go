@@ -222,7 +222,7 @@ func TestInitContainerCommandSurfacedToReviewer(t *testing.T) {
 			VolumeMounts: []corev1.VolumeMount{{Name: "tools", MountPath: "/tools"}},
 		}),
 	})
-	v := newSpecExtrasView(sr)
+	v := newSpecExtrasView(sr, false)
 	if len(v.InitContainers) != 1 {
 		t.Fatalf("expected 1 init container view, got %d", len(v.InitContainers))
 	}
@@ -234,7 +234,7 @@ func TestInitContainerCommandSurfacedToReviewer(t *testing.T) {
 		t.Errorf("init container mounts not surfaced: %v", ic.Mounts)
 	}
 	// And the plain-text rendering (push + summarizer) includes the command.
-	if txt := specExtrasText(sr); !strings.Contains(txt, "cp x /tools/y") {
+	if txt := specExtrasText(sr, false); !strings.Contains(txt, "cp x /tools/y") {
 		t.Errorf("specExtrasText omits init container command: %q", txt)
 	}
 }
@@ -306,13 +306,49 @@ func TestValidateSpecExtrasMountReferences(t *testing.T) {
 	}
 }
 
+func TestDescribeEnvRedaction(t *testing.T) {
+	env := []corev1.EnvVar{
+		{Name: "LITERAL", Value: "secret-value"},
+		{Name: "REF", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+			LocalObjectReference: corev1.LocalObjectReference{Name: "creds"}, Key: "k"}}},
+	}
+	if full := strings.Join(describeEnv(env, false), " | "); !strings.Contains(full, "LITERAL=secret-value") {
+		t.Errorf("unredacted: literal value missing: %q", full)
+	}
+	red := strings.Join(describeEnv(env, true), " | ")
+	if strings.Contains(red, "secret-value") || !strings.Contains(red, "LITERAL=<redacted>") {
+		t.Errorf("redacted: literal value leaked: %q", red)
+	}
+	if !strings.Contains(red, "REF <- secret/creds:k") {
+		t.Errorf("redacted: dropped secret ref: %q", red)
+	}
+}
+
+func TestDescribeEnvFromShowsPrefix(t *testing.T) {
+	got := describeEnvFrom([]corev1.EnvFromSource{
+		{Prefix: "AWS_", SecretRef: &corev1.SecretEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: "creds"}}},
+	})
+	if len(got) != 1 || !strings.Contains(got[0], "prefix=AWS_") {
+		t.Errorf("envFrom prefix not surfaced: %v", got)
+	}
+}
+
+func TestValidateSpecExtrasRejectsLifecycle(t *testing.T) {
+	ic := corev1.Container{Name: "i", Image: "busybox", Lifecycle: &corev1.Lifecycle{
+		PostStart: &corev1.LifecycleHandler{Exec: &corev1.ExecAction{Command: []string{"sh", "-c", "evil"}}}}}
+	if err := validateSpecExtras(srWith(SudoRequestSpec{InitContainers: rawList(ic)})); err == nil ||
+		!strings.Contains(err.Error(), "lifecycle") {
+		t.Fatalf("init lifecycle hook: got %v, want rejection", err)
+	}
+}
+
 func TestDescribeEnvSurfacesValuesAndSources(t *testing.T) {
 	sr := srWith(SudoRequestSpec{Env: rawList(
 		corev1.EnvVar{Name: "LITERAL", Value: "KUBECONFIG=/x"},
 		corev1.EnvVar{Name: "FROMSECRET", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
 			LocalObjectReference: corev1.LocalObjectReference{Name: "creds"}, Key: "token"}}},
 	)})
-	v := newSpecExtrasView(sr)
+	v := newSpecExtrasView(sr, false)
 	joined := strings.Join(v.Env, " | ")
 	if !strings.Contains(joined, "LITERAL=KUBECONFIG=/x") {
 		t.Errorf("literal env value not surfaced: %q", joined)
@@ -432,7 +468,7 @@ func TestInitContainerResourcesAreStamped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	job := r.buildExecutorJob(sr, ControllerNamespace, jobName(sr), extras)
+	job := r.buildExecutorJob(sr, ControllerNamespace, "sudo-exec-test", extras)
 	got := job.Spec.Template.Spec.InitContainers[0].Resources
 	if got.Limits.Memory().IsZero() || got.Limits.Cpu().IsZero() {
 		t.Errorf("init container resources not stamped: %+v", got)
@@ -450,7 +486,7 @@ func TestEmptyDirSizeLimitDefaultAndOverride(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	job := r.buildExecutorJob(sr, ControllerNamespace, jobName(sr), extras)
+	job := r.buildExecutorJob(sr, ControllerNamespace, "sudo-exec-test", extras)
 	vols := job.Spec.Template.Spec.Volumes
 	if vols[0].EmptyDir.SizeLimit == nil || !vols[0].EmptyDir.SizeLimit.Equal(DefaultEmptyDirSizeLimit) {
 		t.Errorf("unbounded emptyDir not defaulted: %v", vols[0].EmptyDir.SizeLimit)

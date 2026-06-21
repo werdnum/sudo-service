@@ -170,12 +170,18 @@ type SudoRequestStatus struct {
 	// the human reviewer reading the command.
 	Summary string `json:"summary,omitempty"`
 
-	// ExecutorJobName is the name of the Job that was (or is being) run for
-	// this request. Recorded as soon as the Job is created so that, if the
-	// Job is GC'd by ttlSecondsAfterFinished before the controller observes
-	// its completion, the next reconcile fails the request instead of
-	// silently recreating the Job and re-running the privileged command.
+	// ExecutorJobName is the controller-minted, unguessable name of the executor
+	// Job. Like StdinSecretName it is a random token (not derived from the request
+	// UID), recorded before the Job is created so a requester who can create Jobs
+	// in the target namespace can't pre-create a predictable sudo-exec-<uid> Job
+	// for the controller to adopt as the (unapproved) workload.
 	ExecutorJobName string `json:"executorJobName,omitempty"`
+
+	// ExecutorJobUID is the UID of the Job the controller created, recorded after
+	// creation. It distinguishes "not created yet" (empty) from "created then GC'd"
+	// (set, but the Job is now gone → fail rather than replay), and lets the
+	// reconciler reject a Job that was deleted and replaced at the same name.
+	ExecutorJobUID string `json:"executorJobUID,omitempty"`
 
 	// PushoverRequestID is the Pushover API's per-request UUID, for audit-trail
 	// correlation with the Pushover dashboard.

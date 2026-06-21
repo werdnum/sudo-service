@@ -196,13 +196,13 @@ func (r *SudoRequestReconciler) handleNew(ctx context.Context, sr *SudoRequest) 
 	// summary, and a short timeout bounds it. (On a push retry the summary is
 	// regenerated; that wasted call on the rare error path is worth the
 	// correctness.)
-	// Derived once and shared by the summarizer and the push body below.
-	extras := specExtrasText(sr)
-
 	var summary string
 	if r.Summarizer != nil {
 		sumCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		s, err := r.Summarizer.Summarize(sumCtx, sr.Spec.Command, imageFor(sr), sr.Spec.Reason, extras)
+		// Redact literal env values: the summary goes to a third-party AI endpoint,
+		// so credentials in spec.env must not leave the cluster. The human push and
+		// approve page (below / in the API) still show the raw values.
+		s, err := r.Summarizer.Summarize(sumCtx, sr.Spec.Command, imageFor(sr), sr.Spec.Reason, specExtrasText(sr, true))
 		cancel()
 		if err != nil {
 			log.Error(err, "AI command summary failed; continuing without one")
@@ -215,7 +215,7 @@ func (r *SudoRequestReconciler) handleNew(ctx context.Context, sr *SudoRequest) 
 	title := fmt.Sprintf("sudo: %s wants to run %s", sr.Spec.Requester, truncate(sr.Spec.Command, 80))
 	body := fmt.Sprintf("reason: %s\ncommand: %s\nimage: %s",
 		sr.Spec.Reason, sr.Spec.Command, imageFor(sr))
-	if extras != "" {
+	if extras := specExtrasText(sr, false); extras != "" {
 		body += "\n" + extras
 	}
 	reqID, err := r.Pushover.SendApproval(ctx, title, body, approvalURL)
@@ -310,22 +310,33 @@ func (r *SudoRequestReconciler) handleApproved(ctx context.Context, sr *SudoRequ
 	// controller-manager already GC'd it), we have to assume it already ran
 	// — fail the request rather than re-create and replay the privileged
 	// command. We have no output to capture in that case.
-	// Mint the unguessable stdin Secret name BEFORE the Job is created (the Job
-	// references it). Persisting it first makes it replay-safe and means a
-	// requester can't pre-create a predictable Secret to swap the payload.
-	if sr.Spec.Stdin != "" && sr.Status.StdinSecretName == "" {
-		suffix, err := randomToken(8)
+	// Mint the unguessable child-resource names BEFORE creating anything (the Job
+	// is named ExecutorJobName, and references StdinSecretName). Persisting them
+	// first makes creation replay-safe and means a requester who can create Jobs/
+	// Secrets in the target namespace can't pre-create predictable sudo-exec-<uid>
+	// / sudo-stdin-<uid> objects for the controller to adopt.
+	if sr.Status.ExecutorJobName == "" {
+		jobSuffix, err := randomToken(8)
 		if err != nil {
-			return ctrl.Result{}, fmt.Errorf("mint stdin secret name: %w", err)
+			return ctrl.Result{}, fmt.Errorf("mint executor job name: %w", err)
 		}
-		sr.Status.StdinSecretName = "sudo-stdin-" + suffix
+		sr.Status.ExecutorJobName = "sudo-exec-" + jobSuffix
+		if sr.Spec.Stdin != "" {
+			stdinSuffix, err := randomToken(8)
+			if err != nil {
+				return ctrl.Result{}, fmt.Errorf("mint stdin secret name: %w", err)
+			}
+			sr.Status.StdinSecretName = "sudo-stdin-" + stdinSuffix
+		}
 		if err := r.Status().Update(ctx, sr); err != nil {
-			return ctrl.Result{}, fmt.Errorf("record stdinSecretName: %w", err)
+			return ctrl.Result{}, fmt.Errorf("record minted resource names: %w", err)
 		}
 		return ctrl.Result{Requeue: true}, nil
 	}
 
-	if sr.Status.ExecutorJobName == "" {
+	// Create the Job once (at the minted name) and record its UID. The UID lets
+	// later reconciles tell "not created yet" from "created then GC'd".
+	if sr.Status.ExecutorJobUID == "" {
 		job, err := r.findOrCreateJob(ctx, sr)
 		if err != nil {
 			// A permanent rejection (the apiserver refused the Job spec, RBAC
@@ -338,9 +349,9 @@ func (r *SudoRequestReconciler) handleApproved(ctx context.Context, sr *SudoRequ
 			}
 			return ctrl.Result{}, err
 		}
-		sr.Status.ExecutorJobName = job.Name
+		sr.Status.ExecutorJobUID = string(job.UID)
 		if err := r.Status().Update(ctx, sr); err != nil {
-			return ctrl.Result{}, fmt.Errorf("record executorJobName: %w", err)
+			return ctrl.Result{}, fmt.Errorf("record executorJobUID: %w", err)
 		}
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
@@ -348,6 +359,11 @@ func (r *SudoRequestReconciler) handleApproved(ctx context.Context, sr *SudoRequ
 	job, err := r.getExecutorJob(ctx, sr)
 	if err != nil {
 		return ctrl.Result{}, err
+	}
+	if job != nil && string(job.UID) != sr.Status.ExecutorJobUID {
+		// A different Job now occupies our name (ours was deleted and replaced).
+		// Don't read its logs/exit code as if it were the approved workload.
+		return r.failApproved(ctx, sr, "executor Job was replaced by a different object; refusing to use it")
 	}
 	if job == nil {
 		// Job has been GC'd before we observed completion. Treat as Failed

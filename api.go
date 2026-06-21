@@ -442,7 +442,7 @@ func (a *APIServer) renderApprovePage(w http.ResponseWriter, r *http.Request, cl
 		view.Command = sr.Spec.Command
 		view.Image = imageFor(sr)
 		view.Stdin = sr.Spec.Stdin
-		view.Extras = newSpecExtrasView(sr)
+		view.Extras = newSpecExtrasView(sr, false)
 		view.Summary = sr.Status.Summary
 		view.CreatedAt = sr.CreationTimestamp.UTC().Format("2006-01-02T15:04:05Z")
 	}

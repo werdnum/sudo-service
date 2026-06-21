@@ -35,7 +35,11 @@ type initContainerView struct {
 	EnvFrom []string
 }
 
-func newSpecExtrasView(sr *SudoRequest) specExtrasView {
+// newSpecExtrasView renders the widened fields for review. redactEnv hides
+// literal env values (NAME=<redacted>) for contexts that leave the cluster — the
+// AI summarizer — while the human-facing approve page and push pass false so the
+// reviewer still sees exactly what value is being approved.
+func newSpecExtrasView(sr *SudoRequest, redactEnv bool) specExtrasView {
 	v := specExtrasView{
 		Namespace:    executorNamespace(sr),
 		ClusterAdmin: clusterAdminEnabled(sr),
@@ -55,14 +59,14 @@ func newSpecExtrasView(sr *SudoRequest) specExtrasView {
 	for _, m := range extras.VolumeMounts {
 		v.Mounts = append(v.Mounts, describeMount(m))
 	}
-	v.Env = describeEnv(extras.Env)
+	v.Env = describeEnv(extras.Env, redactEnv)
 	v.EnvFrom = describeEnvFrom(extras.EnvFrom)
 	for _, c := range extras.InitContainers {
 		icv := initContainerView{
 			Name:    c.Name,
 			Image:   c.Image,
 			Command: strings.TrimSpace(strings.Join(append(append([]string{}, c.Command...), c.Args...), " ")),
-			Env:     describeEnv(c.Env),
+			Env:     describeEnv(c.Env, redactEnv),
 			EnvFrom: describeEnvFrom(c.EnvFrom),
 		}
 		for _, m := range c.VolumeMounts {
@@ -76,7 +80,7 @@ func newSpecExtrasView(sr *SudoRequest) specExtrasView {
 // describeEnv renders each env var with its value or source, not just its name —
 // a literal value (KUBECONFIG=..., AWS_*) or a valueFrom secret/configMap key is
 // part of what the human is approving and must be visible.
-func describeEnv(env []corev1.EnvVar) []string {
+func describeEnv(env []corev1.EnvVar, redact bool) []string {
 	var out []string
 	for _, e := range env {
 		switch {
@@ -88,6 +92,9 @@ func describeEnv(env []corev1.EnvVar) []string {
 			out = append(out, fmt.Sprintf("%s <- field:%s", e.Name, e.ValueFrom.FieldRef.FieldPath))
 		case e.ValueFrom != nil && e.ValueFrom.ResourceFieldRef != nil:
 			out = append(out, fmt.Sprintf("%s <- resource:%s", e.Name, e.ValueFrom.ResourceFieldRef.Resource))
+		case redact:
+			// A literal value may be a credential; don't ship it off-cluster.
+			out = append(out, e.Name+"=<redacted>")
 		default:
 			out = append(out, fmt.Sprintf("%s=%s", e.Name, e.Value))
 		}
@@ -110,11 +117,17 @@ func describeMount(m corev1.VolumeMount) string {
 func describeEnvFrom(sources []corev1.EnvFromSource) []string {
 	var out []string
 	for _, ef := range sources {
+		// The prefix is prepended to every imported key, so a "benign" source can
+		// still create behaviour-changing vars (AWS_*, KUBECONFIG_*) — show it.
+		prefix := ""
+		if ef.Prefix != "" {
+			prefix = " prefix=" + ef.Prefix
+		}
 		switch {
 		case ef.SecretRef != nil:
-			out = append(out, "secret/"+ef.SecretRef.Name)
+			out = append(out, "secret/"+ef.SecretRef.Name+prefix)
 		case ef.ConfigMapRef != nil:
-			out = append(out, "configMap/"+ef.ConfigMapRef.Name)
+			out = append(out, "configMap/"+ef.ConfigMapRef.Name+prefix)
 		}
 	}
 	return out
@@ -162,11 +175,11 @@ func describeVolumeSource(v corev1.Volume) (desc string, allowed bool) {
 // the Pushover approval push and handed to the AI summarizer for context. Empty
 // when the request is a plain command (hasSpecExtras, the same predicate that
 // excludes it from auto-approve and routes it to a human).
-func specExtrasText(sr *SudoRequest) string {
+func specExtrasText(sr *SudoRequest, redactEnv bool) string {
 	if !hasSpecExtras(sr) {
 		return ""
 	}
-	v := newSpecExtrasView(sr)
+	v := newSpecExtrasView(sr, redactEnv)
 	var b strings.Builder
 	fmt.Fprintf(&b, "namespace: %s\n", v.Namespace)
 	if v.ClusterAdmin {
