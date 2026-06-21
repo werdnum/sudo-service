@@ -56,6 +56,17 @@ type createRequestBody struct {
 	Command                 string `json:"command"`
 	Image                   string `json:"image,omitempty"`
 	TTLSecondsAfterApproval *int32 `json:"ttlSecondsAfterApproval,omitempty"`
+
+	// Widened pod fields — same shape as the CRD spec. Validated by
+	// validateSpecExtras before the request is created.
+	Namespace      string                 `json:"namespace,omitempty"`
+	Stdin          string                 `json:"stdin,omitempty"`
+	Env            []corev1.EnvVar        `json:"env,omitempty"`
+	EnvFrom        []corev1.EnvFromSource `json:"envFrom,omitempty"`
+	Volumes        []corev1.Volume        `json:"volumes,omitempty"`
+	VolumeMounts   []corev1.VolumeMount   `json:"volumeMounts,omitempty"`
+	InitContainers []corev1.Container     `json:"initContainers,omitempty"`
+	Privileges     SudoRequestPrivileges  `json:"privileges,omitempty"`
 }
 
 type requestStatusResponse struct {
@@ -65,6 +76,8 @@ type requestStatusResponse struct {
 	Requester       string `json:"requester"`
 	Command         string `json:"command"`
 	Image           string `json:"image"`
+	Namespace       string `json:"namespace"`
+	ClusterAdmin    bool   `json:"clusterAdmin"`
 	ApprovedBy      string `json:"approvedBy,omitempty"`
 	ApprovedAt      string `json:"approvedAt,omitempty"`
 	DeniedBy        string `json:"deniedBy,omitempty"`
@@ -113,7 +126,19 @@ func (a *APIServer) createRequestHandler(w http.ResponseWriter, r *http.Request)
 			Command:                 body.Command,
 			Image:                   body.Image,
 			TTLSecondsAfterApproval: body.TTLSecondsAfterApproval,
+			Namespace:               body.Namespace,
+			Stdin:                   body.Stdin,
+			Env:                     body.Env,
+			EnvFrom:                 body.EnvFrom,
+			Volumes:                 body.Volumes,
+			VolumeMounts:            body.VolumeMounts,
+			InitContainers:          body.InitContainers,
+			Privileges:              body.Privileges,
 		},
+	}
+	if err := validateSpecExtras(sr); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
 	}
 	if err := a.Client.Create(r.Context(), sr); err != nil {
 		http.Error(w, "create: "+err.Error(), http.StatusInternalServerError)
@@ -176,6 +201,8 @@ func (a *APIServer) serveStatus(w http.ResponseWriter, sr *SudoRequest) {
 		Requester:       sr.Spec.Requester,
 		Command:         sr.Spec.Command,
 		Image:           imageFor(sr),
+		Namespace:       executorNamespace(sr),
+		ClusterAdmin:    clusterAdminEnabled(sr),
 		ApprovedBy:      sr.Status.ApprovedBy,
 		DeniedBy:        sr.Status.DeniedBy,
 		DenialReason:    sr.Status.DenialReason,
@@ -341,6 +368,8 @@ type approveView struct {
 	Reason    string
 	Command   string
 	Image     string
+	Stdin     string
+	Extras    specExtrasView
 	Summary   string
 	CreatedAt string
 	User      string
@@ -410,6 +439,8 @@ func (a *APIServer) renderApprovePage(w http.ResponseWriter, r *http.Request, cl
 		view.Reason = sr.Spec.Reason
 		view.Command = sr.Spec.Command
 		view.Image = imageFor(sr)
+		view.Stdin = sr.Spec.Stdin
+		view.Extras = newSpecExtrasView(sr)
 		view.Summary = sr.Status.Summary
 		view.CreatedAt = sr.CreationTimestamp.UTC().Format("2006-01-02T15:04:05Z")
 	}

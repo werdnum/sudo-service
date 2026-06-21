@@ -1,6 +1,7 @@
 package main
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -70,6 +71,61 @@ type SudoRequestSpec struct {
 
 	// TTLSecondsAfterApproval defaults to 3600 seconds.
 	TTLSecondsAfterApproval *int32 `json:"ttlSecondsAfterApproval,omitempty"`
+
+	// Namespace is the namespace the executor Job runs in. Defaults to the
+	// controller namespace (sudo-service). Targeting another namespace lets the
+	// command mount that namespace's Secrets/PVCs as files (pods cannot mount
+	// cross-namespace) — but such a Job runs under that namespace's default
+	// ServiceAccount with no API privileges, so cluster-admin is only available
+	// in the controller namespace. See validateSpecExtras.
+	Namespace string `json:"namespace,omitempty"`
+
+	// Stdin, if set, is fed to the command's standard input. It removes the need
+	// to smuggle a multi-line payload (a manifest piped to `kubectl apply -f -`,
+	// a heredoc, ...) through the single-string Command field and the layers of
+	// shell quoting that implies. The bytes are materialised into a short-TTL
+	// Secret mounted into the executor pod, never interpolated into the shell.
+	Stdin string `json:"stdin,omitempty"`
+
+	// Env / EnvFrom are extra environment for the executor container, e.g. a
+	// secretRef for credentials. Curated subset of the upstream types; see
+	// validateSpecExtras for what is permitted.
+	Env     []corev1.EnvVar        `json:"env,omitempty"`
+	EnvFrom []corev1.EnvFromSource `json:"envFrom,omitempty"`
+
+	// Volumes / VolumeMounts let the command read Secrets, ConfigMaps, PVCs and
+	// scratch space as files. Volume sources are restricted to a reviewable
+	// allowlist (emptyDir, secret, configMap, persistentVolumeClaim, projected);
+	// escalation sources such as hostPath are rejected until they have an explicit
+	// approval-surfaced toggle. See validateSpecExtras.
+	Volumes      []corev1.Volume      `json:"volumes,omitempty"`
+	VolumeMounts []corev1.VolumeMount `json:"volumeMounts,omitempty"`
+
+	// InitContainers run before the executor container — e.g. to stage a tool
+	// binary into a shared emptyDir. Their securityContext is stamped by the
+	// controller (the requester may not set it), so they inherit the same locked
+	// down profile as the executor container.
+	InitContainers []corev1.Container `json:"initContainers,omitempty"`
+
+	// Privileges holds the explicit, approval-surfaced capability toggles. Each
+	// flag widens what the executor pod may do; the human reviewer sees them on
+	// the approve page. Only ClusterAdmin is wired up today — privileged, runAsRoot,
+	// hostPath, etc. are the planned extensions.
+	Privileges SudoRequestPrivileges `json:"privileges,omitempty"`
+}
+
+// SudoRequestPrivileges is the set of explicit capability toggles a request may
+// flip. They default to a safe value and are rendered individually on the
+// approve page so the reviewer can see exactly what power is being handed over.
+type SudoRequestPrivileges struct {
+	// ClusterAdmin runs the executor under the cluster-admin-bound executor SA.
+	// It is only available when the Job runs in the controller namespace (that is
+	// where the cluster-admin SA lives), and defaults to true there to preserve
+	// the historical "every request is fully privileged" behaviour. When the Job
+	// targets another namespace it is unavailable (nil/false) and the request runs
+	// under that namespace's unprivileged default SA. nil means "use the default
+	// for the chosen namespace".
+	ClusterAdmin *bool `json:"clusterAdmin,omitempty"`
 }
 
 // SudoRequestStatus is owned by the controller.
@@ -177,6 +233,40 @@ func (in *SudoRequestSpec) DeepCopyInto(out *SudoRequestSpec) {
 	if in.TTLSecondsAfterApproval != nil {
 		v := *in.TTLSecondsAfterApproval
 		out.TTLSecondsAfterApproval = &v
+	}
+	if in.Env != nil {
+		out.Env = make([]corev1.EnvVar, len(in.Env))
+		for i := range in.Env {
+			in.Env[i].DeepCopyInto(&out.Env[i])
+		}
+	}
+	if in.EnvFrom != nil {
+		out.EnvFrom = make([]corev1.EnvFromSource, len(in.EnvFrom))
+		for i := range in.EnvFrom {
+			in.EnvFrom[i].DeepCopyInto(&out.EnvFrom[i])
+		}
+	}
+	if in.Volumes != nil {
+		out.Volumes = make([]corev1.Volume, len(in.Volumes))
+		for i := range in.Volumes {
+			in.Volumes[i].DeepCopyInto(&out.Volumes[i])
+		}
+	}
+	if in.VolumeMounts != nil {
+		out.VolumeMounts = make([]corev1.VolumeMount, len(in.VolumeMounts))
+		for i := range in.VolumeMounts {
+			in.VolumeMounts[i].DeepCopyInto(&out.VolumeMounts[i])
+		}
+	}
+	if in.InitContainers != nil {
+		out.InitContainers = make([]corev1.Container, len(in.InitContainers))
+		for i := range in.InitContainers {
+			in.InitContainers[i].DeepCopyInto(&out.InitContainers[i])
+		}
+	}
+	if in.Privileges.ClusterAdmin != nil {
+		v := *in.Privileges.ClusterAdmin
+		out.Privileges.ClusterAdmin = &v
 	}
 }
 

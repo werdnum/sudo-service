@@ -93,6 +93,16 @@ spec:
   command: "exact shell command, single string"
   # image: alpine/k8s:1.35.5          # optional, this is the default
   # ttlSecondsAfterApproval: 600       # output retention, default 600s, max 3600
+  # --- optional, for more than a one-liner (see "Richer jobs" below) ---
+  # namespace: seaweedfs               # run the Job here to mount this ns's Secrets/PVCs
+  # stdin: |                            # fed to the command's stdin, no shell quoting
+  #   ...multi-line payload...
+  # env: [{name: FOO, value: bar}]
+  # envFrom: [{secretRef: {name: some-secret}}]
+  # volumes: [...]                      # emptyDir/secret/configMap/persistentVolumeClaim only
+  # volumeMounts: [...]
+  # initContainers: [...]
+  # privileges: {clusterAdmin: true}    # default true in sudo-service ns, unavailable elsewhere
 ```
 
 A `ValidatingAdmissionPolicy` enforces `spec.requester == request.userInfo.username`
@@ -176,6 +186,78 @@ Output is GC'd `ttlSecondsAfterApproval` seconds after execution (default 600s).
   the user how to proceed.
 - **`Expired`**: nobody approved within an hour. Surface that.
 
+## Richer jobs: mounts, other namespaces, big payloads
+
+**Don't make a job to make a job.** If you find yourself putting `kubectl apply
+-f - <<YAML ...` (a Job/Pod manifest) into `command`, express that pod *directly*
+as the SudoRequest instead. The request can mount Secrets/PVCs, set env, run init
+containers, and target another namespace — so the thing the human approves is the
+actual pod that runs, and you avoid nesting heredocs and quoting inside `command`.
+
+What you can set (a curated, reviewable subset — the human sees all of it on the
+approve page):
+
+- `namespace` — where the executor Job runs. **Default `sudo-service`.** To mount
+  a Secret/PVC, the Job must run in **that resource's namespace** (pods can't
+  mount cross-namespace). A Job in another namespace runs under that namespace's
+  `default` ServiceAccount with **no cluster-admin** — which is exactly right for
+  a "mount these files and run a script" task that doesn't call the API.
+- `volumes` / `volumeMounts` — sources limited to `emptyDir`, `secret`,
+  `configMap`, `persistentVolumeClaim`, `projected`. `hostPath` is rejected.
+- `env` / `envFrom` — e.g. a `secretRef` for credentials.
+- `initContainers` — e.g. to stage a tool binary into a shared `emptyDir`. They
+  may **not** set their own `securityContext` (the controller locks it down).
+- `stdin` — fed to the command's stdin. Use this instead of a heredoc to pipe a
+  manifest to `kubectl apply -f -`; it travels as literal bytes, no shell quoting.
+- `privileges.clusterAdmin` — defaults `true` in `sudo-service`, where it grants
+  the cluster-admin executor SA. **Unavailable in other namespaces** (a
+  cross-namespace Job can't be cluster-admin); setting both is rejected.
+
+A request using any of these fields **always requires a human** — auto-approve
+only applies to plain command+image one-liners.
+
+Example — recover one file from a SeaweedFS volume (PVC + GCS-creds Secret both
+live in `seaweedfs`, so the Job runs there under the default SA, no cluster-admin):
+
+```yaml
+apiVersion: sudo.andrewgarrett.dev/v1alpha1
+kind: SudoRequest
+metadata: { generateName: storypark-recover-, namespace: sudo-service }
+spec:
+  requester: system:serviceaccount:k8s-agent:k8s-agent-sa
+  reason: "Recover storypark image 419720067.jpg from volume 4787 after data-loss alert"
+  namespace: seaweedfs
+  image: chrislusf/seaweedfs:3.84
+  privileges: { clusterAdmin: false }    # implied off-namespace; explicit for clarity
+  command: |
+    set -eu
+    export RCLONE_CONFIG=/work/rclone.conf
+    weed export -dir=/data -volumeId=4787 -o=/work/4787.tar -fileNameFormat='{{.Key}}'
+    tar -xOf /work/4787.tar '4787,2957016f7719f2' > /work/recovered.jpg
+    /tools/rclone rcat 'gcs:bucket/path/419720067.jpg' --size 735514 < /work/recovered.jpg
+  env:
+    - { name: RCLONE_CONFIG, value: /work/rclone.conf }
+  initContainers:
+    - name: copy-rclone
+      image: rclone/rclone:latest
+      command: ['/bin/sh','-c','cp $(command -v rclone) /tools/rclone && chmod 0555 /tools/rclone']
+      volumeMounts: [{ name: tools, mountPath: /tools }]
+  volumeMounts:
+    - { name: tools, mountPath: /tools, readOnly: true }
+    - { name: work, mountPath: /work }
+    - { name: data, mountPath: /data, readOnly: true }
+    - { name: backup-config, mountPath: /etc/seaweedfs/gcs_creds.json, subPath: gcs_creds.json, readOnly: true }
+  volumes:
+    - { name: tools, emptyDir: {} }
+    - { name: work, emptyDir: {} }
+    - { name: data, persistentVolumeClaim: { claimName: data-seaweedfs-volume-0, readOnly: true } }
+    - { name: backup-config, secret: { secretName: backup } }
+```
+
+The executor container still runs as a non-root user with a read-only root
+filesystem and all capabilities dropped; write to a mounted `emptyDir` (e.g.
+`/work`), not the root filesystem.
+
 ## Gotchas
 
 - `spec.requester` must match `request.userInfo.username` exactly — the
@@ -187,9 +269,16 @@ Output is GC'd `ttlSecondsAfterApproval` seconds after execution (default 600s).
   Setup section.
 - `ttlSecondsAfterApproval` defaults to 600s and is hard-capped at 3600s by
   the CRD schema and the executor VAP. Don't ask for longer.
-- The image runs under `cluster-admin`. If you specify a non-default `image`,
-  the human reviewer is the trust boundary — they see the image on the
-  approve page next to the command. Don't expect server-side allowlisting.
+- In the `sudo-service` namespace the image runs under `cluster-admin` by
+  default; a Job you target at another `namespace` runs under that namespace's
+  unprivileged `default` ServiceAccount instead. Either way the human reviewer is
+  the trust boundary — they see the image, namespace, privileges and mounts on the
+  approve page. Don't expect server-side allowlisting of images.
+- The widened pod fields are checked against a curated allowlist before the human
+  sees them. The HTTP API rejects a bad spec with `400`; a CRD-created one is moved
+  straight to `Denied` (`deniedBy=spec-validation`). Rejections include `hostPath`
+  volumes, an init container that sets its own `securityContext`, and
+  `privileges.clusterAdmin: true` combined with a non-default `namespace`.
 - Commands are syntax-checked before they reach the human. The HTTP API rejects
   a syntactically-broken command with `400`; a CRD-created one is moved straight
   to `Denied` (`deniedBy=syntax-check`, parse error in `denialReason`) before any

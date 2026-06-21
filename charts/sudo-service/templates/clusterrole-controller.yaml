@@ -1,0 +1,49 @@
+# Cross-namespace permissions for the controller. The namespaced Role
+# (role-controller.yaml) already covers everything in the controller namespace;
+# this ClusterRole exists so that a SudoRequest with spec.namespace set can run
+# its executor Job in another namespace (to mount that namespace's Secrets/PVCs
+# as files).
+#
+# Scope note: this broadens the controller's own reach, not the requester's. The
+# controller is already the trust root — it creates Jobs that run as the
+# cluster-admin executor SA — so letting it manage executor Jobs and their stdin
+# Secrets in other namespaces is not a new capability class. Every request still
+# passes the human approval gate before any Job is created.
+#
+# Cross-namespace executor Jobs run under the target namespace's *default*
+# ServiceAccount (no cluster-admin), so this grant deliberately does NOT include
+# any ability to bind roles or mint privileged identities elsewhere.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: sudo-service-controller-cross-namespace
+rules:
+  # Executor Jobs in the target namespace.
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  # Read the executor pod's status + logs to capture command output.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  # The optional stdin payload Secret, materialised next to the Job and owned by
+  # it so it is garbage-collected with the Job's TTL.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: sudo-service-controller-cross-namespace
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: sudo-service-controller-cross-namespace
+subjects:
+  - kind: ServiceAccount
+    name: sudo-service-controller-sa
+    namespace: {{ .Values.namespace }}

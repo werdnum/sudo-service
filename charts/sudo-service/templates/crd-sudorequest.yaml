@@ -69,6 +69,66 @@ spec:
                   # Capped at 3600 to match the executor VAP's ttlSecondsAfterFinished
                   # guard (kubernetes/manifests/workloads/sudo-service/validatingadmissionpolicy-executor.yaml).
                   maximum: 3600
+                namespace:
+                  type: string
+                  description: >-
+                    Namespace the executor Job runs in. Defaults to the controller
+                    namespace (sudo-service). Targeting another namespace lets the
+                    command mount that namespace's Secrets/PVCs as files, but the Job
+                    then runs under that namespace's unprivileged default
+                    ServiceAccount — cluster-admin is only available in the
+                    controller namespace.
+                stdin:
+                  type: string
+                  description: >-
+                    Optional payload fed to the command's standard input. Removes the
+                    need to smuggle a multi-line document (a manifest piped to
+                    'kubectl apply -f -', a heredoc, ...) through the single-string
+                    command field. Materialised into a short-TTL Secret mounted into
+                    the executor pod; never interpolated into the shell.
+                privileges:
+                  type: object
+                  description: >-
+                    Explicit, approval-surfaced capability toggles. Each is rendered
+                    on the approve page so the reviewer sees what power is handed over.
+                  properties:
+                    clusterAdmin:
+                      type: boolean
+                      description: >-
+                        Run under the cluster-admin executor ServiceAccount. Only valid
+                        in the controller namespace, where it defaults to true; elsewhere
+                        the Job runs under the namespace default ServiceAccount.
+                # The structured pod fields below reuse the upstream Kubernetes
+                # shapes (env, envFrom, volumes, volumeMounts, containers). The
+                # controller narrows them to a reviewable allowlist in Go
+                # (validateSpecExtras) — rejecting e.g. hostPath volumes or init
+                # containers that set their own securityContext — so the apiserver
+                # schema only needs to preserve the structure, not re-encode it.
+                env:
+                  type: array
+                  items:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+                envFrom:
+                  type: array
+                  items:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+                volumes:
+                  type: array
+                  items:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+                volumeMounts:
+                  type: array
+                  items:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+                initContainers:
+                  type: array
+                  items:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
             status:
               type: object
               properties:

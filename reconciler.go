@@ -110,7 +110,36 @@ func (r *SudoRequestReconciler) handleNew(ctx context.Context, sr *SudoRequest) 
 		return ctrl.Result{}, nil
 	}
 
-	if _, ok := getAutoApproveParsedCommand(sr.Spec.Command, imageFor(sr)); ok {
+	// Reject a spec whose widened pod fields fall outside the curated allowlist
+	// (a hostPath volume, an init container setting its own securityContext, ...).
+	// As with the syntax check, the HTTP API rejects these at submission; a
+	// CRD-created one only reaches us here, so deny it before the approval push.
+	if err := validateSpecExtras(sr); err != nil {
+		now := metav1.NewTime(time.Now())
+		sr.Status.Phase = PhaseDenied
+		sr.Status.DeniedBy = "spec-validation"
+		sr.Status.DeniedAt = &now
+		sr.Status.DenialReason = err.Error()
+		if err := r.Status().Update(ctx, sr); err != nil {
+			return ctrl.Result{}, fmt.Errorf("status update Denied for invalid spec: %w", err)
+		}
+		r.Recorder.Eventf(sr, corev1.EventTypeWarning, "Denied", "Rejected: %v", err)
+		r.Broadcaster.Publish(string(sr.UID), Event{
+			Type:         "phase",
+			Phase:        PhaseDenied,
+			DeniedBy:     "spec-validation",
+			DenialReason: err.Error(),
+			Requester:    sr.Spec.Requester,
+			Reason:       sr.Spec.Reason,
+			Command:      sr.Spec.Command,
+			CreatedAt:    sr.CreationTimestamp.Format("2006-01-02 15:04:05 UTC"),
+		})
+		return ctrl.Result{}, nil
+	}
+
+	// Auto-approve only reasons about command+image, so requests that use the
+	// widened pod fields or privilege toggles always require a human.
+	if _, ok := getAutoApproveParsedCommand(sr.Spec.Command, imageFor(sr)); ok && !hasSpecExtras(sr) {
 		now := metav1.NewTime(time.Now())
 		sr.Status.Phase = PhaseApproved
 		sr.Status.ApprovedBy = "auto-approve"
@@ -164,7 +193,7 @@ func (r *SudoRequestReconciler) handleNew(ctx context.Context, sr *SudoRequest) 
 	var summary string
 	if r.Summarizer != nil {
 		sumCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		s, err := r.Summarizer.Summarize(sumCtx, sr.Spec.Command, imageFor(sr), sr.Spec.Reason)
+		s, err := r.Summarizer.Summarize(sumCtx, sr.Spec.Command, imageFor(sr), sr.Spec.Reason, specExtrasText(sr))
 		cancel()
 		if err != nil {
 			log.Error(err, "AI command summary failed; continuing without one")
@@ -177,6 +206,9 @@ func (r *SudoRequestReconciler) handleNew(ctx context.Context, sr *SudoRequest) 
 	title := fmt.Sprintf("sudo: %s wants to run %s", sr.Spec.Requester, truncate(sr.Spec.Command, 80))
 	body := fmt.Sprintf("reason: %s\ncommand: %s\nimage: %s",
 		sr.Spec.Reason, sr.Spec.Command, imageFor(sr))
+	if extras := specExtrasText(sr); extras != "" {
+		body += "\n" + extras
+	}
 	reqID, err := r.Pushover.SendApproval(ctx, title, body, approvalURL)
 	if err != nil {
 		log.Error(err, "Pushover send failed; will retry")

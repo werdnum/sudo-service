@@ -49,7 +49,7 @@ func TestSummarizeRequestAndResponse(t *testing.T) {
 	defer srv.Close()
 
 	s := NewSummarizer("sk-secret", srv.URL+"/v1", "test-model")
-	out, err := s.Summarize(context.Background(), "kubectl get pods", "alpine/k8s:1.35.5", "debugging")
+	out, err := s.Summarize(context.Background(), "kubectl get pods", "alpine/k8s:1.35.5", "debugging", "")
 	if err != nil {
 		t.Fatalf("Summarize() error = %v", err)
 	}
@@ -104,7 +104,7 @@ func TestSummarizeAPIError(t *testing.T) {
 	defer srv.Close()
 
 	s := NewSummarizer("sk-bad", srv.URL+"/v1", "m")
-	if _, err := s.Summarize(context.Background(), "echo hi", "img", ""); err == nil {
+	if _, err := s.Summarize(context.Background(), "echo hi", "img", "", ""); err == nil {
 		t.Fatal("expected error on non-2xx response, got nil")
 	}
 }
@@ -116,7 +116,7 @@ func TestSummarizeEmptyChoices(t *testing.T) {
 	defer srv.Close()
 
 	s := NewSummarizer("sk", srv.URL+"/v1", "m")
-	if _, err := s.Summarize(context.Background(), "echo hi", "img", ""); err == nil {
+	if _, err := s.Summarize(context.Background(), "echo hi", "img", "", ""); err == nil {
 		t.Fatal("expected error when no choices returned, got nil")
 	}
 }
