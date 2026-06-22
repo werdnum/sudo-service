@@ -69,6 +69,18 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--image-pull-secret",
+        action="append",
+        default=[],
+        metavar="NAME",
+        dest="image_pull_secrets",
+        help=(
+            "Name of a registry-credential Secret (in the executor's namespace) the "
+            "kubelet uses to pull a private image. Repeatable. The Secret is never "
+            "exposed to the command; its name is shown to the reviewer."
+        ),
+    )
+    parser.add_argument(
         "--ttl-seconds-after-approval",
         type=int,
         help="Seconds to retain output after approval, capped by the service.",
@@ -219,6 +231,7 @@ def create_request(
     namespace: str | None = None,
     stdin: str | None = None,
     no_cluster_admin: bool = False,
+    image_pull_secrets: list[str] | None = None,
 ) -> str:
     body: dict[str, Any] = {
         "reason": reason,
@@ -234,6 +247,8 @@ def create_request(
         body["stdin"] = stdin
     if no_cluster_admin:
         body["privileges"] = {"clusterAdmin": False}
+    if image_pull_secrets:
+        body["imagePullSecrets"] = [{"name": name} for name in image_pull_secrets]
 
     response = http_json(f"{base_url.rstrip('/')}/requests", token_file, method="POST", body=body)
     uid = str(response.get("uid") or "")
@@ -299,6 +314,7 @@ def main() -> int:
         namespace=args.namespace,
         stdin=stdin_payload,
         no_cluster_admin=args.no_cluster_admin,
+        image_pull_secrets=args.image_pull_secrets,
     )
     if not args.quiet:
         print(f"sudo-service request uid={uid}", file=sys.stderr)

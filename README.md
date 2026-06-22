@@ -86,7 +86,7 @@ locally with `sh -n` before submitting (skippable with `--no-validate`).
 
 Beyond a one-line `command`, a request can describe the executor pod directly —
 `namespace`, `stdin`, `env`/`envFrom`, `volumes`/`volumeMounts`, `initContainers`,
-and a `privileges` block — so the human approves the actual privileged action
+`imagePullSecrets`, and a `privileges` block — so the human approves the actual privileged action
 (which Secrets/PVCs it mounts, which namespace it runs in) rather than a `kubectl`
 that creates an arbitrary pod. The fields reuse the upstream Kubernetes shapes but
 are narrowed to a reviewable, non-escalating subset in `validateSpecExtras`

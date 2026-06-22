@@ -129,6 +129,17 @@ type SudoRequestSpec struct {
 	VolumeMounts   []runtime.RawExtension `json:"volumeMounts,omitempty"`
 	InitContainers []runtime.RawExtension `json:"initContainers,omitempty"`
 
+	// ImagePullSecrets names registry-credential Secrets (in the executor's
+	// namespace) the kubelet uses to pull spec.image and any initContainer images
+	// from a private registry. Stored as raw JSON like the other widened fields
+	// (each item is a corev1.LocalObjectReference: {"name": ...}) for the same
+	// decode-safety reason. Unlike a mounted or env-exposed Secret these are never
+	// surfaced inside the container — the kubelet consumes them purely for registry
+	// auth — so they grant the command no capability and don't need the SA-token
+	// rejection that volume/env Secret references do; the names are still rendered
+	// on the approve page for the reviewer.
+	ImagePullSecrets []runtime.RawExtension `json:"imagePullSecrets,omitempty"`
+
 	// Privileges holds the explicit, approval-surfaced capability toggles. Each
 	// flag widens what the executor pod may do; the human reviewer sees them on
 	// the approve page. Only ClusterAdmin is wired up today — privileged, runAsRoot,
@@ -285,6 +296,7 @@ func (in *SudoRequestSpec) DeepCopyInto(out *SudoRequestSpec) {
 	out.Volumes = copyRaw(in.Volumes)
 	out.VolumeMounts = copyRaw(in.VolumeMounts)
 	out.InitContainers = copyRaw(in.InitContainers)
+	out.ImagePullSecrets = copyRaw(in.ImagePullSecrets)
 	if in.Privileges.ClusterAdmin != nil {
 		v := *in.Privileges.ClusterAdmin
 		out.Privileges.ClusterAdmin = &v

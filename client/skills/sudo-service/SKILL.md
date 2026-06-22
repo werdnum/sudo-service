@@ -102,6 +102,7 @@ spec:
   # volumes: [...]                      # emptyDir/secret/configMap/persistentVolumeClaim only
   # volumeMounts: [...]
   # initContainers: [...]
+  # imagePullSecrets: [{name: registry-creds}]  # pull a private image; never exposed to the command
   # privileges: {clusterAdmin: true}    # default true in sudo-service ns, unavailable elsewhere
 ```
 
@@ -219,6 +220,12 @@ approve page):
   manifest to `kubectl apply -f -`; it travels as literal bytes, no shell quoting.
   Capped just under 1 MiB (it is carried in a Secret); oversized stdin is rejected
   at submission.
+- `imagePullSecrets` — `[{name: ...}]` references to registry-credential Secrets
+  (in the executor's namespace) the kubelet uses to pull a private `image` or
+  init-container image. Unlike a mounted/env Secret they are **never exposed to
+  the command** — the kubelet uses them only for registry auth — so they grant no
+  extra capability; their names are still shown to the reviewer. The CLI exposes
+  this as a repeatable `--image-pull-secret NAME`.
 - `privileges.clusterAdmin` — defaults `true` in `sudo-service`, where it grants
   the cluster-admin executor SA. **Unavailable in other namespaces** (a
   cross-namespace Job can't be cluster-admin); setting both is rejected.

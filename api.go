@@ -61,14 +61,15 @@ type createRequestBody struct {
 	// Widened pod fields — same shape as the CRD spec, carried as raw JSON so a
 	// malformed item is rejected by validateSpecExtras (400) rather than failing
 	// the body decode in a way that diverges from the CRD path.
-	Namespace      string                 `json:"namespace,omitempty"`
-	Stdin          string                 `json:"stdin,omitempty"`
-	Env            []runtime.RawExtension `json:"env,omitempty"`
-	EnvFrom        []runtime.RawExtension `json:"envFrom,omitempty"`
-	Volumes        []runtime.RawExtension `json:"volumes,omitempty"`
-	VolumeMounts   []runtime.RawExtension `json:"volumeMounts,omitempty"`
-	InitContainers []runtime.RawExtension `json:"initContainers,omitempty"`
-	Privileges     SudoRequestPrivileges  `json:"privileges,omitempty"`
+	Namespace        string                 `json:"namespace,omitempty"`
+	Stdin            string                 `json:"stdin,omitempty"`
+	Env              []runtime.RawExtension `json:"env,omitempty"`
+	EnvFrom          []runtime.RawExtension `json:"envFrom,omitempty"`
+	Volumes          []runtime.RawExtension `json:"volumes,omitempty"`
+	VolumeMounts     []runtime.RawExtension `json:"volumeMounts,omitempty"`
+	InitContainers   []runtime.RawExtension `json:"initContainers,omitempty"`
+	ImagePullSecrets []runtime.RawExtension `json:"imagePullSecrets,omitempty"`
+	Privileges       SudoRequestPrivileges  `json:"privileges,omitempty"`
 }
 
 type requestStatusResponse struct {
@@ -135,6 +136,7 @@ func (a *APIServer) createRequestHandler(w http.ResponseWriter, r *http.Request)
 			Volumes:                 body.Volumes,
 			VolumeMounts:            body.VolumeMounts,
 			InitContainers:          body.InitContainers,
+			ImagePullSecrets:        body.ImagePullSecrets,
 			Privileges:              body.Privileges,
 		},
 	}

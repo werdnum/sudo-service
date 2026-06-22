@@ -611,6 +611,68 @@ func TestHasSpecExtras(t *testing.T) {
 	if !hasSpecExtras(srWith(SudoRequestSpec{Privileges: SudoRequestPrivileges{ClusterAdmin: boolPtr(false)}})) {
 		t.Error("explicit privilege toggle not detected as extra")
 	}
+	if !hasSpecExtras(srWith(SudoRequestSpec{ImagePullSecrets: rawList(corev1.LocalObjectReference{Name: "reg"})})) {
+		t.Error("imagePullSecrets not detected as extra")
+	}
+}
+
+func TestImagePullSecretsSplicedAndReviewed(t *testing.T) {
+	sr := srWith(SudoRequestSpec{
+		Command:          "kubectl get nodes",
+		Image:            "registry.internal/private:1.0",
+		ImagePullSecrets: rawList(corev1.LocalObjectReference{Name: "registry-creds"}),
+	})
+
+	extras, err := decodePodExtras(sr)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	job := buildExecutorJob(sr, ControllerNamespace, "sudo-exec-test", extras)
+	ips := job.Spec.Template.Spec.ImagePullSecrets
+	if len(ips) != 1 || ips[0].Name != "registry-creds" {
+		t.Fatalf("imagePullSecrets not spliced onto pod: %+v", ips)
+	}
+
+	// Surfaced to the reviewer in both the structured view and the plain text.
+	v := newSpecExtrasView(sr, false)
+	if len(v.ImagePullSecrets) != 1 || v.ImagePullSecrets[0] != "registry-creds" {
+		t.Errorf("imagePullSecrets not in review view: %v", v.ImagePullSecrets)
+	}
+	if txt := specExtrasText(sr, false); !strings.Contains(txt, "imagePullSecrets: registry-creds") {
+		t.Errorf("specExtrasText omits imagePullSecrets: %q", txt)
+	}
+
+	// And present in the ground-truth pod spec the reviewer sees.
+	tmpl, err := displayPodTemplate(sr, false)
+	if err != nil {
+		t.Fatalf("displayPodTemplate: %v", err)
+	}
+	if !strings.Contains(tmpl, "registry-creds") {
+		t.Errorf("pod template missing imagePullSecrets:\n%s", tmpl)
+	}
+}
+
+func TestValidateSpecExtrasImagePullSecrets(t *testing.T) {
+	// A well-formed reference is accepted.
+	if err := validateSpecExtras(srWith(SudoRequestSpec{
+		ImagePullSecrets: rawList(corev1.LocalObjectReference{Name: "registry-creds"}),
+	})); err != nil {
+		t.Fatalf("valid imagePullSecret rejected: %v", err)
+	}
+
+	// A nameless reference is rejected before the human round-trip.
+	err := validateSpecExtras(srWith(SudoRequestSpec{
+		ImagePullSecrets: rawList(corev1.LocalObjectReference{}),
+	}))
+	if err == nil || !strings.Contains(err.Error(), "name is required") {
+		t.Fatalf("nameless imagePullSecret: got %v, want name rejection", err)
+	}
+
+	// A type-confused item (numeric name) is rejected at decode, per-request.
+	sr := srWith(SudoRequestSpec{ImagePullSecrets: []runtime.RawExtension{{Raw: []byte(`{"name":123}`)}}})
+	if err := validateSpecExtras(sr); err == nil || !strings.Contains(err.Error(), "invalid pod field") {
+		t.Fatalf("malformed imagePullSecret: got %v, want decode rejection", err)
+	}
 }
 
 func equalSlice(a, b []string) bool {

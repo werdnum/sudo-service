@@ -19,6 +19,7 @@
             {{if .Extras.Mounts}}<dt>Mounts</dt><dd>{{range .Extras.Mounts}}{{.}}<br>{{end}}</dd>{{end}}
             {{if .Extras.EnvFrom}}<dt>Env from</dt><dd>{{range .Extras.EnvFrom}}{{.}}<br>{{end}}</dd>{{end}}
             {{if .Extras.Env}}<dt>Env</dt><dd>{{range .Extras.Env}}{{.}}<br>{{end}}</dd>{{end}}
+            {{if .Extras.ImagePullSecrets}}<dt>Image pull secrets</dt><dd>{{range .Extras.ImagePullSecrets}}{{.}}<br>{{end}}</dd>{{end}}
             {{if .Extras.InitContainers}}<dt>Init containers</dt><dd>{{range .Extras.InitContainers}}
                 <div style="margin-bottom: 0.5rem;">
                     <strong>{{.Name}}</strong> <span style="color: var(--text-muted);">({{.Image}})</span>

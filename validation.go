@@ -147,6 +147,18 @@ func validateSpecExtras(sr *SudoRequest) error {
 		}
 	}
 
+	// imagePullSecrets are LocalObjectReferences ({name}); the only thing to vet
+	// is a present name (the apiserver would reject a nameless ref at Job
+	// creation, post-approval, leaving the request stuck in Approved). They are
+	// not exposed to the container — the kubelet uses them only for registry
+	// auth — so no allowlist or SA-token check applies; their names are surfaced
+	// to the reviewer.
+	for i, ref := range extras.ImagePullSecrets {
+		if ref.Name == "" {
+			return fmt.Errorf("imagePullSecrets[%d]: name is required", i)
+		}
+	}
+
 	return nil
 }
 

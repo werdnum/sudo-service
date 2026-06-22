@@ -55,14 +55,15 @@ func redactPodEnv(pod *corev1.PodSpec) {
 // is being handed over — including each init container's command and mounts —
 // rather than having to infer it from a command string.
 type specExtrasView struct {
-	Namespace      string
-	ClusterAdmin   bool
-	Stdin          bool
-	Volumes        []string
-	Mounts         []string
-	Env            []string
-	EnvFrom        []string
-	InitContainers []initContainerView
+	Namespace        string
+	ClusterAdmin     bool
+	Stdin            bool
+	Volumes          []string
+	Mounts           []string
+	Env              []string
+	EnvFrom          []string
+	ImagePullSecrets []string
+	InitContainers   []initContainerView
 }
 
 // initContainerView surfaces everything a requester-supplied init container can
@@ -103,6 +104,9 @@ func newSpecExtrasView(sr *SudoRequest, redactEnv bool) specExtrasView {
 	}
 	v.Env = describeEnv(extras.Env, redactEnv)
 	v.EnvFrom = describeEnvFrom(extras.EnvFrom)
+	for _, ips := range extras.ImagePullSecrets {
+		v.ImagePullSecrets = append(v.ImagePullSecrets, ips.Name)
+	}
 	for _, c := range extras.InitContainers {
 		icv := initContainerView{
 			Name:    c.Name,
@@ -283,6 +287,9 @@ func specExtrasText(sr *SudoRequest, redactEnv bool) string {
 	}
 	if len(v.Env) > 0 {
 		fmt.Fprintf(&b, "env: %s\n", strings.Join(v.Env, ", "))
+	}
+	if len(v.ImagePullSecrets) > 0 {
+		fmt.Fprintf(&b, "imagePullSecrets: %s\n", strings.Join(v.ImagePullSecrets, ", "))
 	}
 	for _, ic := range v.InitContainers {
 		fmt.Fprintf(&b, "initContainer %s (%s): %s\n", ic.Name, ic.Image, ic.Command)
