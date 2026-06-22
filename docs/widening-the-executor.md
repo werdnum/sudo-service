@@ -24,6 +24,8 @@ creates one:
 - `stdin` — payload fed to the command's stdin (see below).
 - `env`, `envFrom`, `volumes`, `volumeMounts`, `initContainers` — the upstream
   Kubernetes shapes, narrowed to a reviewable allowlist in Go.
+- `imagePullSecrets` — registry-credential Secret references for pulling a private
+  executor/init image (see below).
 - `privileges.clusterAdmin` — the first explicit capability toggle.
 
 The approve page is layered so the reviewer can't miss anything: prominent
@@ -132,6 +134,14 @@ a reviewable, non-escalating subset:
   bounded CPU/memory, so a requester init container can't run unbounded.
 - Init containers may not set their own `securityContext`; the controller stamps
   the same locked-down profile as the executor container onto them.
+- `imagePullSecrets` are an exception to the Secret-reference scrutiny above:
+  unlike a volume/`env`/`envFrom` reference (whose bytes land inside the
+  container), a pull secret is consumed only by the **kubelet** to authenticate
+  to the registry and is never projected into the pod. So it can't smuggle in API
+  credentials the way a mounted service-account-token Secret would, and it needs
+  no allowlist or SA-token rejection — the controller only checks each reference
+  has a `name`, and surfaces the names to the reviewer. (A bad/foreign pull secret
+  at worst makes the image fail to pull, which the start deadline already catches.)
 
 Both submission paths run it: the HTTP API rejects a bad spec with `400`, and a
 CRD-created one is moved straight to `Denied` (`deniedBy=spec-validation`) before

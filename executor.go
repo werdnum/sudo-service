@@ -89,6 +89,7 @@ func hasSpecExtras(sr *SudoRequest) bool {
 		len(sr.Spec.Volumes) > 0 ||
 		len(sr.Spec.VolumeMounts) > 0 ||
 		len(sr.Spec.InitContainers) > 0 ||
+		len(sr.Spec.ImagePullSecrets) > 0 ||
 		sr.Spec.Privileges.ClusterAdmin != nil
 }
 
@@ -340,6 +341,10 @@ func buildExecutorJob(sr *SudoRequest, ns, name string, extras *podExtras) batch
 					RestartPolicy:                corev1.RestartPolicyNever,
 					ServiceAccountName:           saName,
 					AutomountServiceAccountToken: automount,
+					// Requester-supplied registry credentials for a private image.
+					// Consumed by the kubelet for the pull only; never exposed to the
+					// container (see SudoRequestSpec.ImagePullSecrets).
+					ImagePullSecrets: extras.ImagePullSecrets,
 					SecurityContext: &corev1.PodSecurityContext{
 						RunAsNonRoot: &runAsNonRoot,
 						RunAsUser:    &runAsUser,

@@ -303,6 +303,42 @@ class SudoServiceCLITest(unittest.TestCase):
             ],
         )
 
+    def test_image_pull_secret_flag_is_repeatable(self) -> None:
+        FakeSudoServiceHandler.phases = ["Executed"]
+        FakeSudoServiceHandler.output = b"ok\n"
+
+        result = self.run_cli(
+            "--reason",
+            "pull a private image",
+            "--quiet",
+            "--poll-interval",
+            "0.01",
+            "--image",
+            "registry.internal/private:1.0",
+            "--image-pull-secret",
+            "registry-creds",
+            "--image-pull-secret",
+            "backup-registry-creds",
+            "--command",
+            "kubectl get nodes",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            FakeSudoServiceHandler.request_bodies,
+            [
+                {
+                    "reason": "pull a private image",
+                    "command": "kubectl get nodes",
+                    "image": "registry.internal/private:1.0",
+                    "imagePullSecrets": [
+                        {"name": "registry-creds"},
+                        {"name": "backup-registry-creds"},
+                    ],
+                }
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

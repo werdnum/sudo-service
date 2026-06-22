@@ -129,6 +129,16 @@ spec:
                   items:
                     type: object
                     x-kubernetes-preserve-unknown-fields: true
+                # Registry-credential Secret references (LocalObjectReference,
+                # {name}) the kubelet uses to pull the executor/init images from a
+                # private registry. Never exposed to the container, so unlike mounted
+                # or env Secret references they need no allowlist; the controller only
+                # checks each has a name and surfaces them to the reviewer.
+                imagePullSecrets:
+                  type: array
+                  items:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
             status:
               type: object
               properties:

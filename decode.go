@@ -14,11 +14,12 @@ import (
 // them into corev1 types, returning an error for any item that doesn't decode —
 // which callers surface as a per-request rejection rather than a cache-wide DoS.
 type podExtras struct {
-	Env            []corev1.EnvVar
-	EnvFrom        []corev1.EnvFromSource
-	Volumes        []corev1.Volume
-	VolumeMounts   []corev1.VolumeMount
-	InitContainers []corev1.Container
+	Env              []corev1.EnvVar
+	EnvFrom          []corev1.EnvFromSource
+	Volumes          []corev1.Volume
+	VolumeMounts     []corev1.VolumeMount
+	InitContainers   []corev1.Container
+	ImagePullSecrets []corev1.LocalObjectReference
 }
 
 func decodePodExtras(sr *SudoRequest) (*podExtras, error) {
@@ -37,6 +38,9 @@ func decodePodExtras(sr *SudoRequest) (*podExtras, error) {
 	}
 	if err := decodeRawList(sr.Spec.InitContainers, &e.InitContainers); err != nil {
 		return nil, fmt.Errorf("initContainers: %w", err)
+	}
+	if err := decodeRawList(sr.Spec.ImagePullSecrets, &e.ImagePullSecrets); err != nil {
+		return nil, fmt.Errorf("imagePullSecrets: %w", err)
 	}
 	return e, nil
 }
