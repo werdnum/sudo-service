@@ -340,7 +340,11 @@ def main() -> int:
             sys.stdout.buffer.write(http_bytes(output_url(base_url, uid), args.token_file))
             sys.stdout.buffer.flush()
         elif phase == "Failed" and not args.quiet:
-            print("sudo-service request failed before output was available", file=sys.stderr)
+            reason = status.get("failureReason")
+            if reason:
+                print(f"sudo-service request failed before output was available: {reason}", file=sys.stderr)
+            else:
+                print("sudo-service request failed before output was available", file=sys.stderr)
         return 0 if phase == "Executed" else exit_code(status)
 
     if phase == "Denied":
