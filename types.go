@@ -171,6 +171,12 @@ type SudoRequestStatus struct {
 	DeniedAt     *metav1.Time `json:"deniedAt,omitempty"`
 	DenialReason string       `json:"denialReason,omitempty"`
 
+	// FailureReason explains a Failed request that carries no exitCode/output —
+	// e.g. the executor Job disappeared before completion, or output capture
+	// failed. (A command that ran and exited nonzero is conveyed by ExitCode and
+	// the output Secret instead.) Surfaced to the requester via the HTTP status.
+	FailureReason string `json:"failureReason,omitempty"`
+
 	ExitCode        *int32 `json:"exitCode,omitempty"`
 	OutputSecretRef string `json:"outputSecretRef,omitempty"`
 

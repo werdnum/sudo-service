@@ -16,6 +16,7 @@ type Event struct {
 	ApprovedBy      string `json:"approvedBy,omitempty"`
 	DeniedBy        string `json:"deniedBy,omitempty"`
 	DenialReason    string `json:"denialReason,omitempty"`
+	FailureReason   string `json:"failureReason,omitempty"`
 	ExitCode        *int32 `json:"exitCode,omitempty"`
 	OutputSecretRef string `json:"outputSecretRef,omitempty"`
 }

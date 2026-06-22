@@ -179,9 +179,11 @@ Output is GC'd `ttlSecondsAfterApproval` seconds after execution (default 600s).
 ### 5. Handle terminal states
 
 - **`Executed`**: command ran, exit 0, output available on `/output`. Report.
-- **`Failed`**: command ran but exited non-zero, OR the executor Job
-  disappeared before the controller saw it complete (look at the `Event` on
-  the SudoRequest for the reason). `/output` may or may not be populated.
+- **`Failed`**: command ran but exited non-zero (see `.exitCode` and `/output`),
+  OR it failed before producing output — e.g. the executor Job disappeared
+  before the controller saw it complete, or output capture failed. In the
+  no-output case read `.failureReason` from the status response for the
+  explanation. `/output` may or may not be populated.
 - **`Denied`**: read `.denialReason` from the status response and report it
   verbatim. **Do NOT auto-retry** — address the reviewer's concern or ask
   the user how to proceed.

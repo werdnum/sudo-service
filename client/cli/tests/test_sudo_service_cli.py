@@ -63,10 +63,12 @@ class FakeSudoServiceHandler(BaseHTTPRequestHandler):
                 "name": "http-abc",
                 "phase": phase,
             }
-            if phase in {"Executed", "Failed"}:
+            if phase in {"Executed", "Failed"} and self.output:
                 body["outputSecretRef"] = "out-1"
             if phase == "Failed":
                 body["exitCode"] = self.exit_code
+                if self.failure_reason:
+                    body["failureReason"] = self.failure_reason
             if phase == "Denied":
                 body["denialReason"] = self.denial_reason
             self.write_json(body)
@@ -95,6 +97,7 @@ class SudoServiceCLITest(unittest.TestCase):
         FakeSudoServiceHandler.auth_headers = []
         FakeSudoServiceHandler.phases = ["Executed"]
         FakeSudoServiceHandler.denial_reason = ""
+        FakeSudoServiceHandler.failure_reason = ""
         FakeSudoServiceHandler.output = b""
         FakeSudoServiceHandler.exit_code = None
         FakeSudoServiceHandler.status_calls = 0
@@ -178,6 +181,21 @@ class SudoServiceCLITest(unittest.TestCase):
         self.assertEqual(result.returncode, 7)
         self.assertEqual(result.stdout, "kubectl error\n")
         self.assertEqual(result.stderr, "")
+
+    def test_failed_request_without_output_surfaces_failure_reason(self) -> None:
+        FakeSudoServiceHandler.phases = ["Failed"]
+        FakeSudoServiceHandler.failure_reason = (
+            "Executor Job sudo-exec-abc disappeared before controller observed completion"
+        )
+
+        # --quiet suppresses progress, but the failure reason is the only
+        # explanation for a no-output Failed, so it must still surface.
+        result = self.run_cli("--reason", "test failure", "--quiet", "--command", "kubectl get nodes")
+
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("failed before output was available", result.stderr)
+        self.assertIn("sudo-exec-abc disappeared", result.stderr)
 
     def test_rereads_projected_token_between_polls_and_output_fetch(self) -> None:
         FakeSudoServiceHandler.phases = ["Pending", "Executed"]

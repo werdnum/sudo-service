@@ -16,6 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -317,8 +318,65 @@ func (r *SudoRequestReconciler) handlePending(ctx context.Context, sr *SudoReque
 	return ctrl.Result{RequeueAfter: PendingRequestTTL*time.Second - age + time.Second}, nil
 }
 
-// failApproved moves an Approved request to Failed with a reason, emitting the
-// event + broadcast the same way the other terminal transitions do.
+// updateStatus applies mutate to the request's status and persists it, retrying
+// on optimistic-concurrency conflicts.
+//
+// The manager cache lags the controller's own writes, and the Approved path does
+// several status writes back-to-back with immediate requeues (mint names, record
+// Job UID). A reconcile can therefore read a stale resourceVersion from the cache
+// and collide on its next Status().Update with "the object has been modified".
+// Surfacing that as a reconcile error is actively harmful on the Job path: it
+// rolls back (deletes) the freshly-created executor Job and ultimately fails the
+// just-approved request (see issue #20). Instead we refetch the object uncached —
+// straight from the apiserver, bypassing the lagging cache — re-apply the
+// mutation, and retry. sr is updated in place to the persisted object so the
+// caller's later logic sees the current state. mutate must be idempotent: it is
+// re-run against the refetched object on every retry.
+func (r *SudoRequestReconciler) updateStatus(ctx context.Context, sr *SudoRequest, mutate func(*SudoRequest)) error {
+	mutate(sr)
+	err := r.Status().Update(ctx, sr)
+	if err == nil || !apierrors.IsConflict(err) {
+		return err
+	}
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var latest SudoRequest
+		if err := r.APIReader.Get(ctx, client.ObjectKeyFromObject(sr), &latest); err != nil {
+			return err
+		}
+		mutate(&latest)
+		if err := r.Status().Update(ctx, &latest); err != nil {
+			return err
+		}
+		latest.DeepCopyInto(sr)
+		return nil
+	})
+}
+
+// markFailed records the terminal Failed phase with a human-readable reason,
+// emitting the event + broadcast the same way the other terminal transitions do.
+// The reason is persisted to status.failureReason so the requester-facing HTTP
+// status can explain a Failed request that has no exitCode/output (issue #20).
+func (r *SudoRequestReconciler) markFailed(ctx context.Context, sr *SudoRequest, reason string) (ctrl.Result, error) {
+	if err := r.updateStatus(ctx, sr, func(s *SudoRequest) {
+		s.Status.Phase = PhaseFailed
+		s.Status.FailureReason = reason
+	}); err != nil {
+		return ctrl.Result{}, err
+	}
+	r.Recorder.Eventf(sr, corev1.EventTypeWarning, "Failed", "%s", reason)
+	r.Broadcaster.Publish(string(sr.UID), Event{
+		Type:          "phase",
+		Phase:         PhaseFailed,
+		FailureReason: reason,
+		Requester:     sr.Spec.Requester,
+		Reason:        sr.Spec.Reason,
+		Command:       sr.Spec.Command,
+		CreatedAt:     sr.CreationTimestamp.Format("2006-01-02 15:04:05 UTC"),
+	})
+	return ctrl.Result{}, nil
+}
+
+// failApproved moves an Approved request to Failed with a reason.
 //
 // It first best-effort stops any executor Job sitting at the minted name. That
 // Job may be one we must not leave running: a foreign/pre-created Job, a Job that
@@ -342,24 +400,31 @@ func (r *SudoRequestReconciler) failApproved(ctx context.Context, sr *SudoReques
 			}
 		}
 	}
-	sr.Status.Phase = PhaseFailed
-	if err := r.Status().Update(ctx, sr); err != nil {
-		return ctrl.Result{}, err
-	}
-	r.Recorder.Eventf(sr, corev1.EventTypeWarning, "Failed", "%s", reason)
-	r.Broadcaster.Publish(string(sr.UID), Event{
-		Type:      "phase",
-		Phase:     PhaseFailed,
-		Requester: sr.Spec.Requester,
-		Reason:    sr.Spec.Reason,
-		Command:   sr.Spec.Command,
-		CreatedAt: sr.CreationTimestamp.Format("2006-01-02 15:04:05 UTC"),
-	})
-	return ctrl.Result{}, nil
+	return r.markFailed(ctx, sr, reason)
 }
 
 func (r *SudoRequestReconciler) handleApproved(ctx context.Context, sr *SudoRequest) (ctrl.Result, error) {
 	log := ctrl.LoggerFrom(ctx)
+
+	// Refetch uncached before making any decisions. The manager cache lags the
+	// controller's own writes, and the Approved path below does several status
+	// writes back-to-back with immediate requeues (finalizer, mint names, record
+	// Job UID). Reading the gating fields (ExecutorJobName/ExecutorJobUID) from a
+	// stale cache would drive the wrong branch — re-minting a name, or re-entering
+	// findOrCreateJob for a Job that already exists (which, cross-namespace, fails
+	// closed as "foreign"). Reading straight from the apiserver makes every
+	// decision below act on the current object (issue #20).
+	if err := r.APIReader.Get(ctx, client.ObjectKeyFromObject(sr), sr); err != nil {
+		if apierrors.IsNotFound(err) {
+			return ctrl.Result{}, nil
+		}
+		return ctrl.Result{}, err
+	}
+	if sr.Status.Phase != PhaseApproved {
+		// Lost a race with another writer (or a manual edit) since the cached read
+		// that routed us here; re-reconcile from the now-current phase.
+		return ctrl.Result{Requeue: true}, nil
+	}
 
 	// A cross-namespace executor Job carries no ownerRef, so it won't cascade when
 	// the SudoRequest is deleted. Add the cleanup finalizer before creating any
@@ -395,15 +460,24 @@ func (r *SudoRequestReconciler) handleApproved(ctx context.Context, sr *SudoRequ
 		if err != nil {
 			return ctrl.Result{}, fmt.Errorf("mint executor job name: %w", err)
 		}
-		sr.Status.ExecutorJobName = "sudo-exec-" + jobSuffix
+		jobName := "sudo-exec-" + jobSuffix
+		var stdinName string
 		if sr.Spec.Stdin != "" {
 			stdinSuffix, err := randomToken(8)
 			if err != nil {
 				return ctrl.Result{}, fmt.Errorf("mint stdin secret name: %w", err)
 			}
-			sr.Status.StdinSecretName = "sudo-stdin-" + stdinSuffix
+			stdinName = "sudo-stdin-" + stdinSuffix
 		}
-		if err := r.Status().Update(ctx, sr); err != nil {
+		if err := r.updateStatus(ctx, sr, func(s *SudoRequest) {
+			// Idempotent: keep an already-minted name (a prior reconcile whose write
+			// we raced) rather than clobbering it with a fresh suffix.
+			if s.Status.ExecutorJobName != "" {
+				return
+			}
+			s.Status.ExecutorJobName = jobName
+			s.Status.StdinSecretName = stdinName
+		}); err != nil {
 			return ctrl.Result{}, fmt.Errorf("record minted resource names: %w", err)
 		}
 		return ctrl.Result{Requeue: true}, nil
@@ -425,13 +499,19 @@ func (r *SudoRequestReconciler) handleApproved(ctx context.Context, sr *SudoRequ
 			}
 			return ctrl.Result{}, err
 		}
-		sr.Status.ExecutorJobUID = string(job.UID)
-		if err := r.Status().Update(ctx, sr); err != nil {
-			// Roll back the Job we just created. Otherwise the next reconcile
-			// re-enters with ExecutorJobUID still empty, finds this un-recorded Job,
-			// and (cross-namespace, where we can't authenticate it) fails the request
-			// as "foreign" — a transient status-write error would spuriously fail a
-			// legitimate request. Deleting it gives the retry a clean create.
+		uid := string(job.UID)
+		if err := r.updateStatus(ctx, sr, func(s *SudoRequest) {
+			if s.Status.ExecutorJobUID != "" {
+				return
+			}
+			s.Status.ExecutorJobUID = uid
+		}); err != nil {
+			// The status write failed even after refetch+retry — this is no longer a
+			// transient cache-lag conflict. Roll back the Job we just created.
+			// Otherwise the next reconcile re-enters with ExecutorJobUID still empty,
+			// finds this un-recorded Job, and (cross-namespace, where we can't
+			// authenticate it) fails the request as "foreign". Deleting it gives the
+			// retry a clean create.
 			if delErr := r.stopJob(ctx, job); delErr != nil {
 				log.Error(delErr, "failed to roll back executor Job after UID-record failure", "job", job.Name)
 			}
@@ -461,22 +541,9 @@ func (r *SudoRequestReconciler) handleApproved(ctx context.Context, sr *SudoRequ
 		// rather than re-creating (which would re-run the privileged command).
 		log.Info("executor Job missing before completion; failing request to prevent replay",
 			"jobName", sr.Status.ExecutorJobName)
-		sr.Status.Phase = PhaseFailed
-		if err := r.Status().Update(ctx, sr); err != nil {
-			return ctrl.Result{}, err
-		}
-		r.Recorder.Eventf(sr, corev1.EventTypeWarning, "Failed",
+		return r.markFailed(ctx, sr, fmt.Sprintf(
 			"Executor Job %s disappeared before controller observed completion (likely ttlSecondsAfterApproval too short)",
-			sr.Status.ExecutorJobName)
-		r.Broadcaster.Publish(string(sr.UID), Event{
-			Type:      "phase",
-			Phase:     PhaseFailed,
-			Requester: sr.Spec.Requester,
-			Reason:    sr.Spec.Reason,
-			Command:   sr.Spec.Command,
-			CreatedAt: sr.CreationTimestamp.Format("2006-01-02 15:04:05 UTC"),
-		})
-		return ctrl.Result{}, nil
+			sr.Status.ExecutorJobName))
 	}
 
 	// Completion is signalled by the executor container terminating, OR the Job's
@@ -524,20 +591,7 @@ func (r *SudoRequestReconciler) handleApproved(ctx context.Context, sr *SudoRequ
 			return ctrl.Result{}, fmt.Errorf("capture output while sidecar holds job %s open: %w", job.Name, err)
 		}
 		log.Error(err, "capture job output")
-		sr.Status.Phase = PhaseFailed
-		if err := r.Status().Update(ctx, sr); err != nil {
-			return ctrl.Result{}, err
-		}
-		r.Recorder.Eventf(sr, corev1.EventTypeWarning, "Failed", "Failed to capture output: %v", err)
-		r.Broadcaster.Publish(string(sr.UID), Event{
-			Type:      "phase",
-			Phase:     PhaseFailed,
-			Requester: sr.Spec.Requester,
-			Reason:    sr.Spec.Reason,
-			Command:   sr.Spec.Command,
-			CreatedAt: sr.CreationTimestamp.Format("2006-01-02 15:04:05 UTC"),
-		})
-		return ctrl.Result{}, nil
+		return r.markFailed(ctx, sr, fmt.Sprintf("Failed to capture output: %v", err))
 	}
 
 	// If the executor finished but the Job hasn't (an injected sidecar is keeping
@@ -554,9 +608,11 @@ func (r *SudoRequestReconciler) handleApproved(ctx context.Context, sr *SudoRequ
 	//     so retrying can't lose output, and we never go terminal with the pod alive.
 	if !jobFinished {
 		if sr.Status.OutputSecretRef == "" || sr.Status.ExitCode == nil {
-			sr.Status.OutputSecretRef = outputSecret
-			sr.Status.ExitCode = &exitCode
-			if err := r.Status().Update(ctx, sr); err != nil {
+			ec := exitCode
+			if err := r.updateStatus(ctx, sr, func(s *SudoRequest) {
+				s.Status.OutputSecretRef = outputSecret
+				s.Status.ExitCode = &ec
+			}); err != nil {
 				return ctrl.Result{}, err
 			}
 			return ctrl.Result{Requeue: true}, nil
@@ -579,12 +635,19 @@ func (r *SudoRequestReconciler) handleApproved(ctx context.Context, sr *SudoRequ
 func (r *SudoRequestReconciler) finalizeFromRecordedResult(ctx context.Context, sr *SudoRequest) (ctrl.Result, error) {
 	exitCode := *sr.Status.ExitCode
 	outputSecret := sr.Status.OutputSecretRef
-	if exitCode == 0 {
-		sr.Status.Phase = PhaseExecuted
-	} else {
-		sr.Status.Phase = PhaseFailed
-	}
-	if err := r.Status().Update(ctx, sr); err != nil {
+	if err := r.updateStatus(ctx, sr, func(s *SudoRequest) {
+		// Re-apply the result too, not just the phase: in the normal completion path
+		// the caller set ExitCode/OutputSecretRef in memory but never persisted them,
+		// so a conflict-driven refetch would otherwise drop them.
+		ec := exitCode
+		s.Status.ExitCode = &ec
+		s.Status.OutputSecretRef = outputSecret
+		if exitCode == 0 {
+			s.Status.Phase = PhaseExecuted
+		} else {
+			s.Status.Phase = PhaseFailed
+		}
+	}); err != nil {
 		return ctrl.Result{}, err
 	}
 

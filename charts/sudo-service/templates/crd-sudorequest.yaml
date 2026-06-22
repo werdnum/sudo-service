@@ -150,6 +150,13 @@ spec:
                 deniedBy: {type: string}
                 deniedAt: {type: string, format: date-time}
                 denialReason: {type: string}
+                failureReason:
+                  type: string
+                  description: >-
+                    Explains a Failed request that carries no exitCode/output
+                    (e.g. the executor Job disappeared before completion, or
+                    output capture failed). Surfaced to the requester via the
+                    HTTP status.
                 exitCode: {type: integer, format: int32}
                 outputSecretRef:
                   type: string

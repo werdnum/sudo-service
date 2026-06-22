@@ -339,8 +339,15 @@ def main() -> int:
         if status.get("outputSecretRef"):
             sys.stdout.buffer.write(http_bytes(output_url(base_url, uid), args.token_file))
             sys.stdout.buffer.flush()
-        elif phase == "Failed" and not args.quiet:
-            print("sudo-service request failed before output was available", file=sys.stderr)
+        elif phase == "Failed":
+            # No output to return: the controller's failureReason is the only
+            # explanation, so surface it like Denied/Expired do — even under
+            # --quiet, which suppresses progress, not the terminal error reason.
+            reason = status.get("failureReason")
+            if reason:
+                print(f"sudo-service request failed before output was available: {reason}", file=sys.stderr)
+            else:
+                print("sudo-service request failed before output was available", file=sys.stderr)
         return 0 if phase == "Executed" else exit_code(status)
 
     if phase == "Denied":
