@@ -188,7 +188,9 @@ class SudoServiceCLITest(unittest.TestCase):
             "Executor Job sudo-exec-abc disappeared before controller observed completion"
         )
 
-        result = self.run_cli("--reason", "test failure", "--command", "kubectl get nodes")
+        # --quiet suppresses progress, but the failure reason is the only
+        # explanation for a no-output Failed, so it must still surface.
+        result = self.run_cli("--reason", "test failure", "--quiet", "--command", "kubectl get nodes")
 
         self.assertEqual(result.returncode, 1)
         self.assertEqual(result.stdout, "")
