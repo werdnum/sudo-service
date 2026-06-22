@@ -86,6 +86,7 @@ type requestStatusResponse struct {
 	DeniedBy        string `json:"deniedBy,omitempty"`
 	DeniedAt        string `json:"deniedAt,omitempty"`
 	DenialReason    string `json:"denialReason,omitempty"`
+	FailureReason   string `json:"failureReason,omitempty"`
 	ExitCode        *int32 `json:"exitCode,omitempty"`
 	OutputSecretRef string `json:"outputSecretRef,omitempty"`
 	Summary         string `json:"summary,omitempty"`
@@ -210,6 +211,7 @@ func (a *APIServer) serveStatus(w http.ResponseWriter, sr *SudoRequest) {
 		ApprovedBy:      sr.Status.ApprovedBy,
 		DeniedBy:        sr.Status.DeniedBy,
 		DenialReason:    sr.Status.DenialReason,
+		FailureReason:   sr.Status.FailureReason,
 		ExitCode:        sr.Status.ExitCode,
 		OutputSecretRef: sr.Status.OutputSecretRef,
 		Summary:         sr.Status.Summary,
@@ -263,7 +265,7 @@ func (a *APIServer) serveEvents(w http.ResponseWriter, r *http.Request, sr *Sudo
 		sr = fresh
 	}
 
-	snap := Event{Type: "snapshot", Phase: sr.Status.Phase, ExitCode: sr.Status.ExitCode, OutputSecretRef: sr.Status.OutputSecretRef}
+	snap := Event{Type: "snapshot", Phase: sr.Status.Phase, ExitCode: sr.Status.ExitCode, OutputSecretRef: sr.Status.OutputSecretRef, DenialReason: sr.Status.DenialReason, FailureReason: sr.Status.FailureReason}
 	writeSSE(w, snap)
 	flusher.Flush()
 
