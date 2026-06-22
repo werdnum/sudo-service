@@ -1,0 +1,50 @@
+name: Integration Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Stands up a real single-node Kubernetes cluster (k3d) and runs the
+# integration-tagged Go test against it: the real controller-runtime manager
+# (real informer cache + workqueue + optimistic concurrency) drives an approved
+# SudoRequest end-to-end to a real executor Job/pod and verifies captured output.
+# This is the regression net for the issue #20 post-approval race that the
+# fake-client unit tests model and this exercises for real.
+jobs:
+  integration:
+    name: k3d integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5
+        with:
+          go-version: '1.24'
+          cache: true
+
+      - name: Install k3d and kubectl
+        run: |
+          curl -sSL https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | TAG=v5.7.4 bash
+          curl -sSLo /usr/local/bin/kubectl https://dl.k8s.io/release/v1.31.0/bin/linux/amd64/kubectl
+          chmod +x /usr/local/bin/kubectl
+
+      - name: Create cluster
+        run: |
+          k3d cluster create sudo-it --no-lb \
+            --k3s-arg "--disable=traefik,servicelb,metrics-server@server:0" \
+            --wait --timeout 180s
+          k3d kubeconfig write sudo-it --output "$HOME/kubeconfig"
+
+      - name: Run integration test
+        run: |
+          export KUBECONFIG="$HOME/kubeconfig"
+          go test -tags integration -run TestIntegration -v -timeout 20m .
+
+      - name: Tear down cluster
+        if: always()
+        run: k3d cluster delete sudo-it || true
