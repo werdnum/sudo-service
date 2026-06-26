@@ -161,12 +161,23 @@ at `/tmp` and at `/home/sudo-service`, and points `HOME` at the latter (an
 arbitrary UID has no `/etc/passwd` home, so without this `$HOME` resolves to a
 read-only default). These are controller-owned, like the stdin volume: their names
 (`sudo-service-tmp`, `sudo-service-home`) are reserved by `validateSpecExtras`, and
-they show up in the ground-truth pod spec on the approve page. A requester opts out
-of a default by taking the path themselves — mounting their own volume at `/tmp`,
-mounting at `/home/sudo-service`, or setting `HOME` explicitly — so a request that
-wants `/tmp` backed by a large PVC, or a specific `HOME`, is never fought by the
-default. The scratch emptyDirs are bounded by the same `DefaultEmptyDirSizeLimit`
-as any other unbounded scratch, so they can't fill node disk.
+they show up in the ground-truth pod spec on the approve page. Each default steps
+aside the moment the requester is managing that area, so the controller never nests
+a volume over a requester mount or overrides a requester-set value:
+
+- `/tmp` is suppressed if the requester mounts anything at `/tmp` *or below it* (an
+  emptyDir at `/tmp` underneath a requester Secret at `/tmp/creds` is a nested mount
+  Kubernetes handles unreliably).
+- `HOME` is left untouched if the requester sets `HOME` directly **or** supplies any
+  `envFrom` (which could carry `HOME` — an explicit `env` entry the controller
+  appended would override it, since `env` beats `envFrom`). If the requester has
+  already mounted a writable volume *exactly* at `/home/sudo-service`, `HOME` is
+  pointed there without adding a second volume.
+
+So a request that wants `/tmp` backed by a large PVC, or a specific `HOME`, is never
+fought by the default. The scratch emptyDirs are bounded by the same
+`DefaultEmptyDirSizeLimit` as any other unbounded scratch, so they can't fill node
+disk.
 
 ### stdin without escaping
 

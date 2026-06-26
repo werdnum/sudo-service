@@ -130,6 +130,73 @@ func TestScratchHomeEnvOptOut(t *testing.T) {
 	}
 }
 
+// A requester mount nested under /tmp (e.g. a Secret at /tmp/creds) suppresses
+// the controller /tmp default — nesting an emptyDir parent under a requester
+// child mount is what Kubernetes handles unreliably.
+func TestScratchTmpNestedMountOptOut(t *testing.T) {
+	pod := buildJobFor(t, srWith(SudoRequestSpec{
+		Volumes:      rawList(corev1.Volume{Name: "creds", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "s"}}}),
+		VolumeMounts: rawList(corev1.VolumeMount{Name: "creds", MountPath: "/tmp/creds"}),
+	}))
+	if _, ok := volumeByName(pod.Volumes, tmpVolumeName); ok {
+		t.Error("controller tmp scratch added despite requester mount under /tmp")
+	}
+	if _, ok := mountPath(pod.Containers[0].VolumeMounts, tmpMountDir); ok {
+		t.Error("controller /tmp mount added despite requester mount under /tmp")
+	}
+}
+
+// A sibling path like /tmpfoo must NOT be mistaken for being under /tmp.
+func TestScratchTmpSiblingPathNotConfused(t *testing.T) {
+	pod := buildJobFor(t, srWith(SudoRequestSpec{
+		Volumes:      rawList(corev1.Volume{Name: "x", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}),
+		VolumeMounts: rawList(corev1.VolumeMount{Name: "x", MountPath: "/tmpfoo"}),
+	}))
+	if _, ok := volumeByName(pod.Volumes, tmpVolumeName); !ok {
+		t.Error("/tmp default wrongly suppressed by sibling path /tmpfoo")
+	}
+}
+
+// A requester who mounts their own writable volume exactly at the home path but
+// doesn't set HOME should still get HOME pointed at it (so dotfiles land in the
+// writable mount, not the image's read-only home) — without a second volume.
+func TestScratchHomeMountSetsHomeWithoutVolume(t *testing.T) {
+	pod := buildJobFor(t, srWith(SudoRequestSpec{
+		Volumes:      rawList(corev1.Volume{Name: "myhome", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}),
+		VolumeMounts: rawList(corev1.VolumeMount{Name: "myhome", MountPath: homeMountDir}),
+	}))
+	c := pod.Containers[0]
+	if home, _ := envValue(c.Env, "HOME"); home != homeMountDir {
+		t.Errorf("HOME not pointed at requester home mount: got %q", home)
+	}
+	if _, ok := volumeByName(pod.Volumes, homeVolumeName); ok {
+		t.Error("controller home scratch volume added despite requester home mount")
+	}
+	m, _ := mountPath(c.VolumeMounts, homeMountDir)
+	if m.Name != "myhome" {
+		t.Errorf("home mount should be the requester's, got %q", m.Name)
+	}
+}
+
+// envFrom could carry HOME (which a literal HOME env would override, since env
+// beats envFrom), so the controller leaves HOME alone — but /tmp is unaffected.
+func TestScratchEnvFromSuppressesHome(t *testing.T) {
+	pod := buildJobFor(t, srWith(SudoRequestSpec{
+		EnvFrom: rawList(corev1.EnvFromSource{ConfigMapRef: &corev1.ConfigMapEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: "cfg"}}}),
+	}))
+	c := pod.Containers[0]
+	if _, ok := envValue(c.Env, "HOME"); ok {
+		t.Error("controller set HOME despite requester envFrom (which may carry HOME)")
+	}
+	if _, ok := volumeByName(pod.Volumes, homeVolumeName); ok {
+		t.Error("controller home scratch volume added despite requester envFrom")
+	}
+	// /tmp is independent of HOME handling and still applies.
+	if _, ok := volumeByName(pod.Volumes, tmpVolumeName); !ok {
+		t.Error("/tmp scratch should still be added when only envFrom is present")
+	}
+}
+
 // The scratch volume names are reserved, like the stdin payload: a requester
 // volume reusing one is rejected up front rather than producing a duplicate the
 // apiserver rejects after approval.

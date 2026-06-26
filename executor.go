@@ -33,10 +33,11 @@ const stdinVolumeName = "sudo-service-stdin"
 // default setup, which is a footgun every requester would otherwise re-discover.
 // They are plain bounded emptyDirs spliced into every executor and init
 // container, visible in the ground-truth pod spec on the approve page. A
-// requester opts out of a default by taking the path themselves: mounting their
-// own volume at /tmp, mounting at homeMountDir, or setting HOME explicitly. The
-// names are reserved (see validateSpecExtras) so a requester volume can't collide
-// with the one the controller appends.
+// requester opts out of a default by taking the area themselves — mounting at /tmp
+// (or below it), mounting at homeMountDir, or setting HOME via env/envFrom — and
+// stampScratch then steps aside rather than nest or clobber. The names are reserved
+// (see validateSpecExtras) so a requester volume can't collide with the one the
+// controller appends.
 const (
 	tmpVolumeName  = "sudo-service-tmp"
 	tmpMountDir    = "/tmp"
@@ -454,34 +455,79 @@ func scratchVolume(name string) corev1.Volume {
 
 // stampScratch gives container c a writable /tmp and HOME on top of its read-only
 // root filesystem, reporting which scratch volumes it consumed so the caller adds
-// only those. Each default is suppressed when the requester has already taken the
-// path: an existing mount at /tmp keeps the tmp default off; an existing mount at
-// homeMountDir or an explicit HOME env keeps the home default off (a requester who
-// sets HOME owns their own home, wherever it points). When the home default does
-// apply, HOME is pointed at the scratch mount so tools resolve it to a writable
-// dir rather than the image's read-only default.
+// only those. Every default steps aside the moment the requester is managing that
+// area, so the controller never nests a volume over a requester mount or clobbers
+// a requester-set value:
+//
+//   - /tmp: suppressed if the requester mounts anything at /tmp or below it (an
+//     emptyDir at /tmp under a requester Secret at /tmp/creds is a nested mount
+//     Kubernetes handles unreliably). A requester mount under /tmp keeps the
+//     pre-scratch behaviour for that subtree.
+//   - HOME: left untouched if the requester sets HOME explicitly, or supplies any
+//     envFrom (which could carry HOME — a literal HOME env we appended would
+//     override it, since env beats envFrom). If the requester has already mounted
+//     a writable volume exactly at homeMountDir, HOME is pointed there (so dotfiles
+//     land in it) without adding our own volume. A mount nested *under* homeMountDir
+//     leaves the read-only parent to the requester. Otherwise the full default
+//     applies: a scratch emptyDir at homeMountDir with HOME pointed at it.
 func stampScratch(c *corev1.Container) (usedTmp, usedHome bool) {
-	mounted := map[string]bool{}
-	for _, m := range c.VolumeMounts {
-		mounted[m.MountPath] = true
-	}
-	hasHomeEnv := false
-	for _, e := range c.Env {
-		if e.Name == "HOME" {
-			hasHomeEnv = true
-			break
-		}
-	}
-	if !mounted[tmpMountDir] {
+	if !mountsAtOrUnder(c.VolumeMounts, tmpMountDir) {
 		c.VolumeMounts = append(c.VolumeMounts, corev1.VolumeMount{Name: tmpVolumeName, MountPath: tmpMountDir})
 		usedTmp = true
 	}
-	if !mounted[homeMountDir] && !hasHomeEnv {
+
+	// The requester owns HOME whenever they set it directly or might set it via
+	// envFrom; in either case the controller keeps its hands off.
+	if hasEnv(c.Env, "HOME") || len(c.EnvFrom) > 0 {
+		return usedTmp, usedHome
+	}
+	switch {
+	case hasMountAt(c.VolumeMounts, homeMountDir):
+		// Writable home volume already provided by the requester — just resolve HOME
+		// to it; don't add a second volume at the same path.
+		c.Env = append(c.Env, corev1.EnvVar{Name: "HOME", Value: homeMountDir})
+	case mountsAtOrUnder(c.VolumeMounts, homeMountDir):
+		// A mount nested under the home dir: the read-only parent is the requester's
+		// to manage; injecting a parent volume or HOME here would only surprise them.
+	default:
 		c.VolumeMounts = append(c.VolumeMounts, corev1.VolumeMount{Name: homeVolumeName, MountPath: homeMountDir})
 		c.Env = append(c.Env, corev1.EnvVar{Name: "HOME", Value: homeMountDir})
 		usedHome = true
 	}
 	return usedTmp, usedHome
+}
+
+// hasEnv reports whether env contains a variable with the given name.
+func hasEnv(env []corev1.EnvVar, name string) bool {
+	for _, e := range env {
+		if e.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// hasMountAt reports whether any mount targets exactly dir.
+func hasMountAt(mounts []corev1.VolumeMount, dir string) bool {
+	for _, m := range mounts {
+		if m.MountPath == dir {
+			return true
+		}
+	}
+	return false
+}
+
+// mountsAtOrUnder reports whether any mount targets dir or a path nested beneath
+// it (dir + "/..."), so a controller scratch default can step aside rather than
+// nest a volume over the requester's mount. The trailing-slash guard keeps it from
+// matching a sibling like "/tmpfoo" for dir "/tmp".
+func mountsAtOrUnder(mounts []corev1.VolumeMount, dir string) bool {
+	for _, m := range mounts {
+		if m.MountPath == dir || strings.HasPrefix(m.MountPath, dir+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 // standardResources is the fixed request/limit profile applied to the executor
