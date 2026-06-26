@@ -147,6 +147,27 @@ Both submission paths run it: the HTTP API rejects a bad spec with `400`, and a
 CRD-created one is moved straight to `Denied` (`deniedBy=spec-validation`) before
 any approval push — exactly like the existing shell-syntax check.
 
+### Writable /tmp and HOME by default
+
+The executor (and every init container) runs with `readOnlyRootFilesystem: true`,
+so `/` — including `/tmp` and the image's home directory — is read-only. That is
+the right security posture, but on its own it is a footgun: a huge fraction of
+ordinary commands write a scratch file under `/tmp` or a dotfile/cache under
+`$HOME` and fail with `EROFS`, and every requester would re-discover this the hard
+way and have to hand-roll the same two `emptyDir` mounts.
+
+So `buildExecutorJob` splices a writable, bounded `emptyDir` into each container
+at `/tmp` and at `/home/sudo-service`, and points `HOME` at the latter (an
+arbitrary UID has no `/etc/passwd` home, so without this `$HOME` resolves to a
+read-only default). These are controller-owned, like the stdin volume: their names
+(`sudo-service-tmp`, `sudo-service-home`) are reserved by `validateSpecExtras`, and
+they show up in the ground-truth pod spec on the approve page. A requester opts out
+of a default by taking the path themselves — mounting their own volume at `/tmp`,
+mounting at `/home/sudo-service`, or setting `HOME` explicitly — so a request that
+wants `/tmp` backed by a large PVC, or a specific `HOME`, is never fought by the
+default. The scratch emptyDirs are bounded by the same `DefaultEmptyDirSizeLimit`
+as any other unbounded scratch, so they can't fill node disk.
+
 ### stdin without escaping
 
 `stdin` is materialised into a short-TTL Secret (owned by the executor Job, so it

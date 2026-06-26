@@ -9,6 +9,17 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 )
 
+// reservedVolumeNames are the controller-owned volume names a requester may not
+// reuse: each names a volume the controller appends to the executor pod, so a
+// requester volume (or mount) sharing the name would collide into a duplicate the
+// apiserver rejects post-approval. The value is the human reason, surfaced in the
+// rejection message.
+var reservedVolumeNames = map[string]string{
+	stdinVolumeName: "the stdin payload",
+	tmpVolumeName:   "the writable /tmp scratch",
+	homeVolumeName:  "the writable HOME scratch",
+}
+
 // validateCommandSyntax parses command as a shell script and returns a non-nil
 // error if it is syntactically invalid (unbalanced quotes, a dangling pipe, an
 // unterminated `$(`, etc.). It never executes anything — the parser only reads
@@ -70,20 +81,22 @@ func validateSpecExtras(sr *SudoRequest) error {
 	}
 
 	for _, v := range extras.Volumes {
-		if v.Name == stdinVolumeName {
-			return fmt.Errorf("volume name %q is reserved for the stdin payload", stdinVolumeName)
+		if why, ok := reservedVolumeNames[v.Name]; ok {
+			return fmt.Errorf("volume name %q is reserved for %s", v.Name, why)
 		}
 		if err := validateVolumeSource(v); err != nil {
 			return err
 		}
 	}
 
-	// The controller appends its own stdin volume+mount (name stdinVolumeName at
-	// stdinMountDir); a requester mount reusing either would produce a duplicate
-	// volume name / mountPath that the apiserver rejects, or shadow the payload.
+	// The controller appends its own volumes+mounts (the stdin payload at
+	// stdinMountDir, and the writable /tmp and HOME scratch); a requester reusing a
+	// reserved name would produce a duplicate volume name the apiserver rejects, and
+	// reusing stdinMountDir would shadow the payload. (A requester mount at /tmp or
+	// homeMountDir is allowed — it opts out of that scratch default, see stampScratch.)
 	for _, m := range extras.VolumeMounts {
-		if m.Name == stdinVolumeName {
-			return fmt.Errorf("volumeMount name %q is reserved for the stdin payload", stdinVolumeName)
+		if why, ok := reservedVolumeNames[m.Name]; ok {
+			return fmt.Errorf("volumeMount name %q is reserved for %s", m.Name, why)
 		}
 		if m.MountPath == stdinMountDir {
 			return fmt.Errorf("volumeMount path %q is reserved for the stdin payload", stdinMountDir)
@@ -138,8 +151,8 @@ func validateSpecExtras(sr *SudoRequest) error {
 		// approve page presents stdin as fed to the executor command, not as a file
 		// other containers read), and may only reference defined volumes.
 		for _, m := range c.VolumeMounts {
-			if m.Name == stdinVolumeName {
-				return fmt.Errorf("initContainer %q: volumeMount name %q is reserved for the stdin payload", c.Name, stdinVolumeName)
+			if why, ok := reservedVolumeNames[m.Name]; ok {
+				return fmt.Errorf("initContainer %q: volumeMount name %q is reserved for %s", c.Name, m.Name, why)
 			}
 		}
 		if err := validateMounts(fmt.Sprintf("initContainer %q", c.Name), c.VolumeMounts, volNames, false); err != nil {

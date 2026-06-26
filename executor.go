@@ -26,6 +26,24 @@ const stdinMountDir = "/var/run/sudo-service"
 // collide with a requester-supplied volume.
 const stdinVolumeName = "sudo-service-stdin"
 
+// Controller-owned scratch volumes give the executor a writable /tmp and HOME
+// despite its read-only root filesystem (hardenedContainerSecurityContext sets
+// ReadOnlyRootFilesystem). Without them, the common case — a tool that writes a
+// temp file under /tmp or a dotfile/cache under $HOME — fails with EROFS on the
+// default setup, which is a footgun every requester would otherwise re-discover.
+// They are plain bounded emptyDirs spliced into every executor and init
+// container, visible in the ground-truth pod spec on the approve page. A
+// requester opts out of a default by taking the path themselves: mounting their
+// own volume at /tmp, mounting at homeMountDir, or setting HOME explicitly. The
+// names are reserved (see validateSpecExtras) so a requester volume can't collide
+// with the one the controller appends.
+const (
+	tmpVolumeName  = "sudo-service-tmp"
+	tmpMountDir    = "/tmp"
+	homeVolumeName = "sudo-service-home"
+	homeMountDir   = "/home/sudo-service"
+)
+
 // executorNamespace is the namespace the executor Job runs in: the requested
 // one, or the controller namespace by default. Targeting another namespace is
 // what lets the command mount that namespace's Secrets/PVCs as files.
@@ -324,6 +342,27 @@ func buildExecutorJob(sr *SudoRequest, ns, name string, extras *podExtras) batch
 		initContainers[i].Resources = standardResources()
 	}
 
+	// Splice writable /tmp and HOME scratch into every container that hasn't
+	// provided its own, then add the backing emptyDir volumes for whichever ones
+	// got used. Appended after the requester's (and stdin's) volumes so their
+	// indices are unchanged.
+	usedTmp, usedHome := false, false
+	addScratch := func(c *corev1.Container) {
+		t, h := stampScratch(c)
+		usedTmp = usedTmp || t
+		usedHome = usedHome || h
+	}
+	addScratch(&executor)
+	for i := range initContainers {
+		addScratch(&initContainers[i])
+	}
+	if usedTmp {
+		volumes = append(volumes, scratchVolume(tmpVolumeName))
+	}
+	if usedHome {
+		volumes = append(volumes, scratchVolume(homeVolumeName))
+	}
+
 	job := batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -401,6 +440,48 @@ func boundEmptyDirSize(v *corev1.Volume) {
 	}
 	size := DefaultEmptyDirSizeLimit.DeepCopy()
 	v.EmptyDir.SizeLimit = &size
+}
+
+// scratchVolume builds a controller-owned writable emptyDir, bounded by the same
+// default sizeLimit as any other unbounded scratch so it can't fill node disk.
+func scratchVolume(name string) corev1.Volume {
+	size := DefaultEmptyDirSizeLimit.DeepCopy()
+	return corev1.Volume{
+		Name:         name,
+		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: &size}},
+	}
+}
+
+// stampScratch gives container c a writable /tmp and HOME on top of its read-only
+// root filesystem, reporting which scratch volumes it consumed so the caller adds
+// only those. Each default is suppressed when the requester has already taken the
+// path: an existing mount at /tmp keeps the tmp default off; an existing mount at
+// homeMountDir or an explicit HOME env keeps the home default off (a requester who
+// sets HOME owns their own home, wherever it points). When the home default does
+// apply, HOME is pointed at the scratch mount so tools resolve it to a writable
+// dir rather than the image's read-only default.
+func stampScratch(c *corev1.Container) (usedTmp, usedHome bool) {
+	mounted := map[string]bool{}
+	for _, m := range c.VolumeMounts {
+		mounted[m.MountPath] = true
+	}
+	hasHomeEnv := false
+	for _, e := range c.Env {
+		if e.Name == "HOME" {
+			hasHomeEnv = true
+			break
+		}
+	}
+	if !mounted[tmpMountDir] {
+		c.VolumeMounts = append(c.VolumeMounts, corev1.VolumeMount{Name: tmpVolumeName, MountPath: tmpMountDir})
+		usedTmp = true
+	}
+	if !mounted[homeMountDir] && !hasHomeEnv {
+		c.VolumeMounts = append(c.VolumeMounts, corev1.VolumeMount{Name: homeVolumeName, MountPath: homeMountDir})
+		c.Env = append(c.Env, corev1.EnvVar{Name: "HOME", Value: homeMountDir})
+		usedHome = true
+	}
+	return usedTmp, usedHome
 }
 
 // standardResources is the fixed request/limit profile applied to the executor
