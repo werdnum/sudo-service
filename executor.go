@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -794,11 +795,39 @@ type capturedOutput struct {
 	SHA256        string
 }
 
-func (r *SudoRequestReconciler) readPodLogs(ctx context.Context, namespace, pod, container string) (string, error) {
+func (r *SudoRequestReconciler) readPodLogs(ctx context.Context, namespace, pod, container string) (io.ReadCloser, error) {
 	if r.PodLogs != nil {
 		return r.PodLogs(ctx, namespace, pod, container)
 	}
-	return getPodLogs(ctx, namespace, pod, container)
+	return streamPodLogs(ctx, namespace, pod, container)
+}
+
+type boundedLogWriter struct {
+	retained bytes.Buffer
+	total    int64
+}
+
+func (w *boundedLogWriter) Write(p []byte) (int, error) {
+	w.total += int64(len(p))
+	remaining := MaxOutputBytes - w.retained.Len()
+	if remaining > 0 {
+		if remaining > len(p) {
+			remaining = len(p)
+		}
+		_, _ = w.retained.Write(p[:remaining])
+	}
+	// Report the entire chunk consumed so io.Copy continues hashing/counting the
+	// stream after the retained prefix is full.
+	return len(p), nil
+}
+
+func consumePodLogs(logs io.Reader) (retained []byte, total int64, digest string, err error) {
+	bounded := &boundedLogWriter{}
+	hash := sha256.New()
+	if _, err := io.Copy(io.MultiWriter(hash, bounded), logs); err != nil {
+		return nil, 0, "", err
+	}
+	return bounded.retained.Bytes(), bounded.total, hex.EncodeToString(hash.Sum(nil)), nil
 }
 
 // captureJobOutput reads the pod logs, bounds retained bytes before constructing
@@ -840,20 +869,25 @@ func (r *SudoRequestReconciler) captureJobOutput(ctx context.Context, sr *SudoRe
 		result.FailureReason = fmt.Sprintf("fetch logs from %s: %v", logContainer, err)
 		return result, nil
 	}
+	defer logs.Close()
 
-	all := []byte(logs)
-	total := int64(len(all))
-	retained := all
+	retained, total, digest, err := consumePodLogs(logs)
+	if err != nil {
+		if job.Status.Succeeded == 0 && job.Status.Failed == 0 {
+			return capturedOutput{}, fmt.Errorf("fetch logs from %s: %w", logContainer, err)
+		}
+		result.CaptureState = OutputCaptureFailed
+		result.FailureReason = fmt.Sprintf("fetch logs from %s: %v", logContainer, err)
+		return result, nil
+	}
 	result.CaptureState = OutputCaptureComplete
-	if len(retained) > MaxOutputBytes {
-		retained = retained[:MaxOutputBytes]
+	if total > int64(len(retained)) {
 		result.CaptureState = OutputCaptureTruncated
 	}
 	retainedCount := int64(len(retained))
 	result.TotalBytes = &total
 	result.RetainedBytes = &retainedCount
-	digest := sha256.Sum256(all)
-	result.SHA256 = hex.EncodeToString(digest[:])
+	result.SHA256 = digest
 
 	// Stuff only the bounded prefix into a Secret with ownerRef to the SudoRequest.
 	secretName := outputSecretName(sr)

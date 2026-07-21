@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -50,7 +51,9 @@ func TestCaptureJobOutputBoundsLargeOutput(t *testing.T) {
 	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(pod).Build()
 	r := &SudoRequestReconciler{
 		Client: cl, APIReader: cl,
-		PodLogs: func(context.Context, string, string, string) (string, error) { return large, nil },
+		PodLogs: func(context.Context, string, string, string) (io.ReadCloser, error) {
+			return io.NopCloser(strings.NewReader(large)), nil
+		},
 	}
 
 	result, err := r.captureJobOutput(ctx, sr, job)
@@ -89,8 +92,8 @@ func TestCaptureFailurePreservesExitZero(t *testing.T) {
 	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).WithStatusSubresource(&SudoRequest{}).WithObjects(sr, pod).Build()
 	r := &SudoRequestReconciler{
 		Client: cl, APIReader: cl, Broadcaster: NewBroadcaster(), Recorder: record.NewFakeRecorder(5),
-		PodLogs: func(context.Context, string, string, string) (string, error) {
-			return "", errors.New("logs unavailable")
+		PodLogs: func(context.Context, string, string, string) (io.ReadCloser, error) {
+			return nil, errors.New("logs unavailable")
 		},
 	}
 
@@ -135,7 +138,9 @@ func TestOutputSecretCreationFailureIsDeliveryFailure(t *testing.T) {
 	})
 	r := &SudoRequestReconciler{
 		Client: cl, APIReader: cl, Broadcaster: NewBroadcaster(), Recorder: record.NewFakeRecorder(5),
-		PodLogs: func(context.Context, string, string, string) (string, error) { return "complete output", nil },
+		PodLogs: func(context.Context, string, string, string) (io.ReadCloser, error) {
+			return io.NopCloser(strings.NewReader("complete output")), nil
+		},
 	}
 
 	result, err := r.captureJobOutput(ctx, sr, job)
@@ -168,8 +173,8 @@ func TestSidecarHeldJobRetriesTransientCaptureFailure(t *testing.T) {
 	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(pod).Build()
 	r := &SudoRequestReconciler{
 		Client: cl, APIReader: cl,
-		PodLogs: func(context.Context, string, string, string) (string, error) {
-			return "", errors.New("temporary apiserver error")
+		PodLogs: func(context.Context, string, string, string) (io.ReadCloser, error) {
+			return nil, errors.New("temporary apiserver error")
 		},
 	}
 

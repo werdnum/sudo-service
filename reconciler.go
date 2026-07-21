@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"time"
 
@@ -48,8 +49,8 @@ type SudoRequestReconciler struct {
 	Broadcaster   *Broadcaster
 	Recorder      record.EventRecorder
 	PublicBaseURL string
-	// PodLogs is injectable for tests; production falls back to getPodLogs.
-	PodLogs func(context.Context, string, string, string) (string, error)
+	// PodLogs is injectable for tests; production falls back to streamPodLogs.
+	PodLogs func(context.Context, string, string, string) (io.ReadCloser, error)
 }
 
 func (r *SudoRequestReconciler) SetupWithManager(mgr ctrl.Manager) error {
