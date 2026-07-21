@@ -64,7 +64,6 @@ spec:
                   description: Exact argv (single string) executed under cluster-admin.
                 action:
                   type: object
-                  additionalProperties: false
                   description: >-
                     Optional server-validated semantic action. The controller requires
                     command to equal its canonical expansion before requesting approval.
@@ -81,7 +80,6 @@ spec:
                       minItems: 1
                       items:
                         type: object
-                        additionalProperties: false
                         required: [namespace, kind, name]
                         properties:
                           namespace: {type: string}
