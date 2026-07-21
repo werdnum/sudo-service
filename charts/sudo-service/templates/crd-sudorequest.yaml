@@ -227,7 +227,10 @@ spec:
                     is disabled or generation failed.
                 permissionAssessment:
                   type: object
-                  additionalProperties: false
+                  # Keep this structural schema compatible with Kubernetes:
+                  # declared properties cannot be combined with
+                  # additionalProperties: false. Strict JSON decoding in the
+                  # summarizer rejects unknown model fields.
                   description: >-
                     Optional versioned, structured statement of what pressing
                     Approve permits. The raw command and effective Pod spec remain
@@ -240,7 +243,9 @@ spec:
                     effects:
                       type: array
                       minItems: 1
-                      uniqueItems: true
+                      # Kubernetes rejects uniqueItems on CRDs because its
+                      # validation cost is quadratic. Go validation rejects
+                      # duplicate effects before this status is persisted.
                       items:
                         type: string
                         enum:
