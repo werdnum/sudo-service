@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 
+	authv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -29,6 +30,7 @@ type APIServer struct {
 	Client        client.Client
 	Verifier      *JWTVerifier
 	TokenReviewer *TokenReviewer
+	Authorizer    *RequesterAuthorizer
 	Broadcaster   *Broadcaster
 	Reconciler    *SudoRequestReconciler // wired up at start time
 	Config        *Config
@@ -92,17 +94,28 @@ type requestStatusResponse struct {
 	Summary         string `json:"summary,omitempty"`
 }
 
-// createRequestHandler is POST /requests. Authenticated via SA bearer token (TokenReview).
-// On success, returns the CR UID + name. spec.requester is server-stamped to the authenticated
-// username, so the requester can't spoof another agent's identity via the HTTP path.
+// createRequestHandler is POST /requests. The SA bearer token is authenticated
+// via TokenReview, then authorized for the dedicated HTTP-submission permission
+// via SubjectAccessReview. On success, it returns the CR UID + name.
+// spec.requester is server-stamped to the authenticated username, so the
+// requester can't spoof another agent's identity via the HTTP path.
 func (a *APIServer) createRequestHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	username, err := a.authenticateBearer(r)
+	identity, err := a.authenticateBearer(r)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusUnauthorized)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	allowed, _, err := a.Authorizer.AuthorizeSubmit(r.Context(), identity)
+	if err != nil {
+		http.Error(w, "request authorization unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if !allowed {
+		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
 	var body createRequestBody
@@ -125,7 +138,7 @@ func (a *APIServer) createRequestHandler(w http.ResponseWriter, r *http.Request)
 			Namespace:    ControllerNamespace,
 		},
 		Spec: SudoRequestSpec{
-			Requester:               username,
+			Requester:               identity.Username,
 			Reason:                  body.Reason,
 			Command:                 body.Command,
 			Image:                   body.Image,
@@ -166,9 +179,9 @@ func (a *APIServer) requestSubpathHandler(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	username, err := a.authenticateBearer(r)
+	identity, err := a.authenticateBearer(r)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusUnauthorized)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 
@@ -177,7 +190,7 @@ func (a *APIServer) requestSubpathHandler(w http.ResponseWriter, r *http.Request
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
-	if sr.Spec.Requester != username {
+	if sr.Spec.Requester != identity.Username {
 		http.Error(w, "forbidden: not the requester", http.StatusForbidden)
 		return
 	}
@@ -302,14 +315,14 @@ func isTerminalPhase(p string) bool {
 
 // authenticateBearer extracts and validates a SA bearer token via TokenReview,
 // requiring our audience.
-func (a *APIServer) authenticateBearer(r *http.Request) (string, error) {
+func (a *APIServer) authenticateBearer(r *http.Request) (authv1.UserInfo, error) {
 	auth := r.Header.Get("Authorization")
 	if !strings.HasPrefix(auth, "Bearer ") {
-		return "", errors.New("missing bearer token")
+		return authv1.UserInfo{}, errors.New("missing bearer token")
 	}
 	tok := strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
 	if tok == "" {
-		return "", errors.New("empty bearer token")
+		return authv1.UserInfo{}, errors.New("empty bearer token")
 	}
 	return a.TokenReviewer.Review(r.Context(), tok, RequesterTokenAudience)
 }

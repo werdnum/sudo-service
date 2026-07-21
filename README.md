@@ -82,6 +82,49 @@ rejects input that is broken in every shell; the human reviewer remains the trus
 boundary for everything that parses. The `sudo-service` CLI runs the same check
 locally with `sh -n` before submitting (skippable with `--no-validate`).
 
+### Authorizing HTTP requesters
+
+The requester HTTP API has two distinct Kubernetes checks. `TokenReview`
+authenticates an audience-bound ServiceAccount token; a `SubjectAccessReview`
+then requires that identity to have `create` on the virtual
+`sudorequests/submit` subresource in the controller namespace. Possessing a
+correctly scoped token alone is therefore not permission to create a request or
+page an administrator.
+
+Grant the HTTP permission to each requester ServiceAccount with ordinary RBAC:
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: sudo-service-request-submitter
+  namespace: sudo-service
+rules:
+  - apiGroups: ["sudo.andrewgarrett.dev"]
+    resources: ["sudorequests/submit"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: k8s-agent-sudo-service-request-submitter
+  namespace: sudo-service
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: sudo-service-request-submitter
+subjects:
+  - kind: ServiceAccount
+    name: k8s-agent-sa
+    namespace: k8s-agent
+```
+
+This permission is intentionally separate from direct CR authorization.
+ServiceAccounts that submit `SudoRequest` objects through the Kubernetes API
+still need `create` on `sudorequests`; that permission does not implicitly grant
+HTTP submission, and `sudorequests/submit` does not permit direct CR creation.
+NetworkPolicy controls reachability only and grants neither permission.
+
 ### Structured pod fields
 
 Beyond a one-line `command`, a request can describe the executor pod directly —

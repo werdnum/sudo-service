@@ -123,6 +123,11 @@ func main() {
 		logger.Error(err, "init TokenReviewer")
 		os.Exit(1)
 	}
+	requesterAuthorizer, err := NewRequesterAuthorizer()
+	if err != nil {
+		logger.Error(err, "init requester authorizer")
+		os.Exit(1)
+	}
 
 	po := NewPushoverClient(cfg.PushoverToken, cfg.PushoverUserKey)
 
@@ -164,6 +169,7 @@ func main() {
 		Client:        mgr.GetClient(),
 		Verifier:      verifier,
 		TokenReviewer: tokenReviewer,
+		Authorizer:    requesterAuthorizer,
 		Broadcaster:   broadcaster,
 		Reconciler:    reconciler,
 		Config:        cfg,

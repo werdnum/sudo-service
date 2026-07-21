@@ -28,9 +28,11 @@ Don't use it for read-only operations you can already do (`kubectl get/list/watc
 
 ## Setup the requester pod needs (one-time)
 
-**RBAC.** The requester ServiceAccount needs `create` on
-`sudorequests.sudo.andrewgarrett.dev`. The `k8s-agent` ClusterRole already
-grants this — anything else needs a similar rule. `get`/`list`/`watch` is
+**RBAC.** HTTP submission requires `create` on the virtual
+`sudorequests/submit` subresource in the `sudo-service` namespace. Direct CR
+submission separately requires `create` on
+`sudorequests.sudo.andrewgarrett.dev`; neither permission implies the other.
+The operator must grant the path the requester uses. `get`/`list`/`watch` is
 intentionally *not* granted; state reads go through the controller HTTP API.
 
 **Audience-bound SA token.** Mount a projected SA token volume on the requester
