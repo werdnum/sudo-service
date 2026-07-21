@@ -18,6 +18,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -34,6 +36,13 @@ import (
 
 func kubectl(t *testing.T, stdin string, args ...string) {
 	t.Helper()
+	out, err := runKubectl(stdin, args...)
+	if err != nil {
+		t.Fatalf("kubectl %s: %v\n%s", strings.Join(args, " "), err, out)
+	}
+}
+
+func runKubectl(stdin string, args ...string) (string, error) {
 	cmd := exec.Command("kubectl", args...)
 	if stdin != "" {
 		cmd.Stdin = strings.NewReader(stdin)
@@ -41,8 +50,195 @@ func kubectl(t *testing.T, stdin string, args ...string) {
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("kubectl %s: %v\n%s", strings.Join(args, " "), err, out.String())
+	err := cmd.Run()
+	return out.String(), err
+}
+
+// TestIntegrationExecutorPodAdmission proves both sides of the Pod admission
+// boundary against a real apiserver: a namespace pod-writer cannot directly use
+// the cluster-admin executor SA, while the real Job controller can still create
+// a correctly-owned Pod for a Job that uses it.
+func TestIntegrationExecutorPodAdmission(t *testing.T) {
+	if _, err := ctrl.GetConfig(); err != nil {
+		t.Skipf("no cluster available (set KUBECONFIG): %v", err)
+	}
+
+	kubectl(t, "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: "+ControllerNamespace+"\n",
+		"apply", "-f", "-")
+
+	policy, err := os.ReadFile("charts/sudo-service/templates/validatingadmissionpolicy-executor-pod.yaml")
+	if err != nil {
+		t.Fatalf("read Pod admission policy: %v", err)
+	}
+	renderedPolicy := strings.ReplaceAll(string(policy), "{{ .Values.namespace }}", ControllerNamespace)
+	if strings.Contains(renderedPolicy, "{{") {
+		t.Fatal("Pod admission policy contains an unrendered Helm expression")
+	}
+	kubectl(t, renderedPolicy, "apply", "-f", "-")
+	kubectl(t, "", "apply", "-f",
+		"charts/sudo-service/templates/validatingadmissionpolicybinding-executor-pod.yaml")
+	t.Cleanup(func() {
+		_, _ = runKubectl("", "delete", "validatingadmissionpolicybinding",
+			"sudo-service-executor-pod-restrictions", "--ignore-not-found")
+		_, _ = runKubectl("", "delete", "validatingadmissionpolicy",
+			"sudo-service-executor-pod-restrictions", "--ignore-not-found")
+	})
+
+	setup := `apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sudo-service-executor-sa
+  namespace: sudo-service
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  # Namespace creation and the ServiceAccount controller are asynchronous. Make
+  # the ordinary-Pod control case deterministic instead of racing creation of
+  # the namespace's implicit default ServiceAccount.
+  name: default
+  namespace: sudo-service
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: executor-pod-admission-test-writer
+  namespace: sudo-service
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create"]
+  # Lets the test submit blockOwnerDeletion=true on its forged Job owner. The
+  # OwnerReferencesPermissionEnforcement plugin requires update on the owner's
+  # finalizers subresource and runs before VAP evaluation; grant it here so the
+  # test proves the VAP identity denial rather than an earlier authz denial.
+  - apiGroups: ["batch"]
+    resources: ["jobs/finalizers"]
+    verbs: ["update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: executor-pod-admission-test-writer
+  namespace: sudo-service
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: executor-pod-admission-test-writer
+subjects:
+  - kind: User
+    name: executor-pod-attacker
+`
+	kubectl(t, setup, "apply", "-f", "-")
+	t.Cleanup(func() {
+		_, _ = runKubectl("", "delete", "rolebinding", "executor-pod-admission-test-writer",
+			"-n", ControllerNamespace, "--ignore-not-found")
+		_, _ = runKubectl("", "delete", "role", "executor-pod-admission-test-writer",
+			"-n", ControllerNamespace, "--ignore-not-found")
+	})
+
+	// The ownerReference and labels are intentionally perfect forgeries. Admission
+	// must still reject them because request.userInfo is not the Job controller.
+	forgedPod := `apiVersion: v1
+kind: Pod
+metadata:
+  name: forged-executor-pod
+  namespace: sudo-service
+  labels:
+    app: sudo-service-executor
+    role: executor
+    batch.kubernetes.io/job-name: forged-job
+    batch.kubernetes.io/controller-uid: 11111111-1111-1111-1111-111111111111
+  ownerReferences:
+    - apiVersion: batch/v1
+      kind: Job
+      name: forged-job
+      uid: 11111111-1111-1111-1111-111111111111
+      controller: true
+      blockOwnerDeletion: true
+spec:
+  serviceAccountName: sudo-service-executor-sa
+  restartPolicy: Never
+  containers:
+    - name: executor
+      image: busybox:1.36
+      command: ["true"]
+`
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		out, createErr := runKubectl(forgedPod, "--as=executor-pod-attacker", "create",
+			"--dry-run=server", "-f", "-")
+		if createErr != nil && strings.Contains(out, "Only the Kubernetes Job controller") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("forged direct executor Pod was not rejected by the identity check: err=%v\n%s",
+				createErr, out)
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+
+	// A non-executor Pod is outside this policy and remains creatable by the same
+	// namespace writer.
+	ordinaryPod := `apiVersion: v1
+kind: Pod
+metadata:
+  name: ordinary-pod
+  namespace: sudo-service
+spec:
+  restartPolicy: Never
+  containers:
+    - name: ordinary
+      image: busybox:1.36
+      command: ["true"]
+`
+	if out, err := runKubectl(ordinaryPod, "--as=executor-pod-attacker", "create",
+		"--dry-run=server", "-f", "-"); err != nil {
+		t.Fatalf("ordinary Pod should not match executor policy: %v\n%s", err, out)
+	}
+
+	// Finally use a real Job. Its Pod is created under whichever of the two
+	// upstream controller-manager identities this cluster uses, with authoritative
+	// Job ownership and labels generated by Kubernetes itself.
+	job := fmt.Sprintf(`apiVersion: batch/v1
+kind: Job
+metadata:
+  name: executor-pod-admission-test
+  namespace: %s
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: sudo-service-executor
+        role: executor
+    spec:
+      serviceAccountName: sudo-service-executor-sa
+      restartPolicy: Never
+      containers:
+        - name: executor
+          image: busybox:1.36
+          command: ["sh", "-c", "sleep 30"]
+`, ControllerNamespace)
+	kubectl(t, job, "apply", "-f", "-")
+	t.Cleanup(func() {
+		_, _ = runKubectl("", "delete", "job", "executor-pod-admission-test",
+			"-n", ControllerNamespace, "--ignore-not-found", "--wait=false")
+	})
+
+	deadline = time.Now().Add(30 * time.Second)
+	for {
+		out, getErr := runKubectl("", "get", "pods", "-n", ControllerNamespace,
+			"-l", "job-name=executor-pod-admission-test", "-o", "name")
+		if getErr == nil && strings.TrimSpace(out) != "" {
+			break
+		}
+		if time.Now().After(deadline) {
+			describe, _ := runKubectl("", "describe", "job", "executor-pod-admission-test",
+				"-n", ControllerNamespace)
+			t.Fatalf("Job controller could not create admitted executor Pod: %v\n%s", getErr, describe)
+		}
+		time.Sleep(500 * time.Millisecond)
 	}
 }
 

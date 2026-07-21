@@ -2,8 +2,9 @@
 # never to the long-running controller. The controller has no way to assume this SA's
 # permissions directly; it can only create a Job that runs as it.
 #
-# An admission policy (validatingadmissionpolicy-executor.yaml) restricts Job creation
-# under this SA to the controller SA, providing defence in depth.
+# Admission policies restrict executor Job creation to the controller SA, enforce
+# security invariants on the Job spec, and prevent callers from bypassing those
+# checks by creating a raw Pod that selects this ServiceAccount.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
