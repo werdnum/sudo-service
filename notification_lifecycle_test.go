@@ -250,7 +250,7 @@ func TestAssessmentFailureDoesNotBlockApprovalOrNotification(t *testing.T) {
 	token := "persisted-token"
 	expires := metav1.NewTime(time.Now().Add(time.Hour))
 	sr := &SudoRequest{
-		ObjectMeta: metav1.ObjectMeta{Name: "assessment-failure", Namespace: ControllerNamespace, UID: "uid-assessment-failure", CreationTimestamp: metav1.Now()},
+		ObjectMeta: metav1.ObjectMeta{Name: "assessment-failure", Namespace: DefaultControllerNamespace, UID: "uid-assessment-failure", CreationTimestamp: metav1.Now()},
 		Spec:       SudoRequestSpec{Requester: "alice", Reason: "inspect", Command: "kubectl get pods"},
 		Status: SudoRequestStatus{
 			Phase: PhasePending, NotificationState: NotificationPending,
@@ -259,7 +259,7 @@ func TestAssessmentFailureDoesNotBlockApprovalOrNotification(t *testing.T) {
 			ApprovalTokenSecretName: "approval-token",
 		},
 	}
-	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "approval-token", Namespace: ControllerNamespace}, Data: map[string][]byte{"token": []byte(token)}}
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "approval-token", Namespace: DefaultControllerNamespace}, Data: map[string][]byte{"token": []byte(token)}}
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&SudoRequest{}).WithObjects(sr, secret).Build()
 
 	modelServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {

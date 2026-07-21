@@ -353,10 +353,10 @@ func (r *SudoRequestReconciler) generatePermissionAssessment(ctx context.Context
 	// values as ground truth.
 	aiContext := ""
 	if hasSpecExtras(sr) {
-		if tmpl, err := displayPodTemplate(sr, true); err == nil {
+		if tmpl, err := displayPodTemplate(sr, true, r.controllerNamespace()); err == nil {
 			aiContext = tmpl
 		} else {
-			aiContext = specExtrasText(sr, true)
+			aiContext = specExtrasText(sr, true, r.controllerNamespace())
 		}
 	}
 	summaryCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
