@@ -16,6 +16,9 @@ requester CLI ships from `client/cli/sudo-service` in that same repo. Cluster
 wiring (requester RBAC, projected SA token, SealedSecrets) lives in
 `werdnum/kube-config` under `kubernetes/manifests/workloads/`.
 
+The CLI requires the pinned PyYAML version in `client/cli/requirements.txt` so
+YAML request files are parsed with `yaml.safe_load`, not an approximate parser.
+
 ## When to use this skill
 
 - An alert points at a private Secret you need to read.
@@ -63,6 +66,22 @@ sudo-service \
   -- kubectl get nodes
 ```
 
+For anything richer than a command, use `--request-file` with a complete YAML
+or JSON HTTP request body. Do not put a manifest, heredoc, encoded script, or
+nested Job/Pod definition in `command`. Use `--stdin-file` for a separate
+literal input payload; it can be combined with `--request-file` when the request
+file does not already set `stdin`.
+
+```bash
+sudo-service --request-file /tmp/request.yaml --preview
+sudo-service --request-file /tmp/apply-request.yaml --stdin-file /tmp/manifest.yaml
+```
+
+`--preview` prints normalized JSON to stderr immediately before submission.
+All request fields must come from the request file: mixing it with `--reason`,
+`--command`, command arguments, image, namespace, privilege, TTL, or image-pull
+Secret flags is rejected rather than applying surprising precedence.
+
 It creates the request through the controller HTTP API, polls
 `/requests/{uid}`, prints progress on stderr, and writes the command output
 from `/requests/{uid}/output` to stdout when the command executes. For shell
@@ -82,34 +101,34 @@ Pick the smallest, most legible command. The human sees the verbatim
 shell pipeline.
 
 ```yaml
-apiVersion: sudo.andrewgarrett.dev/v1alpha1
-kind: SudoRequest
-metadata:
-  generateName: agent-              # arbitrary prefix
-  namespace: sudo-service            # always this namespace
-spec:
-  requester: system:serviceaccount:<your-ns>:<your-sa>  # MUST match your SA
-  reason: "One sentence: WHY you need this, what alert/task it's for."
-  command: "exact shell command, single string"
-  # image: alpine/k8s:1.35.5          # optional, this is the default
-  # ttlSecondsAfterApproval: 600       # output retention, default 600s, max 3600
-  # --- optional, for more than a one-liner (see "Richer jobs" below) ---
-  # namespace: seaweedfs               # run the Job here to mount this ns's Secrets/PVCs
-  # stdin: |                            # fed to the command's stdin, no shell quoting
-  #   ...multi-line payload...
-  # env: [{name: FOO, value: bar}]
-  # envFrom: [{secretRef: {name: some-secret}}]
-  # volumes: [...]                      # emptyDir/secret/configMap/persistentVolumeClaim only
-  # volumeMounts: [...]
-  # initContainers: [...]
-  # imagePullSecrets: [{name: registry-creds}]  # pull a private image; never exposed to the command
-  # privileges: {clusterAdmin: true}    # default true in sudo-service ns, unavailable elsewhere
+reason: "One sentence: WHY you need this, what alert/task it's for."
+command: "exact shell command, single string"
+# image: alpine/k8s:1.35.5          # optional, this is the default
+# ttlSecondsAfterApproval: 600       # output retention, default 600s, max 3600
+# --- optional, for more than a one-liner (see "Richer jobs" below) ---
+# namespace: seaweedfs               # run the Job here to mount this ns's Secrets/PVCs
+# stdin: |                            # fed to the command's stdin, no shell quoting
+#   ...multi-line payload...
+# env: [{name: FOO, value: bar}]
+# envFrom: [{secretRef: {name: some-secret}}]
+# volumes: [...]                      # emptyDir/secret/configMap/persistentVolumeClaim only
+# volumeMounts: [...]
+# initContainers: [...]
+# imagePullSecrets: [{name: registry-creds}]  # pull a private image; never exposed to the command
+# privileges: {clusterAdmin: true}    # default true in sudo-service ns, unavailable elsewhere
 ```
 
-A `ValidatingAdmissionPolicy` enforces `spec.requester == request.userInfo.username`
-on direct CRD writes, so don't put another SA in there.
+The HTTP API stamps the authenticated requester and the request file must not
+contain `requester`. In the lower-level direct-CRD fallback below, a
+`ValidatingAdmissionPolicy` enforces `spec.requester == request.userInfo.username`,
+so don't put another ServiceAccount in there.
 
 ### 2. Submit and capture the request uid
+
+Normally the CLI submits the request and retains its uid automatically. Use
+`sudo-service --request-file request.yaml` and let it wait for the terminal
+state. The lower-level direct-CRD flow below is only for environments where the
+CLI is unavailable.
 
 The requester SA has `create` only — no get/list/watch. So you MUST capture
 the uid at submission time; you can't look it up later by name.
@@ -235,42 +254,37 @@ approve page):
 A request using any of these fields **always requires a human** — auto-approve
 only applies to plain command+image one-liners.
 
-Example — recover one file from a SeaweedFS volume (PVC + GCS-creds Secret both
+Example request file — recover one file from a SeaweedFS volume (PVC + GCS-creds Secret both
 live in `seaweedfs`, so the Job runs there under the default SA, no cluster-admin):
 
 ```yaml
-apiVersion: sudo.andrewgarrett.dev/v1alpha1
-kind: SudoRequest
-metadata: { generateName: storypark-recover-, namespace: sudo-service }
-spec:
-  requester: system:serviceaccount:k8s-agent:k8s-agent-sa
-  reason: "Recover storypark image 419720067.jpg from volume 4787 after data-loss alert"
-  namespace: seaweedfs
-  image: chrislusf/seaweedfs:3.84
-  privileges: { clusterAdmin: false }    # implied off-namespace; explicit for clarity
-  command: |
-    set -eu
-    export RCLONE_CONFIG=/work/rclone.conf
-    weed export -dir=/data -volumeId=4787 -o=/work/4787.tar -fileNameFormat='{{.Key}}'
-    tar -xOf /work/4787.tar '4787,2957016f7719f2' > /work/recovered.jpg
-    /tools/rclone rcat 'gcs:bucket/path/419720067.jpg' --size 735514 < /work/recovered.jpg
-  env:
-    - { name: RCLONE_CONFIG, value: /work/rclone.conf }
-  initContainers:
-    - name: copy-rclone
-      image: rclone/rclone:latest
-      command: ['/bin/sh','-c','cp $(command -v rclone) /tools/rclone && chmod 0555 /tools/rclone']
-      volumeMounts: [{ name: tools, mountPath: /tools }]
-  volumeMounts:
-    - { name: tools, mountPath: /tools, readOnly: true }
-    - { name: work, mountPath: /work }
-    - { name: data, mountPath: /data, readOnly: true }
-    - { name: backup-config, mountPath: /etc/seaweedfs/gcs_creds.json, subPath: gcs_creds.json, readOnly: true }
-  volumes:
-    - { name: tools, emptyDir: {} }
-    - { name: work, emptyDir: {} }
-    - { name: data, persistentVolumeClaim: { claimName: data-seaweedfs-volume-0, readOnly: true } }
-    - { name: backup-config, secret: { secretName: backup } }
+reason: "Recover storypark image 419720067.jpg from volume 4787 after data-loss alert"
+namespace: seaweedfs
+image: chrislusf/seaweedfs:3.84
+privileges: { clusterAdmin: false }    # implied off-namespace; explicit for clarity
+command: |
+  set -eu
+  export RCLONE_CONFIG=/work/rclone.conf
+  weed export -dir=/data -volumeId=4787 -o=/work/4787.tar -fileNameFormat='{{.Key}}'
+  tar -xOf /work/4787.tar '4787,2957016f7719f2' > /work/recovered.jpg
+  /tools/rclone rcat 'gcs:bucket/path/419720067.jpg' --size 735514 < /work/recovered.jpg
+env:
+  - { name: RCLONE_CONFIG, value: /work/rclone.conf }
+initContainers:
+  - name: copy-rclone
+    image: rclone/rclone:latest
+    command: ['/bin/sh','-c','cp $(command -v rclone) /tools/rclone && chmod 0555 /tools/rclone']
+    volumeMounts: [{ name: tools, mountPath: /tools }]
+volumeMounts:
+  - { name: tools, mountPath: /tools, readOnly: true }
+  - { name: work, mountPath: /work }
+  - { name: data, mountPath: /data, readOnly: true }
+  - { name: backup-config, mountPath: /etc/seaweedfs/gcs_creds.json, subPath: gcs_creds.json, readOnly: true }
+volumes:
+  - { name: tools, emptyDir: {} }
+  - { name: work, emptyDir: {} }
+  - { name: data, persistentVolumeClaim: { claimName: data-seaweedfs-volume-0, readOnly: true } }
+  - { name: backup-config, secret: { secretName: backup } }
 ```
 
 The executor container still runs as a non-root user with a read-only root

@@ -7,19 +7,60 @@ install them from here.
 
 | Path | What it is |
 |---|---|
-| `cli/sudo-service` | Self-contained Python 3 CLI (stdlib only). Creates a request via the controller HTTP API, waits for approval/execution, streams progress to stderr, and writes the command output to stdout. |
+| `cli/sudo-service` | Python 3 CLI. Creates a request via the controller HTTP API, waits for approval/execution, streams progress to stderr, and writes the command output to stdout. |
+| `cli/requirements.txt` | Pinned runtime dependency used to safely parse complete YAML request files. |
 | `cli/tests/` | `unittest` suite for the CLI, exercised by `.github/workflows/client-test.yaml`. |
 | `skills/sudo-service/SKILL.md` | Harness-agnostic agent skill describing when and how to use sudo-service. |
 
 ## CLI
 
-The CLI has no third-party dependencies — it runs on any Python 3.11+:
+The CLI runs on Python 3.11+ and uses PyYAML's safe loader for request files:
+
+```sh
+python3 -m pip install --requirement client/cli/requirements.txt
+```
+
+Then run it directly:
 
 ```sh
 client/cli/sudo-service \
   --reason "restart stuck pod" \
   -- kubectl delete pod foo -n bar
 ```
+
+For requests that need environment variables, mounts, volumes, init containers,
+or other structured fields, put the complete HTTP request body in YAML or JSON:
+
+```yaml
+# request.yaml
+reason: "Inspect one application database with its existing credentials"
+command: "psql -c 'select version()'"
+image: postgres:17
+namespace: example
+envFrom:
+  - secretRef: {name: database-credentials}
+privileges: {clusterAdmin: false}
+```
+
+```sh
+client/cli/sudo-service --request-file request.yaml --preview
+```
+
+`--preview` writes the normalized effective request to stderr immediately before
+submission. Request-building flags cannot be mixed with `--request-file`, so the
+reviewed request has one unambiguous source. `--stdin-file` is the exception: it
+may supply a separate literal payload when the request file does not itself set
+`stdin`.
+
+```sh
+client/cli/sudo-service \
+  --request-file request.yaml \
+  --stdin-file manifest.yaml
+```
+
+Prefer that form to embedding a heredoc, encoded script, or manifest in
+`command`. Both JSON and complete safe-loaded YAML are supported. YAML parsing
+does not construct application-specific Python objects.
 
 Configuration (flags override env, which override in-cluster defaults):
 
@@ -36,14 +77,14 @@ cd client/cli && python3 -m unittest discover -s tests -v
 
 ## Installing the CLI elsewhere
 
-Because it's a single file with no dependencies, downstream images install it
-**by reference** rather than vendoring a copy. For example, a consumer's
-Dockerfile can fetch a pinned revision:
+Downstream images install the CLI **by reference** rather than vendoring a copy.
+Install its pinned dependency and fetch the script from the same revision:
 
 ```dockerfile
 # renovate: datasource=git-refs depName=werdnum/sudo-service
 ARG SUDO_SERVICE_REF=main
-RUN curl -fsSL \
+RUN python3 -m pip install --no-cache-dir PyYAML==6.0.3 && \
+    curl -fsSL \
       "https://raw.githubusercontent.com/werdnum/sudo-service/${SUDO_SERVICE_REF}/client/cli/sudo-service" \
       -o /usr/local/bin/sudo-service && chmod +x /usr/local/bin/sudo-service
 ```
