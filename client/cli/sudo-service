@@ -17,6 +17,29 @@ from typing import Any
 DEFAULT_URL = "http://sudo-service.sudo-service.svc.cluster.local"
 DEFAULT_TOKEN_FILE = "/var/run/secrets/sudo-service/token"
 TERMINAL_PHASES = {"Executed", "Failed", "Denied", "Expired"}
+REQUEST_FIELDS = {
+    "reason",
+    "command",
+    "image",
+    "ttlSecondsAfterApproval",
+    "namespace",
+    "stdin",
+    "env",
+    "envFrom",
+    "volumes",
+    "volumeMounts",
+    "initContainers",
+    "imagePullSecrets",
+    "privileges",
+}
+LIST_REQUEST_FIELDS = {
+    "env",
+    "envFrom",
+    "volumes",
+    "volumeMounts",
+    "initContainers",
+    "imagePullSecrets",
+}
 
 
 class SudoServiceError(RuntimeError):
@@ -34,7 +57,7 @@ def parse_args() -> argparse.Namespace:
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--reason", required=True, help="Reason shown to the human reviewer.")
+    parser.add_argument("--reason", help="Reason shown to the human reviewer.")
     parser.add_argument(
         "--command",
         help=(
@@ -53,12 +76,26 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--request-file",
+        help=(
+            "Complete HTTP request body as JSON or YAML ('-' for stdin). This may "
+            "contain reason, command, and every structured request field supported "
+            "by the API. It cannot be combined with request-building flags, except "
+            "--stdin-file when the request body does not already set stdin."
+        ),
+    )
+    parser.add_argument(
         "--stdin-file",
         help=(
             "File whose contents are fed to the command's stdin ('-' for this "
             "process's stdin). Avoids smuggling a multi-line payload (e.g. a manifest "
             "piped to 'kubectl apply -f -') through the command string."
         ),
+    )
+    parser.add_argument(
+        "--preview",
+        action="store_true",
+        help="Print the normalized effective request as JSON to stderr before submitting.",
     )
     parser.add_argument(
         "--no-cluster-admin",
@@ -127,10 +164,28 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if args.argv and args.argv[0] == "--":
         args.argv = args.argv[1:]
-    if args.command and args.argv:
+    if args.request_file:
+        conflicting = []
+        for option, value in (
+            ("--reason", args.reason),
+            ("--command", args.command),
+            ("command arguments after '--'", args.argv),
+            ("--image", args.image),
+            ("--namespace", args.namespace),
+            ("--no-cluster-admin", args.no_cluster_admin),
+            ("--image-pull-secret", args.image_pull_secrets),
+            ("--ttl-seconds-after-approval", args.ttl_seconds_after_approval),
+        ):
+            if value is not None and value is not False and value != []:
+                conflicting.append(option)
+        if conflicting:
+            parser.error("--request-file cannot be combined with " + ", ".join(conflicting))
+    elif args.command and args.argv:
         parser.error("use either --command or arguments after '--', not both")
-    if not args.command and not args.argv:
+    elif not args.command and not args.argv:
         parser.error("provide --command or command arguments after '--'")
+    if not args.request_file and not args.reason:
+        parser.error("--reason is required unless it is provided by --request-file")
     if args.poll_interval <= 0:
         parser.error("--poll-interval must be positive")
     if args.timeout <= 0:
@@ -146,6 +201,92 @@ def command_from_args(args: argparse.Namespace) -> str:
     if len(args.argv) == 1:
         return args.argv[0]
     return shlex.join(args.argv)
+
+
+def load_request_file(path: str) -> dict[str, Any]:
+    try:
+        text = sys.stdin.read() if path == "-" else Path(path).read_text(encoding="utf-8")
+    except OSError as exc:
+        raise SudoServiceError(f"read request file {path}: {exc}") from exc
+    try:
+        loaded = json.loads(text)
+    except json.JSONDecodeError:
+        try:
+            import yaml
+        except ModuleNotFoundError as exc:
+            raise SudoServiceError(
+                "request file is not valid JSON and YAML support requires PyYAML; "
+                "install it with 'python3 -m pip install -r client/cli/requirements.txt' "
+                "from the checkout or 'python3 -m pip install PyYAML==6.0.3' for a "
+                "standalone script"
+            ) from exc
+        try:
+            loaded = yaml.safe_load(text)
+        except yaml.YAMLError as exc:
+            raise SudoServiceError(f"request file is not valid JSON or YAML: {exc}") from exc
+    if not isinstance(loaded, dict):
+        raise SudoServiceError("request file must contain a JSON/YAML object")
+    return loaded
+
+
+def find_non_string_key(value: Any, path: str = "$") -> str | None:
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            if not isinstance(key, str):
+                return path
+            found = find_non_string_key(nested, f"{path}.{key}")
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for index, nested in enumerate(value):
+            found = find_non_string_key(nested, f"{path}[{index}]")
+            if found is not None:
+                return found
+    return None
+
+
+def validate_request_body(body: dict[str, Any]) -> None:
+    non_string_key_path = find_non_string_key(body)
+    if non_string_key_path is not None:
+        raise SudoServiceError(
+            f"request file object keys must be strings (at {non_string_key_path})"
+        )
+    for field in REQUEST_FIELDS - {"reason", "command"}:
+        if body.get(field, ...) is None:
+            del body[field]
+    unknown = sorted(set(body) - REQUEST_FIELDS)
+    if unknown:
+        raise SudoServiceError("unsupported request field(s): " + ", ".join(unknown))
+    for field in ("reason", "command"):
+        if not isinstance(body.get(field), str) or not body[field]:
+            raise SudoServiceError(f"request field {field!r} must be a non-empty string")
+    for field in ("image", "namespace", "stdin"):
+        if field in body and not isinstance(body[field], str):
+            raise SudoServiceError(f"request field {field!r} must be a string")
+    if "ttlSecondsAfterApproval" in body:
+        ttl = body["ttlSecondsAfterApproval"]
+        if isinstance(ttl, bool) or not isinstance(ttl, int) or ttl < 0:
+            raise SudoServiceError("request field 'ttlSecondsAfterApproval' must be a non-negative integer")
+    for field in LIST_REQUEST_FIELDS:
+        if field in body and (
+            not isinstance(body[field], list) or not all(isinstance(item, dict) for item in body[field])
+        ):
+            raise SudoServiceError(f"request field {field!r} must be a list of objects")
+    if "privileges" in body:
+        privileges = body["privileges"]
+        if not isinstance(privileges, dict):
+            raise SudoServiceError("request field 'privileges' must be an object")
+        unknown_privileges = sorted(set(privileges) - {"clusterAdmin"})
+        if unknown_privileges:
+            raise SudoServiceError(
+                "unsupported privileges field(s): " + ", ".join(unknown_privileges)
+            )
+        if "clusterAdmin" in privileges and not isinstance(privileges["clusterAdmin"], bool):
+            raise SudoServiceError("request field 'privileges.clusterAdmin' must be a boolean")
+    try:
+        json.dumps(body)
+    except (TypeError, ValueError) as exc:
+        raise SudoServiceError(f"request fields must contain JSON-compatible values: {exc}") from exc
 
 
 def validate_command_syntax(command: str) -> str | None:
@@ -220,36 +361,7 @@ def http_bytes(url: str, token_file: str) -> bytes:
         raise SudoServiceError(f"GET {url}: {exc.reason}") from exc
 
 
-def create_request(
-    base_url: str,
-    token_file: str,
-    *,
-    reason: str,
-    command: str,
-    image: str | None,
-    ttl: int | None,
-    namespace: str | None = None,
-    stdin: str | None = None,
-    no_cluster_admin: bool = False,
-    image_pull_secrets: list[str] | None = None,
-) -> str:
-    body: dict[str, Any] = {
-        "reason": reason,
-        "command": command,
-    }
-    if image:
-        body["image"] = image
-    if ttl is not None:
-        body["ttlSecondsAfterApproval"] = ttl
-    if namespace:
-        body["namespace"] = namespace
-    if stdin is not None:
-        body["stdin"] = stdin
-    if no_cluster_admin:
-        body["privileges"] = {"clusterAdmin": False}
-    if image_pull_secrets:
-        body["imagePullSecrets"] = [{"name": name} for name in image_pull_secrets]
-
+def create_request(base_url: str, token_file: str, body: dict[str, Any]) -> str:
     response = http_json(f"{base_url.rstrip('/')}/requests", token_file, method="POST", body=body)
     uid = str(response.get("uid") or "")
     if not uid:
@@ -284,11 +396,29 @@ def exit_code(status: dict[str, Any]) -> int:
 
 def main() -> int:
     args = parse_args()
-    command = command_from_args(args)
     base_url = args.url.rstrip("/")
+
+    if args.request_file:
+        if args.request_file == "-" and args.stdin_file == "-":
+            raise SudoServiceError("--request-file - and --stdin-file - cannot both read standard input")
+        body = load_request_file(args.request_file)
+    else:
+        body = {"reason": args.reason, "command": command_from_args(args)}
+        if args.image:
+            body["image"] = args.image
+        if args.ttl_seconds_after_approval is not None:
+            body["ttlSecondsAfterApproval"] = args.ttl_seconds_after_approval
+        if args.namespace:
+            body["namespace"] = args.namespace
+        if args.no_cluster_admin:
+            body["privileges"] = {"clusterAdmin": False}
+        if args.image_pull_secrets:
+            body["imagePullSecrets"] = [{"name": name} for name in args.image_pull_secrets]
 
     stdin_payload: str | None = None
     if args.stdin_file is not None:
+        if "stdin" in body:
+            raise SudoServiceError("--stdin-file cannot be combined with a request file that sets stdin")
         if args.stdin_file == "-":
             stdin_payload = sys.stdin.read()
         else:
@@ -296,26 +426,21 @@ def main() -> int:
                 stdin_payload = Path(args.stdin_file).read_text(encoding="utf-8")
             except OSError as exc:
                 raise SudoServiceError(f"read stdin file {args.stdin_file}: {exc}") from exc
+        body["stdin"] = stdin_payload
+
+    validate_request_body(body)
 
     if not args.no_validate:
-        syntax_error = validate_command_syntax(command)
+        syntax_error = validate_command_syntax(body["command"])
         if syntax_error is not None:
             raise SudoServiceError(
                 f"command failed local syntax check (sh -n); not submitting: {syntax_error}"
             )
 
-    uid = create_request(
-        base_url,
-        args.token_file,
-        reason=args.reason,
-        command=command,
-        image=args.image,
-        ttl=args.ttl_seconds_after_approval,
-        namespace=args.namespace,
-        stdin=stdin_payload,
-        no_cluster_admin=args.no_cluster_admin,
-        image_pull_secrets=args.image_pull_secrets,
-    )
+    if args.preview:
+        print(json.dumps(body, indent=2, sort_keys=True), file=sys.stderr)
+
+    uid = create_request(base_url, args.token_file, body)
     if not args.quiet:
         print(f"sudo-service request uid={uid}", file=sys.stderr)
 

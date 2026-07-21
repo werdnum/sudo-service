@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -130,6 +131,28 @@ class SudoServiceCLITest(unittest.TestCase):
             capture_output=True,
         )
 
+    def run_cli_without_site_packages(self, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                sys.executable,
+                "-S",
+                str(CLI),
+                "--url",
+                f"http://127.0.0.1:{self.server.server_port}",
+                "--token-file",
+                str(self.token_file),
+                *args,
+            ],
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+
+    def write_request_file(self, contents: str, suffix: str) -> str:
+        path = Path(self.tmp.name) / f"request{suffix}"
+        path.write_text(contents)
+        return str(path)
+
     def test_creates_request_waits_and_prints_output(self) -> None:
         FakeSudoServiceHandler.phases = ["Pending", "Executed"]
         FakeSudoServiceHandler.output = b"pod/open-webui\n"
@@ -170,6 +193,205 @@ class SudoServiceCLITest(unittest.TestCase):
                 }
             ],
         )
+
+    def test_json_request_file_submits_every_supported_structured_field(self) -> None:
+        body = {
+            "reason": "recover one file",
+            "command": "cp /source/file /work/file",
+            "image": "busybox:1.37",
+            "ttlSecondsAfterApproval": 120,
+            "namespace": "storage",
+            "stdin": "input\n",
+            "env": [
+                {"name": "PLAIN", "value": "value"},
+                {"name": "TOKEN", "valueFrom": {"secretKeyRef": {"name": "creds", "key": "token"}}},
+            ],
+            "envFrom": [{"prefix": "APP_", "secretRef": {"name": "app-env"}}],
+            "volumes": [
+                {"name": "work", "emptyDir": {}},
+                {"name": "source", "persistentVolumeClaim": {"claimName": "data", "readOnly": True}},
+            ],
+            "volumeMounts": [
+                {"name": "work", "mountPath": "/work"},
+                {"name": "source", "mountPath": "/source", "readOnly": True},
+            ],
+            "initContainers": [{
+                "name": "stage",
+                "image": "busybox:1.37",
+                "command": ["/bin/sh", "-c"],
+                "args": ["cp /bin/cp /work/cp"],
+                "env": [{"name": "MODE", "value": "safe"}],
+                "envFrom": [{"configMapRef": {"name": "settings"}}],
+                "volumeMounts": [{"name": "work", "mountPath": "/work"}],
+            }],
+            "imagePullSecrets": [{"name": "registry-creds"}],
+            "privileges": {"clusterAdmin": False},
+        }
+        path = self.write_request_file(json.dumps(body), ".json")
+
+        result = self.run_cli("--request-file", path, "--quiet", "--poll-interval", "0.01")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(FakeSudoServiceHandler.request_bodies, [body])
+
+    def test_json_request_file_does_not_require_pyyaml_and_omits_optional_nulls(self) -> None:
+        path = self.write_request_file(
+            '{"reason":"inspect","command":"true","image":null,"env":null, '
+            '"privileges":null,"ttlSecondsAfterApproval":null}',
+            ".json",
+        )
+
+        result = self.run_cli_without_site_packages(
+            "--request-file", path, "--quiet", "--poll-interval", "0.01"
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            FakeSudoServiceHandler.request_bodies,
+            [{"reason": "inspect", "command": "true"}],
+        )
+
+    def test_yaml_request_file_supports_rich_fields_and_block_command(self) -> None:
+        yaml = (
+            "reason: Recover one file without nested shell quoting\n"
+            "command: |-\n"
+            "  set -eu\n"
+            "\n"
+            "  # Preserve block scalar contents exactly\n"
+            "  cp /source/file /work/file\n"
+            "image: busybox:1.37\n"
+            "ttlSecondsAfterApproval: 120\n"
+            "namespace: storage\n"
+            "env:\n"
+            "  - name: PLAIN\n"
+            "    value: value\n"
+            "envFrom:\n"
+            "  - secretRef: {name: app-env}\n"
+            "volumes:\n"
+            "  - name: work\n"
+            "    emptyDir: {}\n"
+            "  - name: source\n"
+            "    persistentVolumeClaim: {claimName: data, readOnly: true}\n"
+            "volumeMounts:\n"
+            "  - {name: work, mountPath: /work}\n"
+            "  - {name: source, mountPath: /source, readOnly: true}\n"
+            "initContainers:\n"
+            "  - name: stage\n"
+            "    image: busybox:1.37\n"
+            "    command: [/bin/sh, -c]\n"
+            "    args: ['cp /bin/cp /work/cp']\n"
+            "    volumeMounts: [{name: work, mountPath: /work}]\n"
+            "imagePullSecrets:\n"
+            "  - name: registry-creds\n"
+            "privileges: {clusterAdmin: false}\n"
+        )
+        path = self.write_request_file(yaml, ".yaml")
+
+        result = self.run_cli("--request-file", path, "--quiet", "--poll-interval", "0.01")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        body = FakeSudoServiceHandler.request_bodies[0]
+        self.assertEqual(
+            body["command"],
+            "set -eu\n\n# Preserve block scalar contents exactly\ncp /source/file /work/file",
+        )
+        self.assertEqual(body["env"], [{"name": "PLAIN", "value": "value"}])
+        self.assertEqual(body["envFrom"], [{"secretRef": {"name": "app-env"}}])
+        self.assertEqual(body["volumes"][1]["persistentVolumeClaim"]["readOnly"], True)
+        self.assertEqual(body["initContainers"][0]["command"], ["/bin/sh", "-c"])
+        self.assertEqual(body["privileges"], {"clusterAdmin": False})
+
+    def test_request_file_can_take_stdin_from_a_separate_file(self) -> None:
+        request_path = self.write_request_file(
+            '{"reason":"apply manifest","command":"kubectl apply -f -"}', ".json"
+        )
+        stdin_path = Path(self.tmp.name) / "manifest.yaml"
+        stdin_path.write_text("kind: ConfigMap\n")
+
+        result = self.run_cli(
+            "--request-file", request_path, "--stdin-file", str(stdin_path),
+            "--quiet", "--poll-interval", "0.01",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(FakeSudoServiceHandler.request_bodies[0]["stdin"], "kind: ConfigMap\n")
+
+    def test_preview_prints_normalized_effective_request_before_submission(self) -> None:
+        path = self.write_request_file(
+            '{"command":"kubectl get nodes","reason":"inspect nodes",'
+            '"env":[{"value":"b","name":"A"}]}',
+            ".json",
+        )
+
+        result = self.run_cli(
+            "--request-file", path, "--preview", "--quiet", "--poll-interval", "0.01"
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stderr), FakeSudoServiceHandler.request_bodies[0])
+        self.assertLess(result.stderr.index('"command"'), result.stderr.index('"reason"'))
+
+    def test_request_file_rejects_request_building_flags(self) -> None:
+        path = self.write_request_file(
+            '{"reason":"inspect","command":"kubectl get nodes"}', ".json"
+        )
+        flag_sets = (
+            ("--reason", "override"),
+            ("--command", "kubectl get pods"),
+            ("--image", "busybox"),
+            ("--namespace", "other"),
+            ("--no-cluster-admin",),
+            ("--image-pull-secret", "creds"),
+            ("--ttl-seconds-after-approval", "30"),
+            ("--", "kubectl", "get", "pods"),
+        )
+        for flags in flag_sets:
+            with self.subTest(flags=flags):
+                result = self.run_cli("--request-file", path, *flags)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("--request-file cannot be combined", result.stderr)
+        self.assertEqual(FakeSudoServiceHandler.request_bodies, [])
+
+    def test_request_file_rejects_duplicate_stdin_sources(self) -> None:
+        path = self.write_request_file(
+            '{"reason":"apply","command":"cat","stdin":"inline"}', ".json"
+        )
+        stdin_path = Path(self.tmp.name) / "stdin"
+        stdin_path.write_text("external")
+
+        result = self.run_cli("--request-file", path, "--stdin-file", str(stdin_path))
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("cannot be combined with a request file that sets stdin", result.stderr)
+        self.assertEqual(FakeSudoServiceHandler.request_bodies, [])
+
+    def test_invalid_request_files_fail_before_submission(self) -> None:
+        invalid = {
+            "not-an-object": "[]",
+            "missing-command": '{"reason":"why"}',
+            "unknown-field": '{"reason":"why","command":"true","commnad":"false"}',
+            "wrong-list-type": '{"reason":"why","command":"true","volumes":{}}',
+            "bad-yaml": "reason: why\n  command: true\n",
+            "unsafe-yaml-tag": (
+                "reason: why\ncommand: true\nenv: "
+                "!!python/object/apply:builtins.list [[]]\n"
+            ),
+            "non-string-key": "reason: why\ncommand: true\n1: value\n",
+            "nested-non-string-key": (
+                "reason: why\ncommand: true\nenv:\n  - name: TEST\n    1: value\n"
+            ),
+            "non-json-value": (
+                "reason: why\ncommand: true\nenv:\n"
+                "  - {name: WHEN, value: 2026-07-21}\n"
+            ),
+        }
+        for name, contents in invalid.items():
+            with self.subTest(name=name):
+                path = self.write_request_file(contents, f"-{name}.yaml")
+                result = self.run_cli("--request-file", path)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("sudo-service:", result.stderr)
+        self.assertEqual(FakeSudoServiceHandler.request_bodies, [])
 
     def test_failed_request_prints_output_and_exits_with_command_code(self) -> None:
         FakeSudoServiceHandler.phases = ["Failed"]
