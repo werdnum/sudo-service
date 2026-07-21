@@ -84,7 +84,10 @@ spec:
                   maximum: 3600
                 execution:
                   type: object
-                  additionalProperties: false
+                  # Kubernetes CRD structural schemas cannot combine declared
+                  # properties with additionalProperties: false. The typed Go
+                  # API and request validation still restrict this object to
+                  # the curated execution fields below.
                   description: >-
                     Curated execution lifecycle. managedJob is the controller-owned
                     executor Job with bounded long-running resources, not permission
