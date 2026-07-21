@@ -44,6 +44,7 @@ func (a *APIServer) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/deny", a.denyHandler)
 	mux.HandleFunc("/requests", a.createRequestHandler)
 	mux.HandleFunc("/requests/", a.requestSubpathHandler)
+	mux.HandleFunc("/profiles", a.profilesHandler)
 	mux.HandleFunc("/events", a.globalEventsHandler)
 }
 
@@ -58,6 +59,7 @@ type createRequestBody struct {
 	Reason                  string `json:"reason"`
 	Command                 string `json:"command"`
 	Image                   string `json:"image,omitempty"`
+	Profile                 string `json:"profile,omitempty"`
 	TTLSecondsAfterApproval *int32 `json:"ttlSecondsAfterApproval,omitempty"`
 
 	// Widened pod fields — same shape as the CRD spec, carried as raw JSON so a
@@ -75,29 +77,31 @@ type createRequestBody struct {
 }
 
 type requestStatusResponse struct {
-	UID                 string `json:"uid"`
-	Name                string `json:"name"`
-	Phase               string `json:"phase"`
-	Requester           string `json:"requester"`
-	Command             string `json:"command"`
-	Image               string `json:"image"`
-	Namespace           string `json:"namespace"`
-	ClusterAdmin        bool   `json:"clusterAdmin"`
-	ApprovedBy          string `json:"approvedBy,omitempty"`
-	ApprovedAt          string `json:"approvedAt,omitempty"`
-	DeniedBy            string `json:"deniedBy,omitempty"`
-	DeniedAt            string `json:"deniedAt,omitempty"`
-	DenialReason        string `json:"denialReason,omitempty"`
-	FailureReason       string `json:"failureReason,omitempty"`
-	ExitCode            *int32 `json:"exitCode,omitempty"`
-	OutputSecretRef     string `json:"outputSecretRef,omitempty"`
-	OutputCaptureState  string `json:"outputCaptureState,omitempty"`
-	OutputDeliveryState string `json:"outputDeliveryState,omitempty"`
-	OutputFailureReason string `json:"outputFailureReason,omitempty"`
-	OutputTotalBytes    *int64 `json:"outputTotalBytes,omitempty"`
-	OutputRetainedBytes *int64 `json:"outputRetainedBytes,omitempty"`
-	OutputSHA256        string `json:"outputSHA256,omitempty"`
-	Summary             string `json:"summary,omitempty"`
+	UID                 string   `json:"uid"`
+	Name                string   `json:"name"`
+	Phase               string   `json:"phase"`
+	Requester           string   `json:"requester"`
+	Command             string   `json:"command"`
+	Image               string   `json:"image"`
+	Profile             string   `json:"profile,omitempty"`
+	PreflightWarnings   []string `json:"preflightWarnings,omitempty"`
+	Namespace           string   `json:"namespace"`
+	ClusterAdmin        bool     `json:"clusterAdmin"`
+	ApprovedBy          string   `json:"approvedBy,omitempty"`
+	ApprovedAt          string   `json:"approvedAt,omitempty"`
+	DeniedBy            string   `json:"deniedBy,omitempty"`
+	DeniedAt            string   `json:"deniedAt,omitempty"`
+	DenialReason        string   `json:"denialReason,omitempty"`
+	FailureReason       string   `json:"failureReason,omitempty"`
+	ExitCode            *int32   `json:"exitCode,omitempty"`
+	OutputSecretRef     string   `json:"outputSecretRef,omitempty"`
+	OutputCaptureState  string   `json:"outputCaptureState,omitempty"`
+	OutputDeliveryState string   `json:"outputDeliveryState,omitempty"`
+	OutputFailureReason string   `json:"outputFailureReason,omitempty"`
+	OutputTotalBytes    *int64   `json:"outputTotalBytes,omitempty"`
+	OutputRetainedBytes *int64   `json:"outputRetainedBytes,omitempty"`
+	OutputSHA256        string   `json:"outputSHA256,omitempty"`
+	Summary             string   `json:"summary,omitempty"`
 }
 
 // createRequestHandler is POST /requests. The SA bearer token is authenticated
@@ -148,6 +152,7 @@ func (a *APIServer) createRequestHandler(w http.ResponseWriter, r *http.Request)
 			Reason:                  body.Reason,
 			Command:                 body.Command,
 			Image:                   body.Image,
+			Profile:                 body.Profile,
 			TTLSecondsAfterApproval: body.TTLSecondsAfterApproval,
 			Namespace:               body.Namespace,
 			Stdin:                   body.Stdin,
@@ -160,6 +165,11 @@ func (a *APIServer) createRequestHandler(w http.ResponseWriter, r *http.Request)
 			Privileges:              body.Privileges,
 		},
 	}
+	profile, resolvedImage, warnings, err := resolveAndPreflight(sr)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	if err := validateSpecExtras(sr); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -169,9 +179,44 @@ func (a *APIServer) createRequestHandler(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]string{
-		"uid":  string(sr.UID),
-		"name": sr.Name,
+	response := map[string]any{
+		"uid": string(sr.UID), "name": sr.Name, "image": resolvedImage,
+	}
+	if profile != nil {
+		response["profile"] = profile.Name
+	}
+	if len(warnings) > 0 {
+		response["warnings"] = warnings
+	}
+	_ = json.NewEncoder(w).Encode(response)
+}
+
+// profilesHandler publishes the controller-owned catalog used to resolve
+// friendly aliases. Authentication matches request submission; the response is
+// machine-readable and includes the exact digest and conservative metadata.
+func (a *APIServer) profilesHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	identity, err := a.authenticateBearer(r)
+	if err != nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	allowed, _, err := a.Authorizer.AuthorizeSubmit(r.Context(), identity)
+	if err != nil {
+		http.Error(w, "request authorization unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if !allowed {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"default":  DefaultExecutorProfile,
+		"profiles": listExecutorProfiles(),
 	})
 }
 
@@ -225,6 +270,8 @@ func (a *APIServer) serveStatus(w http.ResponseWriter, sr *SudoRequest) {
 		Requester:           sr.Spec.Requester,
 		Command:             sr.Spec.Command,
 		Image:               imageFor(sr),
+		Profile:             profileFor(sr),
+		PreflightWarnings:   sr.Status.PreflightWarnings,
 		Namespace:           executorNamespace(sr),
 		ClusterAdmin:        clusterAdminEnabled(sr),
 		ApprovedBy:          sr.Status.ApprovedBy,
@@ -393,21 +440,23 @@ func (a *APIServer) indexHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 type approveView struct {
-	UID         string
-	Token       string
-	Requester   string
-	Reason      string
-	Command     string
-	Image       string
-	Stdin       string
-	Extras      specExtrasView
-	PodTemplate string
-	Summary     string
-	CreatedAt   string
-	User        string
-	UserEmail   string
-	Error       string
-	CSRFToken   string
+	UID               string
+	Token             string
+	Requester         string
+	Reason            string
+	Command           string
+	Image             string
+	Profile           string
+	PreflightWarnings []string
+	Stdin             string
+	Extras            specExtrasView
+	PodTemplate       string
+	Summary           string
+	CreatedAt         string
+	User              string
+	UserEmail         string
+	Error             string
+	CSRFToken         string
 }
 
 const csrfCookieName = "__Host-sudo_service_csrf"
@@ -485,6 +534,8 @@ func (a *APIServer) renderApprovePage(w http.ResponseWriter, r *http.Request, cl
 		view.Reason = sr.Spec.Reason
 		view.Command = sr.Spec.Command
 		view.Image = imageFor(sr)
+		view.Profile = profileFor(sr)
+		view.PreflightWarnings = sr.Status.PreflightWarnings
 		view.Stdin = sr.Spec.Stdin
 		view.Extras = newSpecExtrasView(sr, false)
 		// Ground-truth pod spec (raw — the approve page is OIDC-protected). On the

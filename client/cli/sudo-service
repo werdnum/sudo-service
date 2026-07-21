@@ -21,6 +21,7 @@ REQUEST_FIELDS = {
     "reason",
     "command",
     "image",
+    "profile",
     "ttlSecondsAfterApproval",
     "namespace",
     "stdin",
@@ -66,6 +67,14 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--image", help="Optional executor image shown to the reviewer.")
+    parser.add_argument(
+        "--profile",
+        help=(
+            "Friendly server-resolved executor profile (for example kubectl or "
+            "network-tools). Mutually exclusive with --image. The resolved digest "
+            "is returned by the server and shown to the reviewer."
+        ),
+    )
     parser.add_argument(
         "--namespace",
         help=(
@@ -155,9 +164,9 @@ def parse_args() -> argparse.Namespace:
         "--no-validate",
         action="store_true",
         help=(
-            "Skip the local 'sh -n' syntax check that runs before the request is "
-            "submitted. The server validates too; this only suppresses the early "
-            "client-side check."
+            "Skip the optional host 'sh -n' portability check. The host shell may "
+            "differ from the selected executor profile; server profile-aware "
+            "validation is authoritative and cannot be skipped."
         ),
     )
     parser.add_argument("argv", nargs=argparse.REMAINDER, help="Command and arguments after '--'.")
@@ -171,6 +180,7 @@ def parse_args() -> argparse.Namespace:
             ("--command", args.command),
             ("command arguments after '--'", args.argv),
             ("--image", args.image),
+            ("--profile", args.profile),
             ("--namespace", args.namespace),
             ("--no-cluster-admin", args.no_cluster_admin),
             ("--image-pull-secret", args.image_pull_secrets),
@@ -184,6 +194,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("use either --command or arguments after '--', not both")
     elif not args.command and not args.argv:
         parser.error("provide --command or command arguments after '--'")
+    if args.image and args.profile:
+        parser.error("--image and --profile are mutually exclusive")
     if not args.request_file and not args.reason:
         parser.error("--reason is required unless it is provided by --request-file")
     if args.poll_interval <= 0:
@@ -260,7 +272,7 @@ def validate_request_body(body: dict[str, Any]) -> None:
     for field in ("reason", "command"):
         if not isinstance(body.get(field), str) or not body[field]:
             raise SudoServiceError(f"request field {field!r} must be a non-empty string")
-    for field in ("image", "namespace", "stdin"):
+    for field in ("image", "profile", "namespace", "stdin"):
         if field in body and not isinstance(body[field], str):
             raise SudoServiceError(f"request field {field!r} must be a string")
     if "ttlSecondsAfterApproval" in body:
@@ -290,13 +302,12 @@ def validate_request_body(body: dict[str, Any]) -> None:
 
 
 def validate_command_syntax(command: str) -> str | None:
-    """Syntax-check the command with `sh -n` before submitting it.
+    """Optionally syntax-check with the *host's* `sh -n` before submission.
 
-    The executor runs the command as `sh -c <command>`, so a syntax error here
-    means it can never run — better to fail locally than burn the reviewer's
-    approval round-trip on a doomed request. Returns an error string on a
-    syntax error, or None if the command parses (or cannot be checked because
-    no shell is available, in which case the server-side check still applies).
+    This is a convenience portability check, not the executor's runtime shell:
+    host /bin/sh may be dash while a selected profile declares busybox ash.
+    Server profile-aware validation is authoritative. Return an error string on
+    a host-shell parse error, or None when the check passes/cannot run.
     """
     try:
         result = subprocess.run(
@@ -361,12 +372,12 @@ def http_bytes(url: str, token_file: str) -> bytes:
         raise SudoServiceError(f"GET {url}: {exc.reason}") from exc
 
 
-def create_request(base_url: str, token_file: str, body: dict[str, Any]) -> str:
+def create_request(base_url: str, token_file: str, body: dict[str, Any]) -> dict[str, Any]:
     response = http_json(f"{base_url.rstrip('/')}/requests", token_file, method="POST", body=body)
     uid = str(response.get("uid") or "")
     if not uid:
         raise SudoServiceError(f"create response did not include uid: {response}")
-    return uid
+    return response
 
 
 def get_status(base_url: str, token_file: str, uid: str) -> dict[str, Any]:
@@ -423,6 +434,8 @@ def main() -> int:
         body = {"reason": args.reason, "command": command_from_args(args)}
         if args.image:
             body["image"] = args.image
+        if args.profile:
+            body["profile"] = args.profile
         if args.ttl_seconds_after_approval is not None:
             body["ttlSecondsAfterApproval"] = args.ttl_seconds_after_approval
         if args.namespace:
@@ -446,20 +459,32 @@ def main() -> int:
         body["stdin"] = stdin_payload
 
     validate_request_body(body)
+    if body.get("image") and body.get("profile"):
+        raise SudoServiceError("request fields 'image' and 'profile' are mutually exclusive")
 
     if not args.no_validate:
         syntax_error = validate_command_syntax(body["command"])
         if syntax_error is not None:
             raise SudoServiceError(
-                f"command failed local syntax check (sh -n); not submitting: {syntax_error}"
+                "command failed optional host syntax check (sh -n); not submitting: "
+                f"{syntax_error}. The selected profile is validated by the server; "
+                "use --no-validate if this is only a host/executor dialect mismatch"
             )
 
     if args.preview:
         print(json.dumps(body, indent=2, sort_keys=True), file=sys.stderr)
 
-    uid = create_request(base_url, args.token_file, body)
+    create_response = create_request(base_url, args.token_file, body)
+    uid = str(create_response["uid"])
     if not args.quiet:
         print(f"sudo-service request uid={uid}", file=sys.stderr)
+        resolved = str(create_response.get("image") or "")
+        profile = str(create_response.get("profile") or "")
+        if resolved:
+            prefix = f"profile={profile} " if profile else "raw image "
+            print(f"executor {prefix}resolved-image={resolved}", file=sys.stderr)
+    for warning in create_response.get("warnings") or []:
+        print(f"sudo-service preflight warning: {warning}", file=sys.stderr)
 
     deadline = time.monotonic() + args.timeout
     last_phase = None

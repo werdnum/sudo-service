@@ -31,12 +31,6 @@ const (
 	ExecutorAppLabelValue   = "sudo-service-executor"
 	ExecutorRoleLabelValue  = "executor"
 
-	// Default image used when SudoRequest.spec.image is empty. The executor
-	// invokes `sh -c <command>`, so the image needs both a POSIX shell and
-	// kubectl. alpine/k8s bundles both for the right minor; rancher/kubectl
-	// would be leaner but is distroless and has no /bin/sh.
-	DefaultExecutorImage = "alpine/k8s:1.35.5"
-
 	// Audience required on requester service account tokens for HTTP API auth.
 	RequesterTokenAudience = "sudo-service.andrewgarrett.dev"
 
@@ -107,6 +101,11 @@ type SudoRequestSpec struct {
 	// The human reviewer is the trust boundary: the approve page shows the image
 	// prominently so the human notices suspicious image+command pairings.
 	Image string `json:"image,omitempty"`
+
+	// Profile is a friendly alias resolved by the controller to a digest-pinned
+	// image and machine-readable shell/capability metadata. It is mutually
+	// exclusive with Image. Empty Profile+Image selects DefaultExecutorProfile.
+	Profile string `json:"profile,omitempty"`
 
 	// TTLSecondsAfterApproval defaults to 3600 seconds.
 	TTLSecondsAfterApproval *int32 `json:"ttlSecondsAfterApproval,omitempty"`
@@ -192,6 +191,12 @@ type SudoRequestStatus struct {
 	// e.g. the executor Job disappeared before completion. A command that ran is
 	// conveyed independently by ExitCode even if its output could not be captured.
 	FailureReason string `json:"failureReason,omitempty"`
+
+	// ResolvedProfile and ResolvedImage are controller-owned approval state. The
+	// exact digest reviewed by the human is the exact image later executed.
+	ResolvedProfile   string   `json:"resolvedProfile,omitempty"`
+	ResolvedImage     string   `json:"resolvedImage,omitempty"`
+	PreflightWarnings []string `json:"preflightWarnings,omitempty"`
 
 	ExitCode        *int32 `json:"exitCode,omitempty"`
 	OutputSecretRef string `json:"outputSecretRef,omitempty"`
@@ -353,6 +358,9 @@ func (in *SudoRequestSpec) DeepCopyInto(out *SudoRequestSpec) {
 
 func (in *SudoRequestStatus) DeepCopyInto(out *SudoRequestStatus) {
 	*out = *in
+	if in.PreflightWarnings != nil {
+		out.PreflightWarnings = append([]string(nil), in.PreflightWarnings...)
+	}
 	if in.ApprovedAt != nil {
 		t := *in.ApprovedAt
 		out.ApprovedAt = &t
