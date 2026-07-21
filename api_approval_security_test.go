@@ -62,6 +62,41 @@ func TestExpiredNotificationLinkFallsBackForAdmin(t *testing.T) {
 	}
 }
 
+func TestApprovePageRendersCompactPermissionAssessmentAndGroundTruth(t *testing.T) {
+	sr := pendingApprovalRequest()
+	sr.Status.PermissionAssessment = &PermissionAssessment{
+		Request:       "delete the exact failed Job build-123 in namespace ci.",
+		Effects:       []PermissionEffect{EffectChangesCluster, EffectDeletesResource},
+		SchemaVersion: PermissionAssessmentSchemaVersion,
+		PromptVersion: PermissionAssessmentPromptVersion,
+		Model:         "test-model",
+		GeneratedAt:   metav1.Now(),
+	}
+	sr.Status.Summary = "legacy risk wall must not be shown"
+	sr.Spec.Command = "kubectl delete job build-123 -n ci"
+	a, _, claims := approvalTestServer(t, sr)
+
+	req := httptest.NewRequest(http.MethodGet, "/approve?id=uid-approval", nil)
+	rw := httptest.NewRecorder()
+	a.renderApprovePage(rw, req, claims)
+	body := rw.Body.String()
+	for _, want := range []string{
+		"Permission requested",
+		"delete the exact failed Job build-123 in namespace ci.",
+		"CHANGES CLUSTER",
+		"DELETES RESOURCE",
+		"kubectl delete job build-123 -n ci",
+		"Full pod spec (ground truth",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("approval page missing %q", want)
+		}
+	}
+	if strings.Contains(body, "legacy risk wall") || strings.Contains(body, "Confirm the command") {
+		t.Fatal("approval page rendered a duplicate legacy or generic warning")
+	}
+}
+
 func TestApprovePostRequiresCSRF(t *testing.T) {
 	sr := pendingApprovalRequest()
 	a, cl, claims := approvalTestServer(t, sr)

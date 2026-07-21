@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -44,7 +45,7 @@ func TestSummarizeRequestAndResponse(t *testing.T) {
 		_ = json.Unmarshal(body, &gotRawBody)
 
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"  Summary: lists pods.\nRisk: low — Confidence: high  "}}]}`)
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"{\"request\":\"list Pods in the sudo-service namespace.\",\"effects\":[\"READ_ONLY\"]}"}}]}`)
 	}))
 	defer srv.Close()
 
@@ -54,9 +55,11 @@ func TestSummarizeRequestAndResponse(t *testing.T) {
 		t.Fatalf("Summarize() error = %v", err)
 	}
 
-	// Response content is trimmed.
-	if out != "Summary: lists pods.\nRisk: low — Confidence: high" {
-		t.Errorf("unexpected summary: %q", out)
+	if out.Request != "list Pods in the sudo-service namespace." || len(out.Effects) != 1 || out.Effects[0] != EffectReadOnly {
+		t.Errorf("unexpected assessment: %+v", out)
+	}
+	if out.Model != "test-model" || out.SchemaVersion != PermissionAssessmentSchemaVersion || out.PromptVersion != PermissionAssessmentPromptVersion || out.GeneratedAt.IsZero() {
+		t.Errorf("missing audit metadata: %+v", out)
 	}
 	if gotAuth != "Bearer sk-secret" {
 		t.Errorf("Authorization = %q, want bearer key", gotAuth)
@@ -67,11 +70,19 @@ func TestSummarizeRequestAndResponse(t *testing.T) {
 	if gotRawBody["model"] != "test-model" {
 		t.Errorf("model = %q, want test-model", gotRawBody["model"])
 	}
-	if gotRawBody["max_completion_tokens"] != float64(220) {
-		t.Errorf("max_completion_tokens = %v, want 220", gotRawBody["max_completion_tokens"])
+	if gotRawBody["max_completion_tokens"] != float64(160) {
+		t.Errorf("max_completion_tokens = %v, want 160", gotRawBody["max_completion_tokens"])
 	}
 	if _, ok := gotRawBody["max_tokens"]; ok {
 		t.Fatal("request must not send legacy max_tokens")
+	}
+	responseFormat, ok := gotRawBody["response_format"].(map[string]any)
+	if !ok || responseFormat["type"] != "json_schema" {
+		t.Fatalf("response_format is not strict JSON schema: %+v", gotRawBody["response_format"])
+	}
+	jsonSchema, ok := responseFormat["json_schema"].(map[string]any)
+	if !ok || jsonSchema["strict"] != true || jsonSchema["name"] != "sudo_permission_assessment" {
+		t.Fatalf("unexpected json_schema: %+v", responseFormat["json_schema"])
 	}
 	messages, ok := gotRawBody["messages"].([]any)
 	if !ok || len(messages) != 2 {
@@ -93,6 +104,40 @@ func TestSummarizeRequestAndResponse(t *testing.T) {
 	}
 	if !strings.Contains(userContent, "alpine/k8s:1.35.5") {
 		t.Errorf("user message missing image: %q", userContent)
+	}
+}
+
+func TestValidatePermissionResponseRejectsUntrustedShape(t *testing.T) {
+	tests := []struct {
+		name string
+		in   permissionModelResponse
+	}{
+		{name: "empty request", in: permissionModelResponse{Effects: []PermissionEffect{EffectReadOnly}}},
+		{name: "multiline", in: permissionModelResponse{Request: "read pods\nand secrets", Effects: []PermissionEffect{EffectReadOnly}}},
+		{name: "unknown effect", in: permissionModelResponse{Request: "read Pods.", Effects: []PermissionEffect{"HIGH_RISK"}}},
+		{name: "no effects", in: permissionModelResponse{Request: "read Pods."}},
+		{name: "read only mutation", in: permissionModelResponse{Request: "delete a Pod.", Effects: []PermissionEffect{EffectReadOnly, EffectDeletesResource}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := validatePermissionResponse(&tt.in); err == nil {
+				t.Fatal("expected validation error")
+			}
+		})
+	}
+}
+
+func TestValidatePermissionResponseCanonicalizesEffects(t *testing.T) {
+	result := permissionModelResponse{
+		Request: "delete the exact failed Job build-123 in namespace ci.",
+		Effects: []PermissionEffect{EffectDeletesResource, EffectChangesCluster, EffectDeletesResource},
+	}
+	if err := validatePermissionResponse(&result); err != nil {
+		t.Fatal(err)
+	}
+	want := []PermissionEffect{EffectChangesCluster, EffectDeletesResource}
+	if !slices.Equal(result.Effects, want) {
+		t.Fatalf("effects = %v, want %v", result.Effects, want)
 	}
 }
 

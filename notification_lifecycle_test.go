@@ -29,14 +29,21 @@ func TestNotificationLifecyclePersistsLinkBeforeDeliveryAndReusesIt(t *testing.T
 		Spec:       SudoRequestSpec{Requester: "alice", Reason: "inspect it", Command: "kubectl get pods"},
 	}
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&SudoRequest{}).WithObjects(sr).Build()
+	summaryServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"{\"request\":\"list Pods in the sudo-service namespace.\",\"effects\":[\"READ_ONLY\"]}"}}]}`)
+	}))
+	defer summaryServer.Close()
 
 	var links []string
+	var messages []string
 	attempt := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if err := req.ParseForm(); err != nil {
 			t.Fatal(err)
 		}
 		links = append(links, req.Form.Get("url"))
+		messages = append(messages, req.Form.Get("message"))
 		attempt++
 		w.Header().Set("Content-Type", "application/json")
 		if attempt == 1 {
@@ -50,7 +57,7 @@ func TestNotificationLifecyclePersistsLinkBeforeDeliveryAndReusesIt(t *testing.T
 
 	po := NewPushoverClient("token", "user")
 	po.APIEndpoint = server.URL
-	r := &SudoRequestReconciler{Client: cl, APIReader: cl, Scheme: scheme, Pushover: po, PublicBaseURL: "https://sudo.example", Recorder: record.NewFakeRecorder(20), Broadcaster: NewBroadcaster()}
+	r := &SudoRequestReconciler{Client: cl, APIReader: cl, Scheme: scheme, Pushover: po, Summarizer: NewSummarizer("test-key", summaryServer.URL+"/v1", "test-model"), PublicBaseURL: "https://sudo.example", Recorder: record.NewFakeRecorder(20), Broadcaster: NewBroadcaster()}
 
 	if _, err := r.handleNew(ctx, sr.DeepCopy()); err != nil {
 		t.Fatalf("handleNew: %v", err)
@@ -92,6 +99,9 @@ func TestNotificationLifecyclePersistsLinkBeforeDeliveryAndReusesIt(t *testing.T
 	if pending.Status.NotificationNextAttemptAt == nil || !pending.Status.NotificationNextAttemptAt.After(time.Now()) {
 		t.Fatalf("failed attempt did not persist its retry gate: %+v", pending.Status)
 	}
+	if pending.Status.PermissionAssessment == nil || pending.Status.PermissionAssessmentState != PermissionAssessmentGenerated {
+		t.Fatalf("permission assessment was not persisted before notification: %+v", pending.Status)
+	}
 	secretName := pending.Status.ApprovalTokenSecretName
 	hash := pending.Status.ApprovalTokenHash
 
@@ -121,6 +131,9 @@ func TestNotificationLifecyclePersistsLinkBeforeDeliveryAndReusesIt(t *testing.T
 	}
 	if len(links) != 2 || links[0] != links[1] || !strings.Contains(links[0], "id=uid-notify") {
 		t.Fatalf("delivery retries did not reuse one valid URL: %#v", links)
+	}
+	if len(messages) != 2 || !strings.Contains(messages[0], "Permission requested: list Pods in the sudo-service namespace.") || messages[0] != messages[1] {
+		t.Fatalf("notification did not reuse the persisted permission sentence: %#v", messages)
 	}
 }
 
@@ -228,5 +241,57 @@ func TestAcceptedPushBeforeStatusFailureRetriesSamePersistedLink(t *testing.T) {
 func TestApprovalTokenLifetimeMatchesPendingLifetime(t *testing.T) {
 	if ApprovalTokenTTL != PendingRequestTTL {
 		t.Fatalf("approval token TTL %s does not match Pending TTL %s", time.Duration(ApprovalTokenTTL)*time.Second, time.Duration(PendingRequestTTL)*time.Second)
+	}
+}
+
+func TestAssessmentFailureDoesNotBlockApprovalOrNotification(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme(t)
+	token := "persisted-token"
+	expires := metav1.NewTime(time.Now().Add(time.Hour))
+	sr := &SudoRequest{
+		ObjectMeta: metav1.ObjectMeta{Name: "assessment-failure", Namespace: ControllerNamespace, UID: "uid-assessment-failure", CreationTimestamp: metav1.Now()},
+		Spec:       SudoRequestSpec{Requester: "alice", Reason: "inspect", Command: "kubectl get pods"},
+		Status: SudoRequestStatus{
+			Phase: PhasePending, NotificationState: NotificationPending,
+			PermissionAssessmentState: PermissionAssessmentPending,
+			ApprovalTokenHash:         sha256Hex(token), ApprovalTokenExpiresAt: &expires,
+			ApprovalTokenSecretName: "approval-token",
+		},
+	}
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "approval-token", Namespace: ControllerNamespace}, Data: map[string][]byte{"token": []byte(token)}}
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&SudoRequest{}).WithObjects(sr, secret).Build()
+
+	modelServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"not-json"}}]}`)
+	}))
+	defer modelServer.Close()
+	pushes := 0
+	pushServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		pushes++
+		_ = json.NewEncoder(w).Encode(pushoverResponse{Status: 1, Request: "delivered"})
+	}))
+	defer pushServer.Close()
+	po := NewPushoverClient("token", "user")
+	po.APIEndpoint = pushServer.URL
+	r := &SudoRequestReconciler{
+		Client: cl, APIReader: cl,
+		Pushover: po, Summarizer: NewSummarizer("test-key", modelServer.URL+"/v1", "test-model"),
+		PublicBaseURL: "https://sudo.example", Recorder: record.NewFakeRecorder(20), Broadcaster: NewBroadcaster(),
+	}
+
+	if _, err := r.handlePending(ctx, sr.DeepCopy()); err != nil {
+		t.Fatalf("handlePending: %v", err)
+	}
+	var got SudoRequest
+	if err := cl.Get(ctx, client.ObjectKeyFromObject(sr), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Status.Phase != PhasePending || got.Status.PermissionAssessment != nil || got.Status.PermissionAssessmentState != PermissionAssessmentFailed {
+		t.Fatalf("approval was not left usable after model failure: %+v", got.Status)
+	}
+	if pushes != 1 || got.Status.NotificationState != NotificationDelivered {
+		t.Fatalf("notification blocked by model failure: pushes=%d state=%q", pushes, got.Status.NotificationState)
 	}
 }

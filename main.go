@@ -45,7 +45,7 @@ type Config struct {
 	OAuth2ProxyMode       bool   // true: trust forwarded ID token after JWKS check
 	AutoApproveConfigPath string // path to auto-approve YAML
 
-	// Optional AI command-summary feature. Enabled only when OpenAIAPIKey is set.
+	// Optional AI permission-assessment feature. Enabled only when OpenAIAPIKey is set.
 	OpenAIAPIKey  string // OPENAI_API_KEY; empty disables the feature
 	OpenAIBaseURL string // OPENAI_BASE_URL; defaults to the OpenAI public API
 	OpenAIModel   string // OPENAI_MODEL; defaults to DefaultOpenAIModel
@@ -134,7 +134,7 @@ func main() {
 	// Optional: AI command summaries. nil when OPENAI_API_KEY is unset.
 	summarizer := NewSummarizer(cfg.OpenAIAPIKey, cfg.OpenAIBaseURL, cfg.OpenAIModel)
 	if summarizer != nil {
-		logger.Info("AI command summaries enabled", "baseURL", cfg.OpenAIBaseURL, "model", cfg.OpenAIModel)
+		logger.Info("AI permission assessments enabled", "baseURL", cfg.OpenAIBaseURL, "model", cfg.OpenAIModel)
 	}
 
 	broadcaster := NewBroadcaster()

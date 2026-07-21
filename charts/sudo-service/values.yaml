@@ -42,12 +42,13 @@ keycloak:
   clientID: sudo-service
 # OIDC group whose members may approve requests via the admin UI.
 adminGroup: kubernetes-cluster-admin
-# Optional AI command summaries. When enabled, the controller calls an
+# Optional AI permission assessments. When enabled, the controller calls an
 # OpenAI-compatible chat-completions endpoint once per request (as it enters
-# Pending) to produce a concise, security-oriented review aid that is cached on
-# the SudoRequest and shown on the approve page. Disabled by default; enabling it
-# only requires providing an API key Secret. Point baseURL at any compatible
-# gateway to switch providers/models.
+# Pending) for a structured factual sentence describing what approval permits.
+# The same sentence is cached on the SudoRequest and shown on the approve page
+# and Pushover notification. Generation is best-effort. Disabled by default;
+# enabling it only requires providing an API key Secret. Point baseURL at any
+# compatible gateway to switch providers/models.
 openai:
   enabled: false
   # OpenAI-compatible API base URL (no trailing /chat/completions).
