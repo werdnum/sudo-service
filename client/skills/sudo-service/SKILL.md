@@ -81,7 +81,7 @@ sudo-service --request-file /tmp/apply-request.yaml --stdin-file /tmp/manifest.y
 
 `--preview` prints normalized JSON to stderr immediately before submission.
 All request fields must come from the request file: mixing it with `--reason`,
-`--command`, command arguments, image, namespace, privilege, TTL, or image-pull
+`--command`, command arguments, image/profile, namespace, privilege, TTL, or image-pull
 Secret flags is rejected rather than applying surprising precedence.
 
 It creates the request through the controller HTTP API, polls
@@ -98,14 +98,16 @@ sudo-service \
 ### 1. Draft the request
 
 Pick the smallest, most legible command. The human sees the verbatim
-`command` + `reason` + `image` on the approve page, so be surgical — e.g.
+`command` + `reason` + executor profile and exact resolved image on the approve
+page, so be surgical — e.g.
 `kubectl get secret foo -n bar -o jsonpath={.data.x}`, not a kitchen-sink
 shell pipeline.
 
 ```yaml
 reason: "One sentence: WHY you need this, what alert/task it's for."
 command: "exact shell command, single string"
-# image: alpine/k8s:1.35.5          # optional, this is the default
+# profile: kubectl                   # optional; server-resolved default
+# image: example/tool@sha256:...     # arbitrary image; mutually exclusive with profile
 # ttlSecondsAfterApproval: 3600      # output retention, default/max 3600s
 # --- optional, for more than a one-liner (see "Richer jobs" below) ---
 # namespace: seaweedfs               # run the Job here to mount this ns's Secrets/PVCs
@@ -331,10 +333,11 @@ yourself, opts out of the corresponding default.
 - Commands are syntax-checked before they reach the human. The HTTP API rejects
   a syntactically-broken command with `400`; a CRD-created one is moved straight
   to `Denied` (`deniedBy=syntax-check`, parse error in `denialReason`) before any
-  approval push is sent. The CLI runs the same check locally with `sh -n` before
-  submitting — bypass it with `--no-validate`. This only catches shell syntax
-  errors (unbalanced quotes, dangling pipes); it does **not** validate that the
-  command does anything sensible.
+  approval push is sent. The CLI also runs an optional portability check with
+  the caller's host `sh -n`; that is not necessarily the selected profile's
+  `/bin/sh`, so bypass a host-only dialect mismatch with `--no-validate`. Server
+  profile-aware validation is authoritative and cannot be bypassed. Neither
+  check makes the command safe or correct.
 
 ## Verification
 

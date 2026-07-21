@@ -42,6 +42,11 @@ spec:
                 - requester
                 - reason
                 - command
+              x-kubernetes-validations:
+                - rule: >-
+                    !(has(self.profile) && self.profile != '' &&
+                      has(self.image) && self.image != '')
+                  message: profile and image are mutually exclusive
               properties:
                 requester:
                   type: string
@@ -58,9 +63,17 @@ spec:
                 image:
                   type: string
                   description: >-
-                    Container image the executor Job runs. Defaults to alpine/k8s:1.35.5.
+                    Arbitrary container image the executor Job runs. Mutually exclusive
+                    with profile. When neither is set, the server's default profile is
+                    used.
                     The human reviewer is the trust boundary; the approve page shows
                     image + command together.
+                profile:
+                  type: string
+                  description: >-
+                    Friendly server-owned executor profile alias. The controller
+                    resolves it to a digest-pinned image and records that exact digest
+                    in status before approval. Mutually exclusive with image.
                 ttlSecondsAfterApproval:
                   type: integer
                   format: int32
@@ -155,6 +168,20 @@ spec:
                   description: >-
                     Explains a Failed request whose command outcome is unknown
                     (e.g. the executor Job disappeared before completion).
+                resolvedProfile:
+                  type: string
+                  description: Controller-resolved friendly executor profile alias.
+                resolvedImage:
+                  type: string
+                  description: >-
+                    Exact controller-resolved image digest shown during review and
+                    subsequently used for execution.
+                preflightWarnings:
+                  type: array
+                  items: {type: string}
+                  description: >-
+                    Conservative static warnings recorded before approval. Advisory
+                    only; they do not claim runtime certainty.
                 exitCode: {type: integer, format: int32}
                 outputSecretRef:
                   type: string

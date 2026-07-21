@@ -126,6 +126,14 @@ func (r *SudoRequestReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 func (r *SudoRequestReconciler) handleNew(ctx context.Context, sr *SudoRequest) (ctrl.Result, error) {
 	log := ctrl.LoggerFrom(ctx)
+	profile, resolvedImage, warnings, profileErr := resolveAndPreflight(sr)
+	if profileErr == nil {
+		sr.Status.ResolvedImage = resolvedImage
+		sr.Status.PreflightWarnings = warnings
+		if profile != nil {
+			sr.Status.ResolvedProfile = profile.Name
+		}
+	}
 
 	// Reject syntactically-broken commands before they cost the reviewer a
 	// round-trip. The HTTP API rejects these at submission, but a request
@@ -158,7 +166,7 @@ func (r *SudoRequestReconciler) handleNew(ctx context.Context, sr *SudoRequest) 
 	// (a hostPath volume, an init container setting its own securityContext, ...).
 	// As with the syntax check, the HTTP API rejects these at submission; a
 	// CRD-created one only reaches us here, so deny it before the approval push.
-	if err := validateSpecExtras(sr); err != nil {
+	if err := firstError(profileErr, validateSpecExtras(sr)); err != nil {
 		now := metav1.NewTime(time.Now())
 		sr.Status.Phase = PhaseDenied
 		sr.Status.DeniedBy = "spec-validation"
@@ -360,6 +368,12 @@ func (r *SudoRequestReconciler) deliverApprovalNotification(ctx context.Context,
 
 	title := fmt.Sprintf("sudo: %s wants to run %s", sr.Spec.Requester, truncate(sr.Spec.Command, 80))
 	body := fmt.Sprintf("reason: %s\ncommand: %s\nimage: %s", sr.Spec.Reason, sr.Spec.Command, imageFor(sr))
+	if profile := profileFor(sr); profile != "" {
+		body += "\nprofile: " + profile
+	}
+	for _, warning := range sr.Status.PreflightWarnings {
+		body += "\npreflight warning: " + warning
+	}
 	if extras := specExtrasText(sr, true); extras != "" {
 		body += "\n" + extras
 	}
@@ -927,8 +941,36 @@ func truncate(s string, n int) string {
 }
 
 func imageFor(sr *SudoRequest) string {
+	if sr.Status.ResolvedImage != "" {
+		return sr.Status.ResolvedImage
+	}
 	if sr.Spec.Image != "" {
 		return sr.Spec.Image
 	}
+	if profile, _, err := resolveExecutorProfile(sr); err == nil && profile != nil {
+		return profile.Image
+	}
 	return DefaultExecutorImage
+}
+
+func profileFor(sr *SudoRequest) string {
+	if sr.Status.ResolvedProfile != "" {
+		return sr.Status.ResolvedProfile
+	}
+	if sr.Spec.Image != "" {
+		return ""
+	}
+	if sr.Spec.Profile != "" {
+		return sr.Spec.Profile
+	}
+	return DefaultExecutorProfile
+}
+
+func firstError(errs ...error) error {
+	for _, err := range errs {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }

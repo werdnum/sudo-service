@@ -26,6 +26,7 @@ class FakeSudoServiceHandler(BaseHTTPRequestHandler):
     output_status: dict = {}
     status_calls = 0
     require_rotated_token_after_first_status = False
+    create_response: dict = {"uid": "uid-1", "name": "http-abc"}
 
     def log_message(self, _fmt: str, *_args: object) -> None:
         return
@@ -50,7 +51,7 @@ class FakeSudoServiceHandler(BaseHTTPRequestHandler):
             return
         length = int(self.headers.get("Content-Length", "0"))
         self.request_bodies.append(json.loads(self.rfile.read(length)))
-        self.write_json({"uid": "uid-1", "name": "http-abc"})
+        self.write_json(self.create_response)
 
     def do_GET(self) -> None:
         if not self.authenticated():
@@ -106,6 +107,7 @@ class SudoServiceCLITest(unittest.TestCase):
         FakeSudoServiceHandler.output_status = {}
         FakeSudoServiceHandler.status_calls = 0
         FakeSudoServiceHandler.require_rotated_token_after_first_status = False
+        FakeSudoServiceHandler.create_response = {"uid": "uid-1", "name": "http-abc"}
         self.tmp = tempfile.TemporaryDirectory()
         self.token_file = Path(self.tmp.name) / "token"
         self.token_file.write_text("test-token\n")
@@ -196,6 +198,35 @@ class SudoServiceCLITest(unittest.TestCase):
                 }
             ],
         )
+
+    def test_profile_submission_shows_resolved_digest_and_warnings(self) -> None:
+        FakeSudoServiceHandler.create_response = {
+            "uid": "uid-1",
+            "name": "http-abc",
+            "profile": "network-tools",
+            "image": "nicolaka/netshoot:v0.14@sha256:abc",
+            "warnings": ["command may be long-running"],
+        }
+
+        result = self.run_cli(
+            "--reason", "diagnose DNS", "--profile", "network-tools",
+            "--", "dig", "example.com",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(FakeSudoServiceHandler.request_bodies[0]["profile"], "network-tools")
+        self.assertNotIn("image", FakeSudoServiceHandler.request_bodies[0])
+        self.assertIn("profile=network-tools resolved-image=nicolaka/netshoot", result.stderr)
+        self.assertIn("preflight warning: command may be long-running", result.stderr)
+
+    def test_image_and_profile_are_mutually_exclusive(self) -> None:
+        result = self.run_cli(
+            "--reason", "invalid selection", "--image", "busybox",
+            "--profile", "kubectl", "--", "true",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--image and --profile are mutually exclusive", result.stderr)
+        self.assertEqual(FakeSudoServiceHandler.request_bodies, [])
 
     def test_json_request_file_submits_every_supported_structured_field(self) -> None:
         body = {
@@ -526,7 +557,7 @@ class SudoServiceCLITest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 1)
         self.assertEqual(result.stdout, "")
-        self.assertIn("local syntax check", result.stderr)
+        self.assertIn("optional host syntax check", result.stderr)
         # The request must never reach the server.
         self.assertEqual(FakeSudoServiceHandler.request_bodies, [])
 

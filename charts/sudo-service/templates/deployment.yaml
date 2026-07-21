@@ -109,7 +109,7 @@ spec:
             - --reverse-proxy
             - --email-domain=*
             - --skip-provider-button
-            # /requests* uses SA-bearer + TokenReview auth in the controller
+            # /requests* and /profiles use SA-bearer + TokenReview auth in the controller
             # (not OIDC); /health is unauthenticated for kubelet probes. Bypass
             # oauth2-proxy for these so the requester API actually works.
             # Flag is singular (--skip-auth-route), not plural — passed
@@ -122,8 +122,9 @@ spec:
             # headers oauth2-proxy adds, no Basic-auth is injected and the
             # incoming Authorization header passes through unchanged on
             # skip-auth-route requests — which is what we need for the SA
-            # bearer on /requests.
+            # bearer on the requester API.
             - --skip-auth-route=^/requests
+            - --skip-auth-route=^/profiles$
             - --skip-auth-route=^/health
             - --cookie-refresh=5m
             - --cookie-expire=30m

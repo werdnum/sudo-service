@@ -28,6 +28,21 @@ client/cli/sudo-service \
   -- kubectl delete pod foo -n bar
 ```
 
+The default `kubectl` executor is a server-resolved, digest-pinned profile. Select
+another curated profile explicitly when appropriate:
+
+```sh
+client/cli/sudo-service \
+  --reason "Diagnose DNS resolution from the cluster" \
+  --profile network-tools \
+  -- dig example.com
+```
+
+The create response prints the friendly profile and exact resolved digest. Use
+`--image` instead for an arbitrary image; `--profile` and `--image` are mutually
+exclusive. Static preflight warnings are printed even with `--quiet` because they
+describe review-relevant footguns, not progress chatter.
+
 For requests that need environment variables, mounts, volumes, init containers,
 or other structured fields, put the complete HTTP request body in YAML or JSON:
 

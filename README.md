@@ -77,10 +77,32 @@ spending the reviewer's attention on a doomed request:
   the controller and moved straight to `Denied` (with `deniedBy=syntax-check`
   and the parse error in `denialReason`) **before** any approval push is sent.
 
-The parser uses the bash language variant — a superset of POSIX `sh` — so it only
-rejects input that is broken in every shell; the human reviewer remains the trust
-boundary for everything that parses. The `sudo-service` CLI runs the same check
-locally with `sh -n` before submitting (skippable with `--no-validate`).
+The parser uses the bash language variant — a superset of POSIX `sh` — for the
+baseline syntax check, so it only rejects input that is broken in every shell.
+Profile-aware preflight then uses the selected profile's machine-readable shell
+and executable metadata to reject directly visible commands known to be absent
+and to flag likely shell-dialect mistakes. It also warns about runtime package
+installation, opaque base64 scripts, large heredocs, and likely long-running
+commands. Warnings are conservative and advisory; static inspection cannot prove
+runtime behavior. The human reviewer remains the trust boundary.
+
+The CLI's early `sh -n` check uses the caller's host shell and is only an
+optional portability hint; it may not be the implementation declared by the
+selected profile. `--no-validate` skips that host check, but never skips the
+server's syntax and profile-aware preflight.
+
+### Executor profiles
+
+Requests may select a friendly, server-owned `profile` instead of an arbitrary
+`image`. The built-in `kubectl` (default) and `network-tools` profiles resolve to
+digest-pinned images and publish their shell, executable, and capability metadata
+at authenticated `GET /profiles`. The controller records `status.resolvedImage`
+before approval; that exact digest is shown to the reviewer and is the one later
+executed. Requesters cannot supply or override the resolution.
+
+`profile` and `image` are mutually exclusive. Explicit raw images remain supported
+for uncommon tools and are labeled as unprofiled; sudo-service does not pretend it
+can infer their `/bin/sh` behavior or installed tools.
 
 ### Authorizing HTTP requesters
 
