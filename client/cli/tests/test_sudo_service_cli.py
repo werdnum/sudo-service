@@ -453,6 +453,24 @@ class SudoServiceCLITest(unittest.TestCase):
         self.assertIn("command finished, but output is unavailable", result.stderr)
         self.assertIn("forbidden", result.stderr)
 
+    def test_output_failure_after_nonzero_exit_does_not_report_pre_execution_failure(self) -> None:
+        FakeSudoServiceHandler.phases = ["Failed"]
+        FakeSudoServiceHandler.exit_code = 7
+        FakeSudoServiceHandler.failure_reason = "capture command output: logs expired"
+        FakeSudoServiceHandler.output_status = {
+            "outputCaptureState": "Failed",
+            "outputDeliveryState": "Failed",
+            "outputFailureReason": "read executor logs: not found",
+        }
+
+        result = self.run_cli("--reason", "audit", "--quiet", "--command", "kubectl get missing")
+
+        self.assertEqual(result.returncode, 7)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("command finished, but output is unavailable", result.stderr)
+        self.assertIn("logs: not found", result.stderr)
+        self.assertNotIn("failed before output was available", result.stderr)
+
     def test_rereads_projected_token_between_polls_and_output_fetch(self) -> None:
         FakeSudoServiceHandler.phases = ["Pending", "Executed"]
         FakeSudoServiceHandler.output = b"node/take5\n"
