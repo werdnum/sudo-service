@@ -450,7 +450,7 @@ func TestIntegrationApprovedRequestExecutes(t *testing.T) {
 
 	if final.Status.Phase != PhaseExecuted {
 		// Surface diagnostics for a failed run.
-		dumpDiagnostics(t, c, &final)
+		dumpDiagnostics(t, c, &final, integrationControllerNamespace)
 		t.Fatalf("phase=%q (want Executed), failureReason=%q", final.Status.Phase, final.Status.FailureReason)
 	}
 	if final.Status.ExitCode == nil || *final.Status.ExitCode != 0 {
@@ -473,12 +473,12 @@ func TestIntegrationApprovedRequestExecutes(t *testing.T) {
 	}
 }
 
-func dumpDiagnostics(t *testing.T, c client.Client, sr *SudoRequest) {
+func dumpDiagnostics(t *testing.T, c client.Client, sr *SudoRequest, controllerNamespace string) {
 	t.Helper()
 	ctx := context.Background()
 	if sr.Status.ExecutorJobName != "" {
 		var pods corev1.PodList
-		_ = c.List(ctx, &pods, client.InNamespace(executorNamespace(sr, integrationControllerNamespace)),
+		_ = c.List(ctx, &pods, client.InNamespace(executorNamespace(sr, controllerNamespace)),
 			client.MatchingLabels{"job-name": sr.Status.ExecutorJobName})
 		for i := range pods.Items {
 			p := &pods.Items[i]
