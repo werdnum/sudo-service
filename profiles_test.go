@@ -129,6 +129,14 @@ func TestPreflightRejectsPipefailWhenProfileDoesNotGuaranteeIt(t *testing.T) {
 	}
 }
 
+func TestPreflightDoesNotExecutePipefailTextInHeredoc(t *testing.T) {
+	profile := executorProfiles["kubectl"]
+	command := "kubectl apply -f - <<'EOF'\napiVersion: v1\ndata:\n  script: |\n    set -o pipefail\nEOF\n"
+	if _, err := preflightCommand(command, &profile); err != nil {
+		t.Fatalf("heredoc payload was treated as an executed shell command: %v", err)
+	}
+}
+
 func TestPreflightWarnsForBashTestAfterShellKeyword(t *testing.T) {
 	profile := executorProfiles["kubectl"]
 	for _, command := range []string{
