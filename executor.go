@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -779,18 +781,38 @@ func executorLabels() map[string]string {
 	}
 }
 
-// captureJobOutput reads the pod logs of the executor Job, stuffs them into a Secret
-// owned by the SudoRequest, and returns the Secret name + exit code.
-func (r *SudoRequestReconciler) captureJobOutput(ctx context.Context, sr *SudoRequest, job *batchv1.Job) (string, int32, error) {
+// capturedOutput keeps command execution, capture, and delivery outcomes separate.
+// Once ExitCode is known, output failures must not rewrite the command's outcome.
+type capturedOutput struct {
+	ExitCode      int32
+	SecretRef     string
+	CaptureState  string
+	DeliveryState string
+	FailureReason string
+	TotalBytes    *int64
+	RetainedBytes *int64
+	SHA256        string
+}
+
+func (r *SudoRequestReconciler) readPodLogs(ctx context.Context, namespace, pod, container string) (string, error) {
+	if r.PodLogs != nil {
+		return r.PodLogs(ctx, namespace, pod, container)
+	}
+	return getPodLogs(ctx, namespace, pod, container)
+}
+
+// captureJobOutput reads the pod logs, bounds retained bytes before constructing
+// a Secret, and reports output capture/delivery separately from command exit.
+func (r *SudoRequestReconciler) captureJobOutput(ctx context.Context, sr *SudoRequest, job *batchv1.Job) (capturedOutput, error) {
 	// Find the pod owned by the job (in the executor namespace, which may differ
 	// from the controller namespace for cross-namespace requests). Uncached: the
 	// cache doesn't watch spec.namespace.
 	pod, err := r.getJobPod(ctx, job)
 	if err != nil {
-		return "", -1, err
+		return capturedOutput{}, err
 	}
 	if pod == nil {
-		return "", -1, fmt.Errorf("no pods for job %s yet", job.Name)
+		return capturedOutput{}, fmt.Errorf("no pods for job %s yet", job.Name)
 	}
 
 	// Pick which container's logs and exit code to report. Normally it's the
@@ -799,16 +821,41 @@ func (r *SudoRequestReconciler) captureJobOutput(ctx context.Context, sr *SudoRe
 	// requester's setup step actually broke.
 	logContainer, exitCode, err := containerToReport(pod)
 	if err != nil {
-		return "", -1, err
+		return capturedOutput{}, err
 	}
+	result := capturedOutput{ExitCode: exitCode}
 
 	// Read pod logs via the typed clientset (controller-runtime client doesn't expose subresources).
-	logs, err := getPodLogs(ctx, job.Namespace, pod.Name, logContainer)
+	logs, err := r.readPodLogs(ctx, job.Namespace, pod.Name, logContainer)
 	if err != nil {
-		return "", exitCode, fmt.Errorf("fetch logs from %s: %w", logContainer, err)
+		// An injected sidecar can keep the Job non-terminal after the executor
+		// exits. Preserve the existing retry behavior in that case: the pod and
+		// its logs are still available, and stopping it on a transient log error
+		// would make the loss permanent. Once the Job itself is terminal, record
+		// capture failure separately from the already-known command outcome.
+		if job.Status.Succeeded == 0 && job.Status.Failed == 0 {
+			return capturedOutput{}, fmt.Errorf("fetch logs from %s: %w", logContainer, err)
+		}
+		result.CaptureState = OutputCaptureFailed
+		result.FailureReason = fmt.Sprintf("fetch logs from %s: %v", logContainer, err)
+		return result, nil
 	}
 
-	// Stuff logs into a Secret with ownerRef to the SudoRequest.
+	all := []byte(logs)
+	total := int64(len(all))
+	retained := all
+	result.CaptureState = OutputCaptureComplete
+	if len(retained) > MaxOutputBytes {
+		retained = retained[:MaxOutputBytes]
+		result.CaptureState = OutputCaptureTruncated
+	}
+	retainedCount := int64(len(retained))
+	result.TotalBytes = &total
+	result.RetainedBytes = &retainedCount
+	digest := sha256.Sum256(all)
+	result.SHA256 = hex.EncodeToString(digest[:])
+
+	// Stuff only the bounded prefix into a Secret with ownerRef to the SudoRequest.
 	secretName := outputSecretName(sr)
 	sec := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
@@ -824,14 +871,25 @@ func (r *SudoRequestReconciler) captureJobOutput(ctx context.Context, sr *SudoRe
 		},
 		Type: corev1.SecretTypeOpaque,
 		Data: map[string][]byte{
-			"output": []byte(logs),
+			"output": retained,
 		},
 	}
 
 	if err := r.Create(ctx, sec); err != nil && !apierrors.IsAlreadyExists(err) {
-		return "", exitCode, fmt.Errorf("create output secret: %w", err)
+		failure := fmt.Sprintf("create output secret: %v", err)
+		// As with log capture, a sidecar-held pod gives us a safe retry window.
+		// Do not tear it down and permanently discard output on a transient
+		// Secret write failure.
+		if job.Status.Succeeded == 0 && job.Status.Failed == 0 {
+			return capturedOutput{}, errors.New(failure)
+		}
+		result.DeliveryState = OutputDeliveryFailed
+		result.FailureReason = failure
+		return result, nil
 	}
-	return secretName, exitCode, nil
+	result.SecretRef = secretName
+	result.DeliveryState = OutputDeliveryAvailable
+	return result, nil
 }
 
 // resourceName builds a deterministic DNS-1123 name (lowercase, <=63 chars) for a

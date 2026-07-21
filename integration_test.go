@@ -154,6 +154,10 @@ func TestIntegrationApprovedRequestExecutes(t *testing.T) {
 	if final.Status.OutputSecretRef == "" {
 		t.Fatal("no output secret recorded")
 	}
+	if final.Status.OutputCaptureState != OutputCaptureComplete || final.Status.OutputDeliveryState != OutputDeliveryAvailable {
+		t.Fatalf("unexpected output state: capture=%q delivery=%q reason=%q",
+			final.Status.OutputCaptureState, final.Status.OutputDeliveryState, final.Status.OutputFailureReason)
+	}
 
 	var sec corev1.Secret
 	if err := c.Get(ctx, types.NamespacedName{Namespace: ControllerNamespace, Name: final.Status.OutputSecretRef}, &sec); err != nil {

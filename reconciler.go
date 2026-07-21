@@ -48,6 +48,8 @@ type SudoRequestReconciler struct {
 	Broadcaster   *Broadcaster
 	Recorder      record.EventRecorder
 	PublicBaseURL string
+	// PodLogs is injectable for tests; production falls back to getPodLogs.
+	PodLogs func(context.Context, string, string, string) (string, error)
 }
 
 func (r *SudoRequestReconciler) SetupWithManager(mgr ctrl.Manager) error {
@@ -534,7 +536,7 @@ func (r *SudoRequestReconciler) handleApproved(ctx context.Context, sr *SudoRequ
 		// outputSecret+exitCode before tearing the Job down), the Job being gone now
 		// is our own teardown, not a lost execution — finalize from the recorded
 		// result instead of failing.
-		if sr.Status.OutputSecretRef != "" && sr.Status.ExitCode != nil {
+		if sr.Status.ExitCode != nil && (sr.Status.OutputSecretRef != "" || sr.Status.OutputCaptureState != "") {
 			return r.finalizeFromRecordedResult(ctx, sr)
 		}
 		// Job has been GC'd before we observed completion. Treat as Failed
@@ -579,7 +581,7 @@ func (r *SudoRequestReconciler) handleApproved(ctx context.Context, sr *SudoRequ
 
 	// Job finished (or the executor terminated while an injected sidecar keeps the
 	// Job from finishing). Collect output and finalize.
-	outputSecret, exitCode, err := r.captureJobOutput(ctx, sr, job)
+	result, err := r.captureJobOutput(ctx, sr, job)
 	if err != nil {
 		// In the sidecar scenario the Job never finishes on its own, so it has no
 		// TTL to fall back on and a terminal SudoRequest is never reconciled again.
@@ -590,8 +592,8 @@ func (r *SudoRequestReconciler) handleApproved(ctx context.Context, sr *SudoRequ
 		if !jobFinished {
 			return ctrl.Result{}, fmt.Errorf("capture output while sidecar holds job %s open: %w", job.Name, err)
 		}
-		log.Error(err, "capture job output")
-		return r.markFailed(ctx, sr, fmt.Sprintf("Failed to capture output: %v", err))
+		log.Error(err, "determine executor result")
+		return r.markFailed(ctx, sr, fmt.Sprintf("Failed to determine executor result: %v", err))
 	}
 
 	// If the executor finished but the Job hasn't (an injected sidecar is keeping
@@ -607,10 +609,10 @@ func (r *SudoRequestReconciler) handleApproved(ctx context.Context, sr *SudoRequ
 	//     its error to retry — the request is still Approved with the result recorded,
 	//     so retrying can't lose output, and we never go terminal with the pod alive.
 	if !jobFinished {
-		if sr.Status.OutputSecretRef == "" || sr.Status.ExitCode == nil {
-			ec := exitCode
+		if sr.Status.ExitCode == nil {
+			ec := result.ExitCode
 			if err := r.updateStatus(ctx, sr, func(s *SudoRequest) {
-				s.Status.OutputSecretRef = outputSecret
+				applyCapturedOutputStatus(s, result)
 				s.Status.ExitCode = &ec
 			}); err != nil {
 				return ctrl.Result{}, err
@@ -622,9 +624,20 @@ func (r *SudoRequestReconciler) handleApproved(ctx context.Context, sr *SudoRequ
 		}
 	}
 
-	sr.Status.ExitCode = &exitCode
-	sr.Status.OutputSecretRef = outputSecret
+	applyCapturedOutputStatus(sr, result)
 	return r.finalizeFromRecordedResult(ctx, sr)
+}
+
+func applyCapturedOutputStatus(sr *SudoRequest, result capturedOutput) {
+	ec := result.ExitCode
+	sr.Status.ExitCode = &ec
+	sr.Status.OutputSecretRef = result.SecretRef
+	sr.Status.OutputCaptureState = result.CaptureState
+	sr.Status.OutputDeliveryState = result.DeliveryState
+	sr.Status.OutputFailureReason = result.FailureReason
+	sr.Status.OutputTotalBytes = result.TotalBytes
+	sr.Status.OutputRetainedBytes = result.RetainedBytes
+	sr.Status.OutputSHA256 = result.SHA256
 }
 
 // finalizeFromRecordedResult writes the terminal phase from a result already present
@@ -635,6 +648,12 @@ func (r *SudoRequestReconciler) handleApproved(ctx context.Context, sr *SudoRequ
 func (r *SudoRequestReconciler) finalizeFromRecordedResult(ctx context.Context, sr *SudoRequest) (ctrl.Result, error) {
 	exitCode := *sr.Status.ExitCode
 	outputSecret := sr.Status.OutputSecretRef
+	outputCaptureState := sr.Status.OutputCaptureState
+	outputDeliveryState := sr.Status.OutputDeliveryState
+	outputFailureReason := sr.Status.OutputFailureReason
+	outputTotalBytes := sr.Status.OutputTotalBytes
+	outputRetainedBytes := sr.Status.OutputRetainedBytes
+	outputSHA256 := sr.Status.OutputSHA256
 	if err := r.updateStatus(ctx, sr, func(s *SudoRequest) {
 		// Re-apply the result too, not just the phase: in the normal completion path
 		// the caller set ExitCode/OutputSecretRef in memory but never persisted them,
@@ -642,6 +661,12 @@ func (r *SudoRequestReconciler) finalizeFromRecordedResult(ctx context.Context, 
 		ec := exitCode
 		s.Status.ExitCode = &ec
 		s.Status.OutputSecretRef = outputSecret
+		s.Status.OutputCaptureState = outputCaptureState
+		s.Status.OutputDeliveryState = outputDeliveryState
+		s.Status.OutputFailureReason = outputFailureReason
+		s.Status.OutputTotalBytes = outputTotalBytes
+		s.Status.OutputRetainedBytes = outputRetainedBytes
+		s.Status.OutputSHA256 = outputSHA256
 		if exitCode == 0 {
 			s.Status.Phase = PhaseExecuted
 		} else {
@@ -657,14 +682,20 @@ func (r *SudoRequestReconciler) finalizeFromRecordedResult(ctx context.Context, 
 		// Length and hash only; output bytes are never logged.
 		"<redacted>", "<redacted>")
 	r.Broadcaster.Publish(string(sr.UID), Event{
-		Type:            "phase",
-		Phase:           sr.Status.Phase,
-		ExitCode:        &exitCode,
-		OutputSecretRef: outputSecret,
-		Requester:       sr.Spec.Requester,
-		Reason:          sr.Spec.Reason,
-		Command:         sr.Spec.Command,
-		CreatedAt:       sr.CreationTimestamp.Format("2006-01-02 15:04:05 UTC"),
+		Type:                "phase",
+		Phase:               sr.Status.Phase,
+		ExitCode:            &exitCode,
+		OutputSecretRef:     outputSecret,
+		OutputCaptureState:  sr.Status.OutputCaptureState,
+		OutputDeliveryState: sr.Status.OutputDeliveryState,
+		OutputFailureReason: sr.Status.OutputFailureReason,
+		OutputTotalBytes:    sr.Status.OutputTotalBytes,
+		OutputRetainedBytes: sr.Status.OutputRetainedBytes,
+		OutputSHA256:        sr.Status.OutputSHA256,
+		Requester:           sr.Spec.Requester,
+		Reason:              sr.Spec.Reason,
+		Command:             sr.Spec.Command,
+		CreatedAt:           sr.CreationTimestamp.Format("2006-01-02 15:04:05 UTC"),
 	})
 	return ctrl.Result{}, nil
 }
