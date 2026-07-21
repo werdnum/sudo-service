@@ -21,7 +21,12 @@ import (
 // normal reconciler path — the Broadcaster reference is what lets them.
 type GarbageCollector struct {
 	client.Client
-	Broadcaster *Broadcaster
+	Broadcaster         *Broadcaster
+	ControllerNamespace string
+}
+
+func (g *GarbageCollector) controllerNamespace() string {
+	return configuredControllerNamespace(g.ControllerNamespace)
 }
 
 var _ manager.Runnable = (*GarbageCollector)(nil)
@@ -49,7 +54,7 @@ func (g *GarbageCollector) Start(ctx context.Context) error {
 func (g *GarbageCollector) sweepSecrets(ctx context.Context) error {
 	var secs corev1.SecretList
 	if err := g.List(ctx, &secs,
-		client.InNamespace(ControllerNamespace),
+		client.InNamespace(g.controllerNamespace()),
 		client.MatchingLabels{"app": "sudo-service"},
 	); err != nil {
 		return err
@@ -74,7 +79,7 @@ func (g *GarbageCollector) sweepSecrets(ctx context.Context) error {
 
 func (g *GarbageCollector) expirePending(ctx context.Context) error {
 	var list SudoRequestList
-	if err := g.List(ctx, &list, client.InNamespace(ControllerNamespace)); err != nil {
+	if err := g.List(ctx, &list, client.InNamespace(g.controllerNamespace())); err != nil {
 		return err
 	}
 	now := time.Now()

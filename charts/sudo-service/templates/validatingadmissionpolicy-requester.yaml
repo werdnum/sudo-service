@@ -6,7 +6,7 @@
 #
 #   OR
 #
-#   request.userInfo.username == "system:serviceaccount:sudo-service:sudo-service-controller-sa"
+#   request.userInfo.username == "system:serviceaccount:<chart namespace>:sudo-service-controller-sa"
 #     — exempts the HTTP-path case (POST /requests). The controller authenticates the
 #       HTTP caller itself via TokenReview and writes spec.requester to the verified
 #       identity, so misattribution would require controller compromise.

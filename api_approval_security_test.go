@@ -31,7 +31,7 @@ func approvalTestServer(t *testing.T, sr *SudoRequest) (*APIServer, client.Clien
 
 func pendingApprovalRequest() *SudoRequest {
 	return &SudoRequest{
-		ObjectMeta: metav1.ObjectMeta{Name: "approval", Namespace: ControllerNamespace, UID: "uid-approval", CreationTimestamp: metav1.Now()},
+		ObjectMeta: metav1.ObjectMeta{Name: "approval", Namespace: DefaultControllerNamespace, UID: "uid-approval", CreationTimestamp: metav1.Now()},
 		Spec:       SudoRequestSpec{Requester: "alice", Reason: "inspect", Command: "kubectl get pods"},
 		Status:     SudoRequestStatus{Phase: PhasePending},
 	}

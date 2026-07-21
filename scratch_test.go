@@ -14,7 +14,7 @@ func buildJobFor(t *testing.T, sr *SudoRequest) corev1.PodSpec {
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	return buildExecutorJob(sr, ControllerNamespace, "sudo-exec-test", extras).Spec.Template.Spec
+	return buildExecutorJobForTest(sr, DefaultControllerNamespace, "sudo-exec-test", extras).Spec.Template.Spec
 }
 
 func mountPath(mounts []corev1.VolumeMount, path string) (corev1.VolumeMount, bool) {
@@ -203,7 +203,7 @@ func TestScratchEnvFromSuppressesHome(t *testing.T) {
 // apiserver rejects after approval.
 func TestScratchVolumeNamesReserved(t *testing.T) {
 	for _, name := range []string{tmpVolumeName, homeVolumeName} {
-		err := validateSpecExtras(srWith(SudoRequestSpec{
+		err := validateSpecExtrasForTest(srWith(SudoRequestSpec{
 			Volumes: rawList(corev1.Volume{Name: name, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}),
 		}))
 		if err == nil {

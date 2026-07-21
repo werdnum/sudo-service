@@ -10,7 +10,9 @@
 
 # Namespace every namespaced resource is created in. Also referenced by the
 # cluster-scoped ValidatingAdmissionPolicies (via the controller/executor SA
-# usernames) and by the NetworkPolicy/VAP namespace selectors.
+# usernames) and by the NetworkPolicy/VAP namespace selectors. The Deployment
+# passes its actual metadata.namespace to the controller as POD_NAMESPACE, so
+# runtime API/cache selection stays aligned with this rendered namespace.
 namespace: sudo-service
 # Controller container image. The digest is rewritten by the chart's build
 # workflow on each push to main; pin it here so deploys are reproducible.

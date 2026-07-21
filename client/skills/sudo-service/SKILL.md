@@ -256,7 +256,8 @@ actual pod that runs, and you avoid nesting heredocs and quoting inside `command
 What you can set (a curated, reviewable subset — the human sees all of it on the
 approve page):
 
-- `namespace` — where the executor Job runs. **Default `sudo-service`.** To mount
+- `namespace` — where the executor Job runs. **Defaults to the controller's
+  runtime namespace** (the reference chart default is `sudo-service`). To mount
   a Secret/PVC, the Job must run in **that resource's namespace** (pods can't
   mount cross-namespace). A Job in another namespace runs under that namespace's
   `default` ServiceAccount with **no cluster-admin** — which is exactly right for

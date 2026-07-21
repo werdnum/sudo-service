@@ -52,7 +52,7 @@ func TestRequesterAuthorizerPassesCompleteIdentityToSAR(t *testing.T) {
 		t.Fatalf("SAR extras=%v, want complete TokenReview extras", got.Spec.Extra)
 	}
 	want := authorizationv1.ResourceAttributes{
-		Namespace:   ControllerNamespace,
+		Namespace:   DefaultControllerNamespace,
 		Verb:        "create",
 		Group:       GroupName,
 		Version:     GroupVersion,

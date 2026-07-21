@@ -24,10 +24,15 @@ const (
 	PermissionAssessmentGenerated = "Generated"
 	PermissionAssessmentFailed    = "Failed"
 
-	// Namespace and resource constants.
-	ControllerNamespace = "sudo-service"
-	ControllerSAName    = "sudo-service-controller-sa"
-	ExecutorSAName      = "sudo-service-executor-sa"
+	// DefaultControllerNamespace is used for local development and by tests that
+	// do not inject a runtime namespace. In-cluster namespace selection comes
+	// from POD_NAMESPACE; this constant must never be used directly for runtime
+	// API/cache selection.
+	DefaultControllerNamespace = "sudo-service"
+
+	// Namespace-independent resource constants.
+	ControllerSAName = "sudo-service-controller-sa"
+	ExecutorSAName   = "sudo-service-executor-sa"
 
 	AppLabelKey             = "app"
 	RoleLabelKey            = "role"
@@ -83,6 +88,13 @@ const (
 	OutputDeliveryFailed    = "Failed"
 )
 
+func configuredControllerNamespace(namespace string) string {
+	if namespace == "" {
+		return DefaultControllerNamespace
+	}
+	return namespace
+}
+
 var GroupVersionResource = schema.GroupVersionResource{
 	Group:    GroupName,
 	Version:  GroupVersion,
@@ -125,7 +137,7 @@ type SudoRequestSpec struct {
 	TTLSecondsAfterApproval *int32 `json:"ttlSecondsAfterApproval,omitempty"`
 
 	// Namespace is the namespace the executor Job runs in. Defaults to the
-	// controller namespace (sudo-service). Targeting another namespace lets the
+	// configured controller namespace. Targeting another namespace lets the
 	// command mount that namespace's Secrets/PVCs as files (pods cannot mount
 	// cross-namespace) — but such a Job runs under that namespace's default
 	// ServiceAccount with no API privileges, so cluster-admin is only available

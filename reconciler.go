@@ -40,9 +40,10 @@ var errApprovalTokenExpired = errors.New("approval token expired")
 //	Approved     -> Executed (create Job, capture output, write Secret)
 //	Approved     -> Failed   (job didn't finish or pod errored)
 type SudoRequestReconciler struct {
+	ControllerNamespace string
 	client.Client
 	// APIReader is an uncached, direct-to-apiserver reader. The manager's cache
-	// (and thus the embedded Client's reads) is scoped to ControllerNamespace, so
+	// (and thus the embedded Client's reads) is scoped to controllerNamespace(), so
 	// reads of executor Jobs/Pods that may live in another namespace
 	// (spec.namespace) must go through this reader, not the cache.
 	APIReader     client.Reader
@@ -54,6 +55,10 @@ type SudoRequestReconciler struct {
 	PublicBaseURL string
 	// PodLogs is injectable for tests; production falls back to streamPodLogs.
 	PodLogs func(context.Context, string, string, string) (io.ReadCloser, error)
+}
+
+func (r *SudoRequestReconciler) controllerNamespace() string {
+	return configuredControllerNamespace(r.ControllerNamespace)
 }
 
 func (r *SudoRequestReconciler) SetupWithManager(mgr ctrl.Manager) error {
@@ -166,7 +171,7 @@ func (r *SudoRequestReconciler) handleNew(ctx context.Context, sr *SudoRequest) 
 	// (a hostPath volume, an init container setting its own securityContext, ...).
 	// As with the syntax check, the HTTP API rejects these at submission; a
 	// CRD-created one only reaches us here, so deny it before the approval push.
-	if err := firstError(profileErr, validateSpecExtras(sr)); err != nil {
+	if err := firstError(profileErr, validateSpecExtras(sr, r.controllerNamespace())); err != nil {
 		now := metav1.NewTime(time.Now())
 		sr.Status.Phase = PhaseDenied
 		sr.Status.DeniedBy = "spec-validation"
@@ -408,7 +413,7 @@ func (r *SudoRequestReconciler) deliverApprovalNotification(ctx context.Context,
 	if actor := submittedByFor(sr); actor != sr.Spec.Requester {
 		body += "\nresubmitted by: " + actor
 	}
-	if extras := specExtrasText(sr, true); extras != "" {
+	if extras := specExtrasText(sr, true, r.controllerNamespace()); extras != "" {
 		body += "\n" + extras
 	}
 
@@ -559,7 +564,7 @@ func (r *SudoRequestReconciler) handleApproved(ctx context.Context, sr *SudoRequ
 	// A cross-namespace executor Job carries no ownerRef, so it won't cascade when
 	// the SudoRequest is deleted. Add the cleanup finalizer before creating any
 	// Job (same-namespace Jobs cascade via their ownerRef and don't need it).
-	if executorNamespace(sr) != ControllerNamespace && !controllerutil.ContainsFinalizer(sr, executorCleanupFinalizer) {
+	if executorNamespace(sr, r.controllerNamespace()) != r.controllerNamespace() && !controllerutil.ContainsFinalizer(sr, executorCleanupFinalizer) {
 		controllerutil.AddFinalizer(sr, executorCleanupFinalizer)
 		if err := r.Update(ctx, sr); err != nil {
 			return ctrl.Result{}, fmt.Errorf("add executor-cleanup finalizer: %w", err)
@@ -924,7 +929,7 @@ func (r *SudoRequestReconciler) VerifyApprovalToken(ctx context.Context, uid typ
 
 func (r *SudoRequestReconciler) findByUID(ctx context.Context, uid types.UID) (*SudoRequest, error) {
 	var list SudoRequestList
-	if err := r.List(ctx, &list, client.InNamespace(ControllerNamespace)); err != nil {
+	if err := r.List(ctx, &list, client.InNamespace(r.controllerNamespace())); err != nil {
 		return nil, err
 	}
 	for i := range list.Items {

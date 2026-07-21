@@ -35,6 +35,14 @@ issuer, secret names, ...). See the chart's
 [`values.yaml`](charts/sudo-service/values.yaml) for the full set of knobs and
 their defaults.
 
+The chart's `namespace` value is authoritative end to end. Every namespaced
+resource and namespace-sensitive admission identity is rendered from it, while
+the Deployment injects its actual namespace through the downward API as
+`POD_NAMESPACE`. The controller uses that value for its cache, request API,
+authorization checks, executor defaults, output/token Secrets, and garbage
+collection. When running the binary outside Kubernetes, an unset
+`POD_NAMESPACE` retains the historical `sudo-service` default.
+
 The Secrets the controller and its oauth2-proxy sidecar consume
 (`sudo-service-pushover`, `sudo-service-oauth2-proxy`) are **not** part of the
 chart — they are cluster-specific and expected to be provided out-of-band

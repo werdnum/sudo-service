@@ -35,6 +35,12 @@ spec:
           image: {{ include "sudo-service.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           env:
+            # Keep the controller's cache, API operations, SARs and managed
+            # resources aligned with the namespace Helm installed into.
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
             # Bind to all pod interfaces so kubelet's HTTP probes (which dial
             # the pod IP from the host netns, not pod-localhost) actually
             # reach us. External isolation is enforced by NetworkPolicy

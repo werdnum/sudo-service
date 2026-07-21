@@ -25,7 +25,7 @@ func TestNotificationLifecyclePersistsLinkBeforeDeliveryAndReusesIt(t *testing.T
 	ctx := context.Background()
 	scheme := testScheme(t)
 	sr := &SudoRequest{
-		ObjectMeta: metav1.ObjectMeta{Name: "notify", Namespace: ControllerNamespace, UID: "uid-notify", CreationTimestamp: metav1.Now()},
+		ObjectMeta: metav1.ObjectMeta{Name: "notify", Namespace: DefaultControllerNamespace, UID: "uid-notify", CreationTimestamp: metav1.Now()},
 		Spec:       SudoRequestSpec{Requester: "alice", Reason: "inspect it", Command: "kubectl get pods"},
 	}
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&SudoRequest{}).WithObjects(sr).Build()
@@ -76,7 +76,7 @@ func TestNotificationLifecyclePersistsLinkBeforeDeliveryAndReusesIt(t *testing.T
 		t.Fatal("persisted Pending state does not reference an approval token")
 	}
 	var tokenSecret corev1.Secret
-	if err := cl.Get(ctx, client.ObjectKey{Namespace: ControllerNamespace, Name: pending.Status.ApprovalTokenSecretName}, &tokenSecret); err != nil {
+	if err := cl.Get(ctx, client.ObjectKey{Namespace: DefaultControllerNamespace, Name: pending.Status.ApprovalTokenSecretName}, &tokenSecret); err != nil {
 		t.Fatalf("approval token Secret: %v", err)
 	}
 	if tokenSecret.Labels["role"] != "approval-token" || tokenSecret.Labels["expires-at"] == "" {
@@ -141,7 +141,7 @@ func TestAmbiguousPendingStatusWriteKeepsReferencedTokenSecret(t *testing.T) {
 	ctx := context.Background()
 	scheme := testScheme(t)
 	sr := &SudoRequest{
-		ObjectMeta: metav1.ObjectMeta{Name: "ambiguous", Namespace: ControllerNamespace, UID: "uid-ambiguous", CreationTimestamp: metav1.Now()},
+		ObjectMeta: metav1.ObjectMeta{Name: "ambiguous", Namespace: DefaultControllerNamespace, UID: "uid-ambiguous", CreationTimestamp: metav1.Now()},
 		Spec:       SudoRequestSpec{Requester: "alice", Reason: "inspect", Command: "kubectl get pods"},
 	}
 	base := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&SudoRequest{}).WithObjects(sr).Build()
@@ -174,7 +174,7 @@ func TestAmbiguousPendingStatusWriteKeepsReferencedTokenSecret(t *testing.T) {
 func TestGarbageCollectorSweepsExpiredApprovalTokenSecret(t *testing.T) {
 	ctx := context.Background()
 	expired := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
-		Name: "expired-token", Namespace: ControllerNamespace,
+		Name: "expired-token", Namespace: DefaultControllerNamespace,
 		Labels: map[string]string{"app": "sudo-service", "role": "approval-token", "expires-at": strconv.FormatInt(time.Now().Add(-time.Minute).Unix(), 10)},
 	}}
 	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(expired).Build()
@@ -192,11 +192,11 @@ func TestAcceptedPushBeforeStatusFailureRetriesSamePersistedLink(t *testing.T) {
 	token := "persisted-token"
 	expires := metav1.NewTime(time.Now().Add(time.Hour))
 	sr := &SudoRequest{
-		ObjectMeta: metav1.ObjectMeta{Name: "window", Namespace: ControllerNamespace, UID: "uid-window", CreationTimestamp: metav1.Now()},
+		ObjectMeta: metav1.ObjectMeta{Name: "window", Namespace: DefaultControllerNamespace, UID: "uid-window", CreationTimestamp: metav1.Now()},
 		Spec:       SudoRequestSpec{Requester: "alice", Reason: "inspect", Command: "kubectl get pods"},
 		Status:     SudoRequestStatus{Phase: PhasePending, NotificationState: NotificationPending, ApprovalTokenHash: sha256Hex(token), ApprovalTokenExpiresAt: &expires, ApprovalTokenSecretName: "approval-token"},
 	}
-	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "approval-token", Namespace: ControllerNamespace}, Data: map[string][]byte{"token": []byte(token)}}
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "approval-token", Namespace: DefaultControllerNamespace}, Data: map[string][]byte{"token": []byte(token)}}
 	base := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&SudoRequest{}).WithObjects(sr, secret).Build()
 	failDeliveryWrite := true
 	cl := interceptor.NewClient(base, interceptor.Funcs{

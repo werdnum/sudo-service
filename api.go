@@ -28,7 +28,8 @@ var templatesFS embed.FS
 // it borrows the manager's client (cached, so reads are cheap) and pokes the reconciler
 // through Approve/Deny helpers.
 type APIServer struct {
-	Client client.Client
+	ControllerNamespace string
+	Client              client.Client
 	// APIReader bypasses the controller-runtime cache for duplicate detection,
 	// where a stale negative read could otherwise admit an equivalent request.
 	// Tests and small embedders may leave it nil and fall back to Client.
@@ -41,6 +42,10 @@ type APIServer struct {
 	Config        *Config
 	Templates     *template.Template
 	requestMu     sync.Mutex
+}
+
+func (a *APIServer) controllerNamespace() string {
+	return configuredControllerNamespace(a.ControllerNamespace)
 }
 
 func (a *APIServer) RegisterRoutes(mux *http.ServeMux) {
@@ -157,7 +162,7 @@ func (a *APIServer) createRequestHandler(w http.ResponseWriter, r *http.Request)
 	sr := &SudoRequest{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: "http-",
-			Namespace:    ControllerNamespace,
+			Namespace:    a.controllerNamespace(),
 		},
 		Spec: SudoRequestSpec{
 			Requester:               identity.Username,
@@ -182,7 +187,7 @@ func (a *APIServer) createRequestHandler(w http.ResponseWriter, r *http.Request)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := validateSpecExtras(sr); err != nil {
+	if err := validateSpecExtras(sr, a.controllerNamespace()); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -308,8 +313,8 @@ func (a *APIServer) serveStatus(w http.ResponseWriter, sr *SudoRequest) {
 		Image:                     imageFor(sr),
 		Profile:                   profileFor(sr),
 		PreflightWarnings:         sr.Status.PreflightWarnings,
-		Namespace:                 executorNamespace(sr),
-		ClusterAdmin:              clusterAdminEnabled(sr),
+		Namespace:                 executorNamespace(sr, a.controllerNamespace()),
+		ClusterAdmin:              clusterAdminEnabled(sr, a.controllerNamespace()),
 		ApprovedBy:                sr.Status.ApprovedBy,
 		DeniedBy:                  sr.Status.DeniedBy,
 		DenialReason:              sr.Status.DenialReason,
@@ -342,7 +347,7 @@ func (a *APIServer) serveOutput(w http.ResponseWriter, r *http.Request, sr *Sudo
 		return
 	}
 	var sec corev1.Secret
-	if err := a.Client.Get(r.Context(), client.ObjectKey{Namespace: ControllerNamespace, Name: sr.Status.OutputSecretRef}, &sec); err != nil {
+	if err := a.Client.Get(r.Context(), client.ObjectKey{Namespace: a.controllerNamespace(), Name: sr.Status.OutputSecretRef}, &sec); err != nil {
 		http.Error(w, "fetch output: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -449,7 +454,7 @@ func (a *APIServer) indexHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var list SudoRequestList
-	if err := a.Client.List(r.Context(), &list, client.InNamespace(ControllerNamespace)); err != nil {
+	if err := a.Client.List(r.Context(), &list, client.InNamespace(a.controllerNamespace())); err != nil {
 		http.Error(w, "list requests: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -591,10 +596,10 @@ func (a *APIServer) renderApprovePage(w http.ResponseWriter, r *http.Request, cl
 		view.Profile = profileFor(sr)
 		view.PreflightWarnings = sr.Status.PreflightWarnings
 		view.Stdin = sr.Spec.Stdin
-		view.Extras = newSpecExtrasView(sr, false)
+		view.Extras = newSpecExtrasView(sr, false, a.controllerNamespace())
 		// Ground-truth pod spec (raw — the approve page is OIDC-protected). On the
 		// off chance it can't render, the curated rows above still stand.
-		if tmpl, err := displayPodTemplate(sr, false); err == nil {
+		if tmpl, err := displayPodTemplate(sr, false, a.controllerNamespace()); err == nil {
 			view.PodTemplate = tmpl
 		}
 		view.Summary = sr.Status.Summary
@@ -895,7 +900,7 @@ func (a *APIServer) findByUID(ctx context.Context, uid types.UID) (*SudoRequest,
 	if reader == nil {
 		reader = a.Client
 	}
-	if err := reader.List(ctx, &list, client.InNamespace(ControllerNamespace)); err != nil {
+	if err := reader.List(ctx, &list, client.InNamespace(a.controllerNamespace())); err != nil {
 		return nil, err
 	}
 	for i := range list.Items {
