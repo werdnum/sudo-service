@@ -1,7 +1,7 @@
-# Binds the controller SA to the built-in `system:auth-delegator` ClusterRole so the
-# controller can call TokenReview on the apiserver to authenticate requester SA tokens
-# on GET /requests/{uid}, /output, /events. This is the standard K8s-native API
-# auth-delegation pattern and is the only cluster-scoped capability the controller has.
+# Binds the controller SA to the built-in `system:auth-delegator` ClusterRole so
+# it can authenticate requester SA tokens with TokenReview and authorize those
+# identities with SubjectAccessReview. Keep this binding's roleRef stable
+# because roleRef is immutable during Helm upgrades.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
