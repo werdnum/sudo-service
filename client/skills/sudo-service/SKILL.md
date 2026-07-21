@@ -68,6 +68,23 @@ sudo-service \
   -- kubectl get nodes
 ```
 
+For the recurring exact operations below, use the typed helper instead of
+reconstructing `kubectl` shell. Keep `--reason` as the incident/task context.
+The server compiles the command and permission request from the typed resource
+fields, rejects selectors and other widening options, and still waits for human
+approval.
+
+```bash
+sudo-service --reason "clean up the recovered failed run" job delete ns/job-name
+sudo-service --reason "rerun after repairing the input" cronjob run ns/cronjob-name
+sudo-service --reason "reload repaired config" workload restart ns/deployment/name
+sudo-service --reason "diagnose auth failure" secret read ns/secret-name key
+```
+
+The CronJob helper's exact Job name is shown in review and its manifest carries a
+24-hour `ttlSecondsAfterFinished` before creation. Do not translate a selector or
+`--all` into a typed request; typed helpers deliberately accept exact names only.
+
 For anything richer than a command, use `--request-file` with a complete YAML
 or JSON HTTP request body. Do not put a manifest, heredoc, encoded script, or
 nested Job/Pod definition in `command`. Use `--stdin-file` for a separate

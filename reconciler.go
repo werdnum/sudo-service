@@ -125,6 +125,7 @@ func (r *SudoRequestReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 }
 
 func (r *SudoRequestReconciler) handleNew(ctx context.Context, sr *SudoRequest) (ctrl.Result, error) {
+	_, typedActionErr := validateTypedActionBinding(sr)
 	profile, resolvedImage, warnings, profileErr := resolveAndPreflight(sr)
 	if profileErr == nil {
 		sr.Status.ResolvedImage = resolvedImage
@@ -165,7 +166,7 @@ func (r *SudoRequestReconciler) handleNew(ctx context.Context, sr *SudoRequest) 
 	// (a hostPath volume, an init container setting its own securityContext, ...).
 	// As with the syntax check, the HTTP API rejects these at submission; a
 	// CRD-created one only reaches us here, so deny it before the approval push.
-	if err := firstError(profileErr, validateSpecExtras(sr)); err != nil {
+	if err := firstError(typedActionErr, profileErr, validateSpecExtras(sr)); err != nil {
 		now := metav1.NewTime(time.Now())
 		sr.Status.Phase = PhaseDenied
 		sr.Status.DeniedBy = "spec-validation"
@@ -247,7 +248,7 @@ func (r *SudoRequestReconciler) handleNew(ctx context.Context, sr *SudoRequest) 
 	sr.Status.ApprovalTokenExpiresAt = &expiry
 	sr.Status.ApprovalTokenSecretName = secret.Name
 	sr.Status.NotificationState = NotificationPending
-	if r.Summarizer != nil {
+	if r.Summarizer != nil && sr.Spec.Action == nil {
 		sr.Status.PermissionAssessmentState = PermissionAssessmentPending
 	}
 
@@ -380,7 +381,9 @@ func (r *SudoRequestReconciler) deliverApprovalNotification(ctx context.Context,
 
 	title := fmt.Sprintf("sudo: permission requested by %s", sr.Spec.Requester)
 	body := ""
-	if sr.Status.PermissionAssessment != nil {
+	if plan, _ := compileTypedAction(sr.Spec.Action); plan != nil {
+		body = "Permission requested: " + plan.PermissionRequest + "\n"
+	} else if sr.Status.PermissionAssessment != nil {
 		body = "Permission requested: " + sr.Status.PermissionAssessment.Request + "\n"
 		if len(sr.Status.PermissionAssessment.Effects) > 0 {
 			body += "Effects: " + formatPermissionEffects(sr.Status.PermissionAssessment.Effects) + "\n"

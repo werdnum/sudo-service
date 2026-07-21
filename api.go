@@ -56,11 +56,12 @@ func (a *APIServer) healthHandler(w http.ResponseWriter, _ *http.Request) {
 // ---- HTTP API (requester side) ----
 
 type createRequestBody struct {
-	Reason                  string `json:"reason"`
-	Command                 string `json:"command"`
-	Image                   string `json:"image,omitempty"`
-	Profile                 string `json:"profile,omitempty"`
-	TTLSecondsAfterApproval *int32 `json:"ttlSecondsAfterApproval,omitempty"`
+	Reason                  string       `json:"reason"`
+	Command                 string       `json:"command"`
+	Action                  *TypedAction `json:"action,omitempty"`
+	Image                   string       `json:"image,omitempty"`
+	Profile                 string       `json:"profile,omitempty"`
+	TTLSecondsAfterApproval *int32       `json:"ttlSecondsAfterApproval,omitempty"`
 
 	// Widened pod fields — same shape as the CRD spec, carried as raw JSON so a
 	// malformed item is rejected by validateSpecExtras (400) rather than failing
@@ -82,6 +83,8 @@ type requestStatusResponse struct {
 	Phase                     string                `json:"phase"`
 	Requester                 string                `json:"requester"`
 	Command                   string                `json:"command"`
+	Action                    *TypedAction          `json:"action,omitempty"`
+	PermissionRequest         string                `json:"permissionRequest,omitempty"`
 	Image                     string                `json:"image"`
 	Profile                   string                `json:"profile,omitempty"`
 	PreflightWarnings         []string              `json:"preflightWarnings,omitempty"`
@@ -131,12 +134,36 @@ func (a *APIServer) createRequestHandler(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	var body createRequestBody
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&body); err != nil {
 		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if body.Command == "" || body.Reason == "" {
-		http.Error(w, "command and reason are required", http.StatusBadRequest)
+	if body.Reason == "" {
+		http.Error(w, "reason is required", http.StatusBadRequest)
+		return
+	}
+	var actionPlan *TypedActionPlan
+	if body.Action != nil {
+		if body.Command != "" {
+			http.Error(w, "action and command are mutually exclusive", http.StatusBadRequest)
+			return
+		}
+		if body.Image != "" || (body.Profile != "" && body.Profile != DefaultExecutorProfile) || body.Namespace != "" || body.Stdin != "" || len(body.Env) != 0 || len(body.EnvFrom) != 0 || len(body.Volumes) != 0 || len(body.VolumeMounts) != 0 || len(body.InitContainers) != 0 || len(body.ImagePullSecrets) != 0 || body.Privileges.ClusterAdmin != nil {
+			http.Error(w, "typed actions cannot set image, executor namespace, stdin, pod fields, image pull secrets, or privilege overrides", http.StatusBadRequest)
+			return
+		}
+		var err error
+		actionPlan, err = compileTypedAction(body.Action)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		body.Command = actionPlan.Command
+		body.Profile = DefaultExecutorProfile
+	} else if body.Command == "" {
+		http.Error(w, "command is required when action is absent", http.StatusBadRequest)
 		return
 	}
 	if err := validateCommandSyntax(body.Command); err != nil {
@@ -153,6 +180,7 @@ func (a *APIServer) createRequestHandler(w http.ResponseWriter, r *http.Request)
 			Requester:               identity.Username,
 			Reason:                  body.Reason,
 			Command:                 body.Command,
+			Action:                  body.Action,
 			Image:                   body.Image,
 			Profile:                 body.Profile,
 			TTLSecondsAfterApproval: body.TTLSecondsAfterApproval,
@@ -176,6 +204,10 @@ func (a *APIServer) createRequestHandler(w http.ResponseWriter, r *http.Request)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if _, err := validateTypedActionBinding(sr); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	if err := a.Client.Create(r.Context(), sr); err != nil {
 		http.Error(w, "create: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -183,6 +215,11 @@ func (a *APIServer) createRequestHandler(w http.ResponseWriter, r *http.Request)
 	w.Header().Set("Content-Type", "application/json")
 	response := map[string]any{
 		"uid": string(sr.UID), "name": sr.Name, "image": resolvedImage,
+	}
+	if actionPlan != nil {
+		response["action"] = sr.Spec.Action
+		response["command"] = sr.Spec.Command
+		response["permissionRequest"] = actionPlan.PermissionRequest
 	}
 	if profile != nil {
 		response["profile"] = profile.Name
@@ -265,12 +302,14 @@ func (a *APIServer) requestSubpathHandler(w http.ResponseWriter, r *http.Request
 }
 
 func (a *APIServer) serveStatus(w http.ResponseWriter, sr *SudoRequest) {
+	plan, _ := compileTypedAction(sr.Spec.Action)
 	resp := requestStatusResponse{
 		UID:                       string(sr.UID),
 		Name:                      sr.Name,
 		Phase:                     sr.Status.Phase,
 		Requester:                 sr.Spec.Requester,
 		Command:                   sr.Spec.Command,
+		Action:                    sr.Spec.Action,
 		Image:                     imageFor(sr),
 		Profile:                   profileFor(sr),
 		PreflightWarnings:         sr.Status.PreflightWarnings,
@@ -291,6 +330,9 @@ func (a *APIServer) serveStatus(w http.ResponseWriter, sr *SudoRequest) {
 		Summary:                   sr.Status.Summary,
 		PermissionAssessment:      sr.Status.PermissionAssessment,
 		PermissionAssessmentState: sr.Status.PermissionAssessmentState,
+	}
+	if plan != nil {
+		resp.PermissionRequest = plan.PermissionRequest
 	}
 	if sr.Status.ApprovedAt != nil {
 		resp.ApprovedAt = sr.Status.ApprovedAt.UTC().Format("2006-01-02T15:04:05Z")
@@ -541,6 +583,10 @@ func (a *APIServer) renderApprovePage(w http.ResponseWriter, r *http.Request, cl
 	} else {
 		view.Requester = sr.Spec.Requester
 		view.Reason = sr.Spec.Reason
+		plan, _ := compileTypedAction(sr.Spec.Action)
+		if plan != nil {
+			view.PermissionRequest = plan.PermissionRequest
+		}
 		view.Command = sr.Spec.Command
 		view.Image = imageFor(sr)
 		view.Profile = profileFor(sr)
@@ -553,7 +599,7 @@ func (a *APIServer) renderApprovePage(w http.ResponseWriter, r *http.Request, cl
 			view.PodTemplate = tmpl
 		}
 		view.Summary = sr.Status.Summary
-		if assessment := sr.Status.PermissionAssessment; assessment != nil {
+		if assessment := sr.Status.PermissionAssessment; assessment != nil && plan == nil {
 			view.PermissionRequest = assessment.Request
 			view.PermissionEffects = make([]string, len(assessment.Effects))
 			for i, effect := range assessment.Effects {

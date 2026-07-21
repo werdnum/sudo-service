@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -32,6 +34,7 @@ REQUEST_FIELDS = {
     "initContainers",
     "imagePullSecrets",
     "privileges",
+    "action",
 }
 LIST_REQUEST_FIELDS = {
     "env",
@@ -173,6 +176,8 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if args.argv and args.argv[0] == "--":
         args.argv = args.argv[1:]
+
+    typed_helper = is_typed_helper(args.argv)
     if args.request_file:
         conflicting = []
         for option, value in (
@@ -190,6 +195,19 @@ def parse_args() -> argparse.Namespace:
                 conflicting.append(option)
         if conflicting:
             parser.error("--request-file cannot be combined with " + ", ".join(conflicting))
+    elif typed_helper:
+        conflicting = []
+        for option, value in (
+            ("--command", args.command), ("--image", args.image),
+            ("--profile", args.profile), ("--namespace", args.namespace),
+            ("--no-cluster-admin", args.no_cluster_admin),
+            ("--image-pull-secret", args.image_pull_secrets),
+            ("--stdin-file", args.stdin_file),
+        ):
+            if value is not None and value is not False and value != []:
+                conflicting.append(option)
+        if conflicting:
+            parser.error("typed helpers cannot be combined with " + ", ".join(conflicting))
     elif args.command and args.argv:
         parser.error("use either --command or arguments after '--', not both")
     elif not args.command and not args.argv:
@@ -205,6 +223,88 @@ def parse_args() -> argparse.Namespace:
     if args.ttl_seconds_after_approval is not None and args.ttl_seconds_after_approval < 0:
         parser.error("--ttl-seconds-after-approval must be non-negative")
     return args
+
+
+TYPED_HELPERS = {
+    ("job", "delete"),
+    ("cronjob", "run"),
+    ("workload", "restart"),
+    ("secret", "read"),
+}
+
+
+def is_typed_helper(argv: list[str]) -> bool:
+    return len(argv) >= 2 and tuple(argv[:2]) in TYPED_HELPERS
+
+
+def exact_ref(value: str, parts: int, description: str) -> list[str]:
+    values = value.split("/")
+    if len(values) != parts or any(not part for part in values):
+        raise SudoServiceError(f"{description} must have exactly {parts} slash-separated components")
+    allowed = re.compile(r"^[a-z0-9](?:[-.a-z0-9]*[a-z0-9])?$")
+    if any(not allowed.fullmatch(part) for part in values):
+        raise SudoServiceError(f"{description} contains an invalid Kubernetes identifier: {value!r}")
+    return values
+
+
+def typed_action_from_args(argv: list[str], now: datetime.datetime | None = None) -> dict[str, Any]:
+    helper = tuple(argv[:2])
+    operands = argv[2:]
+    if any(value.startswith("-") for value in operands):
+        raise SudoServiceError("typed helpers accept exact resource operands, not options or selectors")
+
+    if helper == ("job", "delete"):
+        if not operands:
+            raise SudoServiceError("job delete requires at least one <namespace>/<name>")
+        refs = []
+        for value in operands:
+            namespace, name = exact_ref(value, 2, "Job target")
+            refs.append({"namespace": namespace, "kind": "Job", "name": name})
+        refs.sort(key=lambda ref: (ref["namespace"], ref["name"]))
+        return {"version": "v1", "operation": "job.delete", "resources": refs}
+
+    if helper == ("cronjob", "run"):
+        if len(operands) != 1:
+            raise SudoServiceError("cronjob run requires exactly one <namespace>/<name>")
+        namespace, name = exact_ref(operands[0], 2, "CronJob target")
+        instant = now or datetime.datetime.now(datetime.timezone.utc)
+        suffix = "-manual-" + instant.astimezone(datetime.timezone.utc).strftime("%Y%m%d%H%M%S")
+        prefix = name[: 63 - len(suffix)].rstrip("-.")
+        if not prefix:
+            raise SudoServiceError("CronJob name cannot produce a valid manual Job name")
+        return {
+            "version": "v1", "operation": "cronjob.run",
+            "resources": [{"namespace": namespace, "kind": "CronJob", "name": name}],
+            "jobName": prefix + suffix,
+        }
+
+    if helper == ("workload", "restart"):
+        if len(operands) != 1:
+            raise SudoServiceError("workload restart requires exactly one <namespace>/<kind>/<name>")
+        namespace, kind, name = exact_ref(operands[0], 3, "workload target")
+        kinds = {"deployment": "Deployment", "statefulset": "StatefulSet", "daemonset": "DaemonSet"}
+        canonical_kind = kinds.get(kind.lower())
+        if canonical_kind is None:
+            raise SudoServiceError("workload kind must be deployment, statefulset, or daemonset")
+        return {
+            "version": "v1", "operation": "workload.restart",
+            "resources": [{"namespace": namespace, "kind": canonical_kind, "name": name}],
+        }
+
+    if helper == ("secret", "read"):
+        if len(operands) != 2:
+            raise SudoServiceError("secret read requires <namespace>/<name> <key>")
+        namespace, name = exact_ref(operands[0], 2, "Secret target")
+        key = operands[1]
+        if not re.fullmatch(r"[-._a-zA-Z0-9]+", key):
+            raise SudoServiceError("Secret key must contain only letters, digits, '-', '_' or '.'")
+        return {
+            "version": "v1", "operation": "secret.read",
+            "resources": [{"namespace": namespace, "kind": "Secret", "name": name}],
+            "key": key,
+        }
+
+    raise SudoServiceError("unknown typed helper")
 
 
 def command_from_args(args: argparse.Namespace) -> str:
@@ -269,9 +369,32 @@ def validate_request_body(body: dict[str, Any]) -> None:
     unknown = sorted(set(body) - REQUEST_FIELDS)
     if unknown:
         raise SudoServiceError("unsupported request field(s): " + ", ".join(unknown))
-    for field in ("reason", "command"):
-        if not isinstance(body.get(field), str) or not body[field]:
-            raise SudoServiceError(f"request field {field!r} must be a non-empty string")
+    if not isinstance(body.get("reason"), str) or not body["reason"]:
+        raise SudoServiceError("request field 'reason' must be a non-empty string")
+    has_command = isinstance(body.get("command"), str) and bool(body.get("command"))
+    has_action = isinstance(body.get("action"), dict)
+    if has_command == has_action:
+        raise SudoServiceError("request must contain exactly one of non-empty 'command' or object 'action'")
+
+    if has_action:
+        action = body["action"]
+        disallowed = sorted(set(body) - {"reason", "action", "ttlSecondsAfterApproval"})
+        if disallowed:
+            raise SudoServiceError(
+                "typed action request cannot set executor field(s): " + ", ".join(disallowed)
+            )
+        if set(action) - {"version", "operation", "resources", "key", "jobName"}:
+            raise SudoServiceError("request field 'action' contains unsupported fields")
+        if action.get("version") != "v1" or action.get("operation") not in {
+            "job.delete", "cronjob.run", "workload.restart", "secret.read"
+        }:
+            raise SudoServiceError("request field 'action' has unsupported version or operation")
+        resources = action.get("resources")
+        if not isinstance(resources, list) or not resources:
+            raise SudoServiceError("request field 'action.resources' must be a non-empty list")
+        for resource in resources:
+            if not isinstance(resource, dict) or set(resource) != {"namespace", "kind", "name"} or not all(isinstance(value, str) and value for value in resource.values()):
+                raise SudoServiceError("each action resource must contain exactly non-empty string namespace, kind, and name")
     for field in ("image", "profile", "namespace", "stdin"):
         if field in body and not isinstance(body[field], str):
             raise SudoServiceError(f"request field {field!r} must be a string")
@@ -430,6 +553,10 @@ def main() -> int:
         if args.request_file == "-" and args.stdin_file == "-":
             raise SudoServiceError("--request-file - and --stdin-file - cannot both read standard input")
         body = load_request_file(args.request_file)
+    elif is_typed_helper(args.argv):
+        body = {"reason": args.reason, "action": typed_action_from_args(args.argv)}
+        if args.ttl_seconds_after_approval is not None:
+            body["ttlSecondsAfterApproval"] = args.ttl_seconds_after_approval
     else:
         body = {"reason": args.reason, "command": command_from_args(args)}
         if args.image:
@@ -462,7 +589,7 @@ def main() -> int:
     if body.get("image") and body.get("profile"):
         raise SudoServiceError("request fields 'image' and 'profile' are mutually exclusive")
 
-    if not args.no_validate:
+    if not args.no_validate and "command" in body:
         syntax_error = validate_command_syntax(body["command"])
         if syntax_error is not None:
             raise SudoServiceError(
@@ -483,6 +610,12 @@ def main() -> int:
         if resolved:
             prefix = f"profile={profile} " if profile else "raw image "
             print(f"executor {prefix}resolved-image={resolved}", file=sys.stderr)
+        permission_request = str(create_response.get("permissionRequest") or "")
+        canonical_command = str(create_response.get("command") or "")
+        if permission_request:
+            print(f"permission requested: {permission_request}", file=sys.stderr)
+        if body.get("action") and canonical_command:
+            print("canonical command:\n" + canonical_command, file=sys.stderr)
     for warning in create_response.get("warnings") or []:
         print(f"sudo-service preflight warning: {warning}", file=sys.stderr)
 

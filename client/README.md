@@ -28,6 +28,36 @@ client/cli/sudo-service \
   -- kubectl delete pod foo -n bar
 ```
 
+For recurring administrative operations, prefer the typed helpers. They send
+exact resource fields rather than requester-built shell. The controller validates
+the action, compiles the command, and derives a separate permission request from
+the same fields; the requester-supplied `--reason` remains the incident/task
+context and cannot override that permission text.
+
+```sh
+sudo-service --reason "remove retained failures after a healthy rerun" \
+  job delete concourse/old-build monitoring/old-check
+
+sudo-service --reason "rerun drift after repairing credentials" \
+  cronjob run ansible/ansible-drift
+
+sudo-service --reason "reload the repaired configuration" \
+  workload restart ml-bot/deployment/family-assistant
+
+sudo-service --reason "diagnose the database authentication failure" \
+  secret read keep/keep-postgres-credentials password
+```
+
+Job deletion takes only exact `<namespace>/<name>` operands. Workload restart is
+limited to Deployment, StatefulSet, and DaemonSet. Secret read requires one exact
+Secret and key. Selector/options are rejected rather than appended to a trusted
+prefix. CronJob run creates a visible `<cronjob>-manual-<UTC timestamp>` Job and
+sets `ttlSecondsAfterFinished: 86400` in its manifest before creating it.
+
+Typed requests still require human approval. The create response prints the
+server-derived permission request and canonical command; `--preview` shows the
+semantic action submitted to the server.
+
 The default `kubectl` executor is a server-resolved, digest-pinned profile. Select
 another curated profile explicitly when appropriate:
 

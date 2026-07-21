@@ -94,7 +94,7 @@ func executorServiceAccount(sr *SudoRequest) (name string, automount *bool) {
 // widened pod field or privilege toggle is never auto-approvable — the allowlist
 // only reasons about command+image.
 func autoApproveTokens(sr *SudoRequest) ([]string, bool) {
-	if hasSpecExtras(sr) {
+	if sr.Spec.Action != nil || hasSpecExtras(sr) {
 		return nil, false
 	}
 	return getAutoApproveParsedCommand(sr.Spec.Command, imageFor(sr))

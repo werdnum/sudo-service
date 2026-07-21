@@ -107,6 +107,24 @@ executed. Requesters cannot supply or override the resolution.
 for uncommon tools and are labeled as unprofiled; sudo-service does not pretend it
 can infer their `/bin/sh` behavior or installed tools.
 
+### Typed administrative actions
+
+The HTTP API also accepts a versioned `action` in place of requester-supplied
+`command`. Initial operations cover exact Job deletion, one CronJob run, one
+Deployment/StatefulSet/DaemonSet restart, and one Secret key read. The controller
+validates exact resource references, compiles the canonical command, stores both,
+and rejects any direct-CR request whose stored command diverges from the action.
+
+The same compiler produces the separate `permissionRequest` shown on the approval
+page, in Pushover, and in requester API responses. The requester's free-text
+`reason` remains task context; it cannot override the permission sentence. Typed
+actions reject selectors, arbitrary images, pod customization, and privilege
+overrides, and are never eligible for command-prefix auto-approval.
+
+The requester CLI exposes these as `job delete`, `cronjob run`, `workload restart`,
+and `secret read`; see [client/README.md](client/README.md). CronJob runs create an
+exact timestamped Job whose manifest carries a 24-hour TTL before it is submitted.
+
 ### Authorizing HTTP requesters
 
 The requester HTTP API has two distinct Kubernetes checks. `TokenReview`

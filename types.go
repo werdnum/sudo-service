@@ -101,6 +101,11 @@ type SudoRequestSpec struct {
 	// Command is the exact argv to run, e.g. "kubectl rollout restart deployment/foo -n bar".
 	Command string `json:"command"`
 
+	// Action, when set, is the server-validated semantic source of the command
+	// and permission request. The stored Command must equal its canonical
+	// expansion; this prevents a benign typed description masking arbitrary shell.
+	Action *TypedAction `json:"action,omitempty"`
+
 	// Image is the container image the executor Job runs. Defaults to DefaultExecutorImage.
 	// The human reviewer is the trust boundary: the approve page shows the image
 	// prominently so the human notices suspicious image+command pairings.
@@ -376,6 +381,13 @@ func (in *SudoRequestList) DeepCopyObject() runtime.Object {
 
 func (in *SudoRequestSpec) DeepCopyInto(out *SudoRequestSpec) {
 	*out = *in
+	if in.Action != nil {
+		out.Action = new(TypedAction)
+		*out.Action = *in.Action
+		if in.Action.Resources != nil {
+			out.Action.Resources = append([]TypedResourceRef(nil), in.Action.Resources...)
+		}
+	}
 	if in.TTLSecondsAfterApproval != nil {
 		v := *in.TTLSecondsAfterApproval
 		out.TTLSecondsAfterApproval = &v
