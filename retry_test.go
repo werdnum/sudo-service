@@ -7,8 +7,10 @@ import (
 	"sync/atomic"
 	"testing"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -108,7 +110,11 @@ func TestRetryIsConcurrentAndRepeatedIdempotent(t *testing.T) {
 	cl := retryTestClient(t, expiredSource(), nil)
 	api := &APIServer{Client: cl}
 	var wg sync.WaitGroup
-	results := make(chan types.UID, 8)
+	type result struct {
+		uid     types.UID
+		created bool
+	}
+	results := make(chan result, 8)
 	for range 8 {
 		wg.Add(1)
 		go func() {
@@ -118,23 +124,31 @@ func TestRetryIsConcurrentAndRepeatedIdempotent(t *testing.T) {
 				t.Error(err)
 				return
 			}
-			successor, _, err := api.retryRequest(context.Background(), &source, "alice", false)
+			successor, created, err := api.retryRequest(context.Background(), &source, "alice", false)
 			if err != nil {
 				t.Error(err)
 				return
 			}
-			results <- successor.UID
+			results <- result{uid: successor.UID, created: created}
 		}()
 	}
 	wg.Wait()
 	close(results)
 	var want types.UID
-	for uid := range results {
+	createdCount := 0
+	for result := range results {
+		uid := result.uid
+		if result.created {
+			createdCount++
+		}
 		if want == "" {
 			want = uid
 		} else if uid != want {
 			t.Errorf("got multiple successor UIDs: %s and %s", want, uid)
 		}
+	}
+	if createdCount != 1 {
+		t.Fatalf("created=true count=%d, want exactly one", createdCount)
 	}
 	var list SudoRequestList
 	if err := cl.List(context.Background(), &list); err != nil {
@@ -147,6 +161,110 @@ func TestRetryIsConcurrentAndRepeatedIdempotent(t *testing.T) {
 	_ = cl.Get(context.Background(), client.ObjectKey{Namespace: ControllerNamespace, Name: "source"}, &source)
 	if source.Status.SupersededByUID != string(want) {
 		t.Fatalf("supersededByUID = %q, want %q", source.Status.SupersededByUID, want)
+	}
+}
+
+func TestRetryAdoptsDeterministicChildFoundByPendingDedupe(t *testing.T) {
+	source := expiredSource()
+	successor := &SudoRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: retryChildName(source.UID), Namespace: ControllerNamespace, UID: "successor-uid",
+		},
+		Spec: source.Spec,
+	}
+	successor.Spec.RetryOfUID = string(source.UID)
+	base := ctrlfake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&SudoRequest{}).WithObjects(source, successor).Build()
+	missFirst := &atomic.Bool{}
+	missFirst.Store(true)
+	cl := interceptor.NewClient(base, interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if key.Name == successor.Name && missFirst.CompareAndSwap(true, false) {
+				return apierrors.NewNotFound(schema.GroupResource{Group: GroupName, Resource: "sudorequests"}, key.Name)
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	})
+	api := &APIServer{Client: cl}
+	got, created, err := api.retryRequest(context.Background(), source, "alice", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created || got.UID != successor.UID {
+		t.Fatalf("result uid=%s created=%v, want existing %s", got.UID, created, successor.UID)
+	}
+	var updated SudoRequest
+	if err := base.Get(context.Background(), client.ObjectKeyFromObject(source), &updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status.SupersededByUID != string(successor.UID) {
+		t.Fatalf("supersededByUID=%q, want %q", updated.Status.SupersededByUID, successor.UID)
+	}
+}
+
+func TestRetryRejectsDeterministicNameOccupants(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		mutate func(*SudoRequest)
+	}{
+		{
+			name: "unrelated lineage",
+			mutate: func(sr *SudoRequest) {
+				sr.Spec.RetryOfUID = "different-source"
+			},
+		},
+		{
+			name: "different execution",
+			mutate: func(sr *SudoRequest) {
+				sr.Spec.Command = "kubectl delete namespace production"
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			source := expiredSource()
+			cl := retryTestClient(t, source, nil)
+			occupant := &SudoRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: retryChildName(source.UID), Namespace: ControllerNamespace, UID: "occupant-uid",
+				},
+				Spec: source.Spec,
+			}
+			occupant.Spec.RetryOfUID = string(source.UID)
+			tt.mutate(occupant)
+			if err := cl.Create(context.Background(), occupant); err != nil {
+				t.Fatal(err)
+			}
+			api := &APIServer{Client: cl}
+			if _, _, err := api.retryRequest(context.Background(), source, "alice", false); err == nil {
+				t.Fatal("retry adopted deterministic-name occupant")
+			}
+			var current SudoRequest
+			if err := cl.Get(context.Background(), client.ObjectKeyFromObject(source), &current); err != nil {
+				t.Fatal(err)
+			}
+			if current.Status.SupersededByUID != "" {
+				t.Fatalf("source linked to rejected occupant: %s", current.Status.SupersededByUID)
+			}
+		})
+	}
+}
+
+func TestRetryPreservesConflictForUnrelatedEquivalentPendingRequest(t *testing.T) {
+	source := expiredSource()
+	cl := retryTestClient(t, source, nil)
+	pending := &SudoRequest{
+		ObjectMeta: metav1.ObjectMeta{Name: "other-pending", Namespace: ControllerNamespace, UID: "pending-uid"},
+		Spec:       source.Spec,
+		Status:     SudoRequestStatus{Phase: PhasePending},
+	}
+	if err := cl.Create(context.Background(), pending); err != nil {
+		t.Fatal(err)
+	}
+	api := &APIServer{Client: cl}
+	_, _, err := api.retryRequest(context.Background(), source, "alice", false)
+	var duplicate *pendingDuplicateError
+	if !errors.As(err, &duplicate) || duplicate.UID != pending.UID {
+		t.Fatalf("error=%v, want pending duplicate for %s", err, pending.UID)
 	}
 }
 

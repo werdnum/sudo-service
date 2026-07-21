@@ -97,6 +97,39 @@ func requesterRetryable(phase string) bool { return phase == PhaseExpired || pha
 
 func adminRetryable(phase string) bool { return isTerminalPhase(phase) }
 
+// validateRetrySuccessor authenticates an object occupying the deterministic
+// retry name before it is adopted as the source's one successor. Lineage and
+// requester checks prevent an unrelated request from being linked, while the
+// execution fingerprint prevents a same-requester object with forged lineage
+// but different execution fields from winning a create race.
+func validateRetrySuccessor(source, successor *SudoRequest) error {
+	if successor.Spec.RetryOfUID != string(source.UID) || successor.Spec.Requester != source.Spec.Requester {
+		return errors.New("deterministic retry name is occupied by an unrelated request")
+	}
+	want, err := executionFingerprint(&source.Spec)
+	if err != nil {
+		return fmt.Errorf("fingerprint retry source: %w", err)
+	}
+	got, err := executionFingerprint(&successor.Spec)
+	if err != nil {
+		return fmt.Errorf("fingerprint retry successor: %w", err)
+	}
+	if got != want {
+		return errors.New("deterministic retry name is occupied by a request with different execution fields")
+	}
+	return nil
+}
+
+func (a *APIServer) adoptRetrySuccessor(ctx context.Context, source, successor *SudoRequest) (*SudoRequest, bool, error) {
+	if err := validateRetrySuccessor(source, successor); err != nil {
+		return nil, false, err
+	}
+	if err := a.ensureSupersededLink(ctx, source.Name, source.UID, successor.UID); err != nil {
+		return nil, false, err
+	}
+	return successor.DeepCopy(), false, nil
+}
+
 // retryRequest creates exactly one successor per predecessor. The deterministic
 // name is the cross-replica idempotency key. If linking the predecessor status
 // fails after creation, a repeated call finds the same child and repairs the link.
@@ -111,13 +144,7 @@ func (a *APIServer) retryRequest(ctx context.Context, source *SudoRequest, submi
 	name := retryChildName(source.UID)
 	var existing SudoRequest
 	if err := a.Client.Get(ctx, client.ObjectKey{Namespace: ControllerNamespace, Name: name}, &existing); err == nil {
-		if existing.Spec.RetryOfUID != string(source.UID) || existing.Spec.Requester != source.Spec.Requester {
-			return nil, false, fmt.Errorf("retry idempotency name %q is occupied by an unrelated request", name)
-		}
-		if err := a.ensureSupersededLink(ctx, source.Name, source.UID, existing.UID); err != nil {
-			return nil, false, err
-		}
-		return existing.DeepCopy(), false, nil
+		return a.adoptRetrySuccessor(ctx, source, &existing)
 	} else if !apierrors.IsNotFound(err) {
 		return nil, false, err
 	}
@@ -137,6 +164,12 @@ func (a *APIServer) retryRequest(ctx context.Context, source *SudoRequest, submi
 	if duplicate, err := a.findPendingDuplicate(ctx, successor); err != nil {
 		return nil, false, err
 	} else if duplicate != nil {
+		// A concurrent retry may have created our deterministic child between the
+		// initial Get and this List. That is idempotent success, not a generic
+		// duplicate conflict; authenticate it and repair the forward link.
+		if duplicate.Name == name {
+			return a.adoptRetrySuccessor(ctx, source, duplicate)
+		}
 		return duplicate, false, &pendingDuplicateError{UID: duplicate.UID}
 	}
 	if err := validateCommandSyntax(successor.Spec.Command); err != nil {
@@ -145,18 +178,23 @@ func (a *APIServer) retryRequest(ctx context.Context, source *SudoRequest, submi
 	if err := validateSpecExtras(successor); err != nil {
 		return nil, false, err
 	}
+	created := true
 	if err := a.Client.Create(ctx, successor); err != nil {
 		if !apierrors.IsAlreadyExists(err) {
 			return nil, false, err
 		}
+		created = false
 		if err := a.Client.Get(ctx, client.ObjectKey{Namespace: ControllerNamespace, Name: name}, successor); err != nil {
+			return nil, false, err
+		}
+		if err := validateRetrySuccessor(source, successor); err != nil {
 			return nil, false, err
 		}
 	}
 	if err := a.ensureSupersededLink(ctx, source.Name, source.UID, successor.UID); err != nil {
-		return nil, true, err
+		return nil, created, err
 	}
-	return successor, true, nil
+	return successor, created, nil
 }
 
 type pendingDuplicateError struct{ UID types.UID }

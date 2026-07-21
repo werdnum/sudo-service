@@ -54,6 +54,113 @@ func runKubectl(stdin string, args ...string) (string, error) {
 	return out.String(), err
 }
 
+// TestIntegrationRetryLineageAdmission proves that immutable retry lineage can
+// only be minted by the chart's controller identity. Ordinary direct writers
+// may still create their own first-generation requests, and the controller path
+// remains valid. A non-default namespace exercises the identity templating
+// rather than accidentally relying on the chart's default namespace.
+func TestIntegrationRetryLineageAdmission(t *testing.T) {
+	if _, err := ctrl.GetConfig(); err != nil {
+		t.Skipf("no cluster available (set KUBECONFIG): %v", err)
+	}
+
+	const namespace = "sudo-retry-admission"
+	const requester = "system:serviceaccount:sudo-retry-admission:requester"
+	const controller = "system:serviceaccount:sudo-retry-admission:sudo-service-controller-sa"
+
+	kubectl(t, "", "apply", "-f", "charts/sudo-service/templates/crd-sudorequest.yaml")
+	kubectl(t, "", "wait", "--for=condition=Established",
+		"crd/sudorequests.sudo.andrewgarrett.dev", "--timeout=60s")
+	kubectl(t, "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: "+namespace+"\n",
+		"apply", "-f", "-")
+
+	policy, err := os.ReadFile("charts/sudo-service/templates/validatingadmissionpolicy-requester.yaml")
+	if err != nil {
+		t.Fatalf("read requester admission policy: %v", err)
+	}
+	renderedPolicy := strings.ReplaceAll(string(policy),
+		`{{ include "sudo-service.controllerUsername" . }}`, controller)
+	if strings.Contains(renderedPolicy, "{{") {
+		t.Fatal("requester admission policy contains an unrendered Helm expression")
+	}
+	kubectl(t, renderedPolicy, "apply", "-f", "-")
+	kubectl(t, "", "apply", "-f",
+		"charts/sudo-service/templates/validatingadmissionpolicybinding-requester.yaml")
+	t.Cleanup(func() {
+		_, _ = runKubectl("", "delete", "validatingadmissionpolicybinding",
+			"sudo-service-requester-validation", "--ignore-not-found")
+		_, _ = runKubectl("", "delete", "validatingadmissionpolicy",
+			"sudo-service-requester-validation", "--ignore-not-found")
+	})
+
+	rbac := fmt.Sprintf(`apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: retry-admission-writer
+  namespace: %s
+rules:
+  - apiGroups: ["sudo.andrewgarrett.dev"]
+    resources: ["sudorequests"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: retry-admission-requester
+  namespace: %s
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: retry-admission-writer
+subjects:
+  - kind: User
+    name: %s
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: retry-admission-controller
+  namespace: %s
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: retry-admission-writer
+subjects:
+  - kind: User
+    name: %s
+`, namespace, namespace, requester, namespace, controller)
+	kubectl(t, rbac, "apply", "-f", "-")
+
+	request := func(name, actor, specRequester, retryOf string) (string, error) {
+		retryField := ""
+		if retryOf != "" {
+			retryField = "  retryOfUID: " + retryOf + "\n"
+		}
+		manifest := fmt.Sprintf(`apiVersion: sudo.andrewgarrett.dev/v1alpha1
+kind: SudoRequest
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  requester: %s
+%s  reason: admission test
+  command: "true"
+`, name, namespace, specRequester, retryField)
+		return runKubectl(manifest, "--as="+actor, "create", "--dry-run=server", "-f", "-")
+	}
+
+	if out, err := request("ordinary", requester, requester, ""); err != nil {
+		t.Fatalf("ordinary requester create was rejected: %v\n%s", err, out)
+	}
+	if out, err := request("forged-retry", requester, requester, "forged-predecessor"); err == nil ||
+		!strings.Contains(out, "spec.retryOfUID is controller-owned") {
+		t.Fatalf("direct writer forged retry lineage: err=%v\n%s", err, out)
+	}
+	if out, err := request("controller-retry", controller, requester, "real-predecessor"); err != nil {
+		t.Fatalf("rendered controller identity could not create retry lineage: %v\n%s", err, out)
+	}
+}
+
 // TestIntegrationExecutorPodAdmission proves both sides of the Pod admission
 // boundary against a real apiserver: a namespace pod-writer cannot directly use
 // the cluster-admin executor SA, while the real Job controller can still create
