@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -130,6 +131,23 @@ class SudoServiceCLITest(unittest.TestCase):
             capture_output=True,
         )
 
+    def run_cli_without_site_packages(self, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                sys.executable,
+                "-S",
+                str(CLI),
+                "--url",
+                f"http://127.0.0.1:{self.server.server_port}",
+                "--token-file",
+                str(self.token_file),
+                *args,
+            ],
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+
     def write_request_file(self, contents: str, suffix: str) -> str:
         path = Path(self.tmp.name) / f"request{suffix}"
         path.write_text(contents)
@@ -215,6 +233,23 @@ class SudoServiceCLITest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(FakeSudoServiceHandler.request_bodies, [body])
+
+    def test_json_request_file_does_not_require_pyyaml_and_omits_optional_nulls(self) -> None:
+        path = self.write_request_file(
+            '{"reason":"inspect","command":"true","image":null,"env":null, '
+            '"privileges":null,"ttlSecondsAfterApproval":null}',
+            ".json",
+        )
+
+        result = self.run_cli_without_site_packages(
+            "--request-file", path, "--quiet", "--poll-interval", "0.01"
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            FakeSudoServiceHandler.request_bodies,
+            [{"reason": "inspect", "command": "true"}],
+        )
 
     def test_yaml_request_file_supports_rich_fields_and_block_command(self) -> None:
         yaml = (
@@ -342,6 +377,9 @@ class SudoServiceCLITest(unittest.TestCase):
                 "!!python/object/apply:builtins.list [[]]\n"
             ),
             "non-string-key": "reason: why\ncommand: true\n1: value\n",
+            "nested-non-string-key": (
+                "reason: why\ncommand: true\nenv:\n  - name: TEST\n    1: value\n"
+            ),
             "non-json-value": (
                 "reason: why\ncommand: true\nenv:\n"
                 "  - {name: WHEN, value: 2026-07-21}\n"

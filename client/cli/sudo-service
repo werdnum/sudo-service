@@ -13,17 +13,6 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-try:
-    import yaml
-except ModuleNotFoundError:
-    print(
-        "sudo-service: missing PyYAML; install it with "
-        "'python3 -m pip install -r client/cli/requirements.txt' from the checkout "
-        "or 'python3 -m pip install PyYAML==6.0.3' for a standalone script",
-        file=sys.stderr,
-    )
-    raise SystemExit(1)
-
 
 DEFAULT_URL = "http://sudo-service.sudo-service.svc.cluster.local"
 DEFAULT_TOKEN_FILE = "/var/run/secrets/sudo-service/token"
@@ -223,6 +212,15 @@ def load_request_file(path: str) -> dict[str, Any]:
         loaded = json.loads(text)
     except json.JSONDecodeError:
         try:
+            import yaml
+        except ModuleNotFoundError as exc:
+            raise SudoServiceError(
+                "request file is not valid JSON and YAML support requires PyYAML; "
+                "install it with 'python3 -m pip install -r client/cli/requirements.txt' "
+                "from the checkout or 'python3 -m pip install PyYAML==6.0.3' for a "
+                "standalone script"
+            ) from exc
+        try:
             loaded = yaml.safe_load(text)
         except yaml.YAMLError as exc:
             raise SudoServiceError(f"request file is not valid JSON or YAML: {exc}") from exc
@@ -231,10 +229,31 @@ def load_request_file(path: str) -> dict[str, Any]:
     return loaded
 
 
+def find_non_string_key(value: Any, path: str = "$") -> str | None:
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            if not isinstance(key, str):
+                return path
+            found = find_non_string_key(nested, f"{path}.{key}")
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for index, nested in enumerate(value):
+            found = find_non_string_key(nested, f"{path}[{index}]")
+            if found is not None:
+                return found
+    return None
+
+
 def validate_request_body(body: dict[str, Any]) -> None:
-    non_string_keys = [key for key in body if not isinstance(key, str)]
-    if non_string_keys:
-        raise SudoServiceError("request file field names must be strings")
+    non_string_key_path = find_non_string_key(body)
+    if non_string_key_path is not None:
+        raise SudoServiceError(
+            f"request file object keys must be strings (at {non_string_key_path})"
+        )
+    for field in REQUEST_FIELDS - {"reason", "command"}:
+        if body.get(field, ...) is None:
+            del body[field]
     unknown = sorted(set(body) - REQUEST_FIELDS)
     if unknown:
         raise SudoServiceError("unsupported request field(s): " + ", ".join(unknown))
