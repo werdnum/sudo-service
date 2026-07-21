@@ -90,6 +90,15 @@ metadata:
   name: sudo-service-executor-sa
   namespace: sudo-service
 ---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  # Namespace creation and the ServiceAccount controller are asynchronous. Make
+  # the ordinary-Pod control case deterministic instead of racing creation of
+  # the namespace's implicit default ServiceAccount.
+  name: default
+  namespace: sudo-service
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
