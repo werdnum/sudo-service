@@ -43,7 +43,7 @@ class FakeSudoServiceHandler(BaseHTTPRequestHandler):
         return header == expected
 
     def do_POST(self) -> None:
-        if self.path != "/requests":
+        if self.path not in {"/requests", "/requests/expired-uid/retry"}:
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         if not self.authenticated():
@@ -297,6 +297,26 @@ class SudoServiceCLITest(unittest.TestCase):
         self.assertNotEqual(too_long.returncode, 0)
         self.assertIn("exceeds Docker's 255-character limit", too_long.stderr)
         self.assertEqual(FakeSudoServiceHandler.request_bodies, [])
+
+    def test_explicit_retry_uses_retry_endpoint_and_prints_lineage_preview(self) -> None:
+        result = self.run_cli("--retry", "expired-uid", "--preview", "--quiet")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(FakeSudoServiceHandler.request_bodies, [{}])
+        self.assertIn('"retryOfUID": "expired-uid"', result.stderr)
+
+    def test_retry_rejects_new_payload_flags(self) -> None:
+        result = self.run_cli("--retry", "expired-uid", "--reason", "change it")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--retry cannot be combined with --reason", result.stderr)
+        self.assertEqual(FakeSudoServiceHandler.request_bodies, [])
+
+    def test_duplicate_response_reuses_uid_and_warns_even_when_quiet(self) -> None:
+        FakeSudoServiceHandler.create_response = {
+            "uid": "uid-1", "name": "existing", "duplicate": True,
+        }
+        result = self.run_cli("--reason", "same operation", "--quiet", "--", "true")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("equivalent request already exists", result.stderr)
 
     def test_json_request_file_submits_every_supported_structured_field(self) -> None:
         body = {

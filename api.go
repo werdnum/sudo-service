@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 
 	authv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -35,6 +36,7 @@ type APIServer struct {
 	Reconciler    *SudoRequestReconciler // wired up at start time
 	Config        *Config
 	Templates     *template.Template
+	requestMu     sync.Mutex
 }
 
 func (a *APIServer) RegisterRoutes(mux *http.ServeMux) {
@@ -42,6 +44,7 @@ func (a *APIServer) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/", a.indexHandler)
 	mux.HandleFunc("/approve", a.approveHandler)
 	mux.HandleFunc("/deny", a.denyHandler)
+	mux.HandleFunc("/resubmit", a.resubmitHandler)
 	mux.HandleFunc("/requests", a.createRequestHandler)
 	mux.HandleFunc("/requests/", a.requestSubpathHandler)
 	mux.HandleFunc("/profiles", a.profilesHandler)
@@ -81,6 +84,9 @@ type requestStatusResponse struct {
 	Name                      string                `json:"name"`
 	Phase                     string                `json:"phase"`
 	Requester                 string                `json:"requester"`
+	SubmittedBy               string                `json:"submittedBy,omitempty"`
+	RetryOfUID                string                `json:"retryOfUID,omitempty"`
+	SupersededByUID           string                `json:"supersededByUID,omitempty"`
 	Command                   string                `json:"command"`
 	Image                     string                `json:"image"`
 	Profile                   string                `json:"profile,omitempty"`
@@ -151,6 +157,7 @@ func (a *APIServer) createRequestHandler(w http.ResponseWriter, r *http.Request)
 		},
 		Spec: SudoRequestSpec{
 			Requester:               identity.Username,
+			SubmittedBy:             identity.Username,
 			Reason:                  body.Reason,
 			Command:                 body.Command,
 			Image:                   body.Image,
@@ -167,8 +174,7 @@ func (a *APIServer) createRequestHandler(w http.ResponseWriter, r *http.Request)
 			Privileges:              body.Privileges,
 		},
 	}
-	profile, resolvedImage, warnings, err := resolveAndPreflight(sr)
-	if err != nil {
+	if _, _, _, err = resolveAndPreflight(sr); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -176,16 +182,34 @@ func (a *APIServer) createRequestHandler(w http.ResponseWriter, r *http.Request)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	a.requestMu.Lock()
+	defer a.requestMu.Unlock()
+	if duplicate, err := a.findPendingDuplicate(r.Context(), sr); err != nil {
+		http.Error(w, "check pending duplicates: "+err.Error(), http.StatusInternalServerError)
+		return
+	} else if duplicate != nil {
+		writeCreateResponse(w, duplicate, true)
+		return
+	}
 	if err := a.Client.Create(r.Context(), sr); err != nil {
 		http.Error(w, "create: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	writeCreateResponse(w, sr, false)
+}
+
+func writeCreateResponse(w http.ResponseWriter, sr *SudoRequest, duplicate bool) {
 	w.Header().Set("Content-Type", "application/json")
 	response := map[string]any{
-		"uid": string(sr.UID), "name": sr.Name, "image": resolvedImage,
+		"uid": string(sr.UID), "name": sr.Name, "duplicate": duplicate,
+		"retryOfUID": sr.Spec.RetryOfUID, "image": imageFor(sr),
 	}
-	if profile != nil {
-		response["profile"] = profile.Name
+	if profile := profileFor(sr); profile != "" {
+		response["profile"] = profile
+	}
+	warnings := sr.Status.PreflightWarnings
+	if len(warnings) == 0 {
+		_, _, warnings, _ = resolveAndPreflight(sr)
 	}
 	if len(warnings) > 0 {
 		response["warnings"] = warnings
@@ -222,7 +246,8 @@ func (a *APIServer) profilesHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// requestSubpathHandler routes GET /requests/{uid}, /requests/{uid}/output, /requests/{uid}/events.
+// requestSubpathHandler routes requester-owned status/output/events reads and
+// explicit POST /requests/{uid}/retry resubmissions.
 func (a *APIServer) requestSubpathHandler(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/requests/")
 	parts := strings.SplitN(rest, "/", 2)
@@ -255,6 +280,8 @@ func (a *APIServer) requestSubpathHandler(w http.ResponseWriter, r *http.Request
 	switch subpath {
 	case "":
 		a.serveStatus(w, sr)
+	case "retry":
+		a.retryRequester(w, r, sr, identity)
 	case "output":
 		a.serveOutput(w, r, sr)
 	case "events":
@@ -270,6 +297,9 @@ func (a *APIServer) serveStatus(w http.ResponseWriter, sr *SudoRequest) {
 		Name:                      sr.Name,
 		Phase:                     sr.Status.Phase,
 		Requester:                 sr.Spec.Requester,
+		SubmittedBy:               submittedByFor(sr),
+		RetryOfUID:                sr.Spec.RetryOfUID,
+		SupersededByUID:           sr.Status.SupersededByUID,
 		Command:                   sr.Spec.Command,
 		Image:                     imageFor(sr),
 		Profile:                   profileFor(sr),
@@ -447,6 +477,11 @@ type approveView struct {
 	UID                     string
 	Token                   string
 	Requester               string
+	SubmittedBy             string
+	RetryOfUID              string
+	SupersededByUID         string
+	Phase                   string
+	CanResubmit             bool
 	Reason                  string
 	Command                 string
 	Image                   string
@@ -540,6 +575,11 @@ func (a *APIServer) renderApprovePage(w http.ResponseWriter, r *http.Request, cl
 		view.Error = err.Error()
 	} else {
 		view.Requester = sr.Spec.Requester
+		view.SubmittedBy = submittedByFor(sr)
+		view.RetryOfUID = sr.Spec.RetryOfUID
+		view.SupersededByUID = sr.Status.SupersededByUID
+		view.Phase = sr.Status.Phase
+		view.CanResubmit = adminRetryable(sr.Status.Phase) && sr.Status.SupersededByUID == ""
 		view.Reason = sr.Spec.Reason
 		view.Command = sr.Spec.Command
 		view.Image = imageFor(sr)
@@ -568,6 +608,56 @@ func (a *APIServer) renderApprovePage(w http.ResponseWriter, r *http.Request, cl
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = a.Templates.ExecuteTemplate(w, "approve.html", view)
+}
+
+func (a *APIServer) resubmitHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	claims, err := a.authenticateHuman(r)
+	if err != nil {
+		http.Error(w, "unauthorized: "+err.Error(), http.StatusUnauthorized)
+		return
+	}
+	a.resubmitHandlerWithClaims(w, r, claims)
+}
+
+func (a *APIServer) resubmitHandlerWithClaims(w http.ResponseWriter, r *http.Request, claims *HumanClaims) {
+	if !claims.IsInGroup(a.Config.AdminGroup) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+	if err := validateCSRF(r); err != nil {
+		http.Error(w, "forbidden: "+err.Error(), http.StatusForbidden)
+		return
+	}
+	source, err := a.findByUID(r.Context(), types.UID(r.Form.Get("id")))
+	if err != nil {
+		http.Error(w, "source: "+err.Error(), http.StatusNotFound)
+		return
+	}
+	actor := claims.PreferredUsername
+	if actor == "" {
+		actor = claims.Subject
+	}
+	a.requestMu.Lock()
+	successor, _, retryErr := a.retryRequest(r.Context(), source, actor, true)
+	a.requestMu.Unlock()
+	if retryErr != nil {
+		http.Error(w, "resubmit: "+retryErr.Error(), http.StatusConflict)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_ = a.Templates.ExecuteTemplate(w, "result.html", resultView{
+		Title: "Resubmitted", Message: "A new request was created for explicit review.",
+		UID: string(successor.UID), Variant: "success",
+		User: claims.PreferredUsername, UserEmail: claims.Email,
+	})
 }
 
 func (a *APIServer) handleApprovePost(w http.ResponseWriter, r *http.Request, claims *HumanClaims) {

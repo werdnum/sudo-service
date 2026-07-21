@@ -397,6 +397,12 @@ func (r *SudoRequestReconciler) deliverApprovalNotification(ctx context.Context,
 	for _, warning := range sr.Status.PreflightWarnings {
 		body += "\npreflight warning: " + warning
 	}
+	if sr.Spec.RetryOfUID != "" {
+		body += "\nretry of: " + sr.Spec.RetryOfUID
+	}
+	if actor := submittedByFor(sr); actor != sr.Spec.Requester {
+		body += "\nresubmitted by: " + actor
+	}
 	if extras := specExtrasText(sr, true); extras != "" {
 		body += "\n" + extras
 	}

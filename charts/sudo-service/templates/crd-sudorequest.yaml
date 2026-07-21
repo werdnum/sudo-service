@@ -47,6 +47,16 @@ spec:
                     !(has(self.profile) && self.profile != '' &&
                       has(self.image) && self.image != '')
                   message: profile and image are mutually exclusive
+                - rule: self.requester == oldSelf.requester
+                  message: requester is immutable
+                - rule: >-
+                    has(self.submittedBy) == has(oldSelf.submittedBy) &&
+                    (!has(self.submittedBy) || self.submittedBy == oldSelf.submittedBy)
+                  message: submittedBy is immutable
+                - rule: >-
+                    has(self.retryOfUID) == has(oldSelf.retryOfUID) &&
+                    (!has(self.retryOfUID) || self.retryOfUID == oldSelf.retryOfUID)
+                  message: retryOfUID is immutable
               properties:
                 requester:
                   type: string
@@ -54,6 +64,15 @@ spec:
                     Logical caller identity. Enforced server-side by a
                     ValidatingAdmissionPolicy against request.userInfo.username,
                     so this cannot be spoofed across SAs on direct CRD writes.
+                submittedBy:
+                  type: string
+                  description: >-
+                    Authenticated actor who submitted this request. Equals requester for
+                    ordinary submissions; a verified administrator is recorded for an
+                    administrator-initiated resubmission.
+                retryOfUID:
+                  type: string
+                  description: Immutable UID of the explicitly cloned predecessor.
                 reason:
                   type: string
                   description: Free-text shown to the human reviewer.
@@ -182,6 +201,9 @@ spec:
                   description: >-
                     Conservative static warnings recorded before approval. Advisory
                     only; they do not claim runtime certainty.
+                supersededByUID:
+                  type: string
+                  description: Controller-owned UID of the explicit successor request.
                 exitCode: {type: integer, format: int32}
                 outputSecretRef:
                   type: string

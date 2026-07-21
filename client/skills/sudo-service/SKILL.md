@@ -237,6 +237,13 @@ truncation and byte counts on stderr without changing command output on stdout.
   verbatim. **Do NOT auto-retry** — address the reviewer's concern or ask
   the user how to proceed.
 - **`Expired`**: nobody approved within an hour. Surface that.
+	If the same unchanged action is still required and the user asked you to
+	continue, explicitly run `sudo-service --retry "$REQUEST_UID"`. This creates a
+	fresh approval with immutable lineage; it is not an automatic retry.
+
+The service deduplicates semantically equivalent active requests for the same
+requester and may return the existing UID. Treat that as the active request rather
+than submitting again. It does not reveal cross-requester matches.
 
 ## Richer jobs: mounts, other namespaces, big payloads
 
