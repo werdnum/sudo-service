@@ -225,6 +225,55 @@ spec:
                     cached here. A review aid only — never a substitute for the
                     human reviewer reading the command. Empty when the summarizer
                     is disabled or generation failed.
+                permissionAssessment:
+                  type: object
+                  # Keep this structural schema compatible with Kubernetes:
+                  # declared properties cannot be combined with
+                  # additionalProperties: false. Strict JSON decoding in the
+                  # summarizer rejects unknown model fields.
+                  description: >-
+                    Optional versioned, structured statement of what pressing
+                    Approve permits. The raw command and effective Pod spec remain
+                    ground truth. Empty when generation is disabled or fails.
+                  required: [request, effects, schemaVersion, promptVersion, model, generatedAt]
+                  properties:
+                    request:
+                      type: string
+                      minLength: 1
+                    effects:
+                      type: array
+                      minItems: 1
+                      # Kubernetes rejects uniqueItems on CRDs because its
+                      # validation cost is quadratic. Go validation rejects
+                      # duplicate effects before this status is persisted.
+                      items:
+                        type: string
+                        enum:
+                          - READ_ONLY
+                          - CHANGES_CLUSTER
+                          - CREATES_RESOURCE
+                          - RESTARTS_WORKLOAD
+                          - DELETES_RESOURCE
+                          - EXPORTS_DATA
+                          - READS_SECRET
+                          - USES_CREDENTIALS
+                          - EXTERNAL_EGRESS
+                          - HOST_ACCESS
+                          - SECURITY_CONFIG
+                          - BROAD_SCOPE
+                          - CLEANUP_INCLUDED
+                          - NON_DEFAULT_IMAGE
+                    schemaVersion: {type: string}
+                    promptVersion: {type: string}
+                    model: {type: string}
+                    generatedAt: {type: string, format: date-time}
+                permissionAssessmentState:
+                  type: string
+                  enum: [Pending, Generated, Failed]
+                  description: >-
+                    Best-effort model generation state, independent of approval
+                    and notification delivery. Empty on older records or when
+                    generation is disabled.
                 executorJobName:
                   type: string
                   description: >-

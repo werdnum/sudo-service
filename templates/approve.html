@@ -40,12 +40,18 @@
         </div>
         {{end}}
 
-        {{if .Summary}}
+        {{if .PermissionRequest}}
         <div style="background: #eff6ff; border: 1px solid #bfdbfe; padding: 0.75rem 1rem; border-radius: 0.375rem; margin: 1.5rem 0; font-size: 0.875rem;">
-            <div style="font-weight: 600; color: var(--text-muted); text-transform: uppercase; font-size: 0.75rem; letter-spacing: 0.03em; margin-bottom: 0.5rem;">AI review aid</div>
-            <div style="white-space: pre-wrap; line-height: 1.5;">{{.Summary}}</div>
-            <div style="color: var(--text-muted); font-size: 0.75rem; margin-top: 0.5rem;">Machine-generated; a review aid only. Read the command yourself before approving.</div>
+            <div style="font-weight: 600; color: var(--text-muted); text-transform: uppercase; font-size: 0.75rem; letter-spacing: 0.03em; margin-bottom: 0.5rem;">Permission requested</div>
+            <div style="line-height: 1.5; font-size: 1rem;">{{.PermissionRequest}}</div>
+            {{if .PermissionEffects}}<div style="display: flex; flex-wrap: wrap; gap: 0.375rem; margin-top: 0.75rem;">{{range .PermissionEffects}}<span style="display: inline-block; background: #dbeafe; border: 1px solid #93c5fd; border-radius: 999px; padding: 0.125rem 0.5rem; font-size: 0.6875rem; font-weight: 600; letter-spacing: 0.02em;">{{.}}</span>{{end}}</div>{{end}}
+            <details style="color: var(--text-muted); font-size: 0.75rem; margin-top: 0.75rem;"><summary>Assessment metadata</summary><div style="margin-top: 0.25rem;">Model {{.AssessmentModel}}; prompt {{.AssessmentPromptVersion}}; schema {{.AssessmentSchemaVersion}}. Machine-generated; verify against the command and Pod spec below.</div></details>
         </div>
+        {{else if .Summary}}
+        <details style="margin: 1.5rem 0; font-size: 0.875rem;">
+            <summary style="cursor: pointer; color: var(--text-muted);">Legacy AI review aid</summary>
+            <div style="white-space: pre-wrap; line-height: 1.5; margin-top: 0.5rem;">{{.Summary}}</div>
+        </details>
         {{end}}
 
         {{if .PodTemplate}}
@@ -56,9 +62,8 @@
         </details>
         {{end}}
 
-        <div style="background: #fff7d6; border: 1px solid #d6b400; padding: 0.75rem; border-radius: 0.375rem; margin: 1.5rem 0; font-size: 0.875rem;">
-            {{if .Extras.ClusterAdmin}}This command runs under <strong>cluster-admin</strong>.{{else}}This command runs in namespace <strong>{{.Extras.Namespace}}</strong> under its default ServiceAccount, with access to whatever it mounts.{{end}}
-            Confirm the command, image{{if .Extras.Mounts}}, mounts{{end}} <em>and</em> {{if .Stdin}}stdin payload {{end}}are what you expect.
+        <div style="color: var(--text-muted); margin: 1.5rem 0; font-size: 0.8125rem;">
+            Execution identity: {{if .Extras.ClusterAdmin}}<strong>cluster-admin</strong>{{else}}default ServiceAccount in <strong>{{.Extras.Namespace}}</strong>{{end}}. The command and effective Pod spec are ground truth.
         </div>
 
         <div style="display: flex; gap: 1rem; margin-top: 2rem; flex-wrap: wrap;">

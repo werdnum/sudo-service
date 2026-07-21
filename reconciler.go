@@ -34,8 +34,8 @@ var errApprovalTokenExpired = errors.New("approval token expired")
 
 // SudoRequestReconciler drives the state machine:
 //
-//	(no status)  -> Pending  (persist token and review aid)
-//	Pending      -> Pending  (deliver the persisted approval notification)
+//	(no status)  -> Pending  (persist approvable state)
+//	Pending      -> Pending  (generate optional review aid, then notify)
 //	Pending      -> Expired  (after 1h)
 //	Approved     -> Executed (create Job, capture output, write Secret)
 //	Approved     -> Failed   (job didn't finish or pod errored)
@@ -48,7 +48,7 @@ type SudoRequestReconciler struct {
 	APIReader     client.Reader
 	Scheme        *runtime.Scheme
 	Pushover      *PushoverClient
-	Summarizer    *Summarizer // optional; nil when AI summaries are disabled
+	Summarizer    *Summarizer // optional; nil when AI assessments are disabled
 	Broadcaster   *Broadcaster
 	Recorder      record.EventRecorder
 	PublicBaseURL string
@@ -125,7 +125,6 @@ func (r *SudoRequestReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 }
 
 func (r *SudoRequestReconciler) handleNew(ctx context.Context, sr *SudoRequest) (ctrl.Result, error) {
-	log := ctrl.LoggerFrom(ctx)
 	profile, resolvedImage, warnings, profileErr := resolveAndPreflight(sr)
 	if profileErr == nil {
 		sr.Status.ResolvedImage = resolvedImage
@@ -221,35 +220,6 @@ func (r *SudoRequestReconciler) handleNew(ctx context.Context, sr *SudoRequest) 
 
 	expiry := metav1.NewTime(time.Now().Add(ApprovalTokenTTL * time.Second))
 
-	// Best-effort AI review aid. Generate it once while initializing Pending,
-	// before delivery begins. Notification retries therefore reuse the cached
-	// text and cannot couple model availability to Pushover availability.
-	// Optional and never load-bearing: a failure logs and proceeds with no
-	// summary, and a short timeout bounds it.
-	var summary string
-	if r.Summarizer != nil {
-		// Give the AI the ground-truth pod spec to review (not just the curated
-		// summary), but redact literal env values — the summary goes to a
-		// third-party endpoint, so credentials in spec.env must not leave the
-		// cluster. The human push and approve page still show the raw values.
-		aiContext := ""
-		if hasSpecExtras(sr) {
-			if tmpl, err := displayPodTemplate(sr, true); err == nil {
-				aiContext = tmpl
-			} else {
-				aiContext = specExtrasText(sr, true)
-			}
-		}
-		sumCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		s, err := r.Summarizer.Summarize(sumCtx, sr.Spec.Command, imageFor(sr), sr.Spec.Reason, aiContext)
-		cancel()
-		if err != nil {
-			log.Error(err, "AI command summary failed; continuing without one")
-		} else {
-			summary = s
-		}
-	}
-
 	// Store the plaintext token before status references it. If the subsequent
 	// status update fails this Secret is harmless (and owner-GC'd): no external
 	// notification has been sent and no request is approvable with its token.
@@ -277,7 +247,9 @@ func (r *SudoRequestReconciler) handleNew(ctx context.Context, sr *SudoRequest) 
 	sr.Status.ApprovalTokenExpiresAt = &expiry
 	sr.Status.ApprovalTokenSecretName = secret.Name
 	sr.Status.NotificationState = NotificationPending
-	sr.Status.Summary = summary
+	if r.Summarizer != nil {
+		sr.Status.PermissionAssessmentState = PermissionAssessmentPending
+	}
 
 	if err := r.Status().Update(ctx, sr); err != nil {
 		// The update result is ambiguous: the apiserver may have committed the
@@ -328,7 +300,27 @@ func (r *SudoRequestReconciler) handlePending(ctx context.Context, sr *SudoReque
 		return ctrl.Result{}, nil
 	}
 
-	// Empty means an older controller already delivered the notification before
+	// Pending was persisted before optional model work, so the approval page is
+	// usable even while generation is slow. Generate at most once before sending
+	// the notification; failure is recorded but does not block delivery.
+	if sr.Status.PermissionAssessmentState == PermissionAssessmentPending {
+		assessment, err := r.generatePermissionAssessment(ctx, sr)
+		state := PermissionAssessmentGenerated
+		if err != nil {
+			ctrl.LoggerFrom(ctx).Error(err, "AI permission assessment failed; continuing without one")
+			state = PermissionAssessmentFailed
+		}
+		if updateErr := r.updateStatus(ctx, sr, func(current *SudoRequest) {
+			current.Status.PermissionAssessment = assessment
+			current.Status.PermissionAssessmentState = state
+		}); updateErr != nil {
+			return ctrl.Result{}, fmt.Errorf("record permission assessment: %w", updateErr)
+		}
+		sr.Status.PermissionAssessment = assessment
+		sr.Status.PermissionAssessmentState = state
+	}
+
+	// Empty notification state means an older controller already delivered the notification before
 	// writing Pending. Only the explicit Pending marker opts into this lifecycle.
 	if sr.Status.NotificationState == NotificationPending {
 		if sr.Status.NotificationNextAttemptAt != nil {
@@ -340,6 +332,26 @@ func (r *SudoRequestReconciler) handlePending(ctx context.Context, sr *SudoReque
 	}
 	// Requeue at expiry.
 	return ctrl.Result{RequeueAfter: PendingRequestTTL*time.Second - age + time.Second}, nil
+}
+
+func (r *SudoRequestReconciler) generatePermissionAssessment(ctx context.Context, sr *SudoRequest) (*PermissionAssessment, error) {
+	if r.Summarizer == nil {
+		return nil, nil
+	}
+	// Give the model the ground-truth Pod spec, but redact literal env values
+	// because this context leaves the cluster. Human review surfaces keep raw
+	// values as ground truth.
+	aiContext := ""
+	if hasSpecExtras(sr) {
+		if tmpl, err := displayPodTemplate(sr, true); err == nil {
+			aiContext = tmpl
+		} else {
+			aiContext = specExtrasText(sr, true)
+		}
+	}
+	summaryCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	return r.Summarizer.Summarize(summaryCtx, sr.Spec.Command, imageFor(sr), sr.Spec.Reason, aiContext)
 }
 
 func (r *SudoRequestReconciler) deliverApprovalNotification(ctx context.Context, sr *SudoRequest) (ctrl.Result, error) {
@@ -366,8 +378,19 @@ func (r *SudoRequestReconciler) deliverApprovalNotification(ctx context.Context,
 	q.Set("t", token)
 	u.RawQuery = q.Encode()
 
-	title := fmt.Sprintf("sudo: %s wants to run %s", sr.Spec.Requester, truncate(sr.Spec.Command, 80))
-	body := fmt.Sprintf("reason: %s\ncommand: %s\nimage: %s", sr.Spec.Reason, sr.Spec.Command, imageFor(sr))
+	title := fmt.Sprintf("sudo: permission requested by %s", sr.Spec.Requester)
+	body := ""
+	if sr.Status.PermissionAssessment != nil {
+		body = "Permission requested: " + sr.Status.PermissionAssessment.Request + "\n"
+		if len(sr.Status.PermissionAssessment.Effects) > 0 {
+			body += "Effects: " + formatPermissionEffects(sr.Status.PermissionAssessment.Effects) + "\n"
+		}
+	} else if sr.Status.Summary != "" {
+		// Rolling-upgrade fallback for Pending records written by an older
+		// controller. New records never write the free-form summary field.
+		body = "Review aid: " + sr.Status.Summary + "\n"
+	}
+	body += fmt.Sprintf("reason: %s\ncommand: %s\nimage: %s", sr.Spec.Reason, sr.Spec.Command, imageFor(sr))
 	if profile := profileFor(sr); profile != "" {
 		body += "\nprofile: " + profile
 	}

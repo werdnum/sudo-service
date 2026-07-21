@@ -40,14 +40,17 @@ The Secrets the controller and its oauth2-proxy sidecar consume
 chart — they are cluster-specific and expected to be provided out-of-band
 (e.g. as SealedSecrets). The chart only references them by name.
 
-### AI command summaries (optional)
+### AI permission assessments (optional)
 
 When an OpenAI-compatible API key is configured, the controller generates a
-concise, security-oriented **review aid** for each request as it enters the
-`Pending` phase, caches it on the `SudoRequest` (`status.summary`), and shows it
-on the approve page and in the requester status API. It is a review aid only —
-explicitly **not** a substitute for the human reading the command — and the
-whole feature is best-effort: a summarizer error never blocks an approval.
+short, factual **permission request** for each request as it enters the
+`Pending` phase. The versioned structured result is cached in
+`status.permissionAssessment` and the same sentence appears on the approval
+page and Pushover notification. It describes what pressing Approve permits; it
+does not infer prior authorization, score risk, or recommend a decision. The raw
+command and effective Pod spec remain ground truth. Generation is best-effort:
+a model or validation error leaves the assessment absent and never blocks an
+approval. `status.summary` remains readable for rolling upgrades and old records.
 
 Enable it by setting `openai.enabled=true` and providing an API key Secret
 (`openai.secretName`, default `sudo-service-openai`, key `api-key`). Point

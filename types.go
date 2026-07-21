@@ -20,6 +20,10 @@ const (
 	NotificationPending   = "Pending"
 	NotificationDelivered = "Delivered"
 
+	PermissionAssessmentPending   = "Pending"
+	PermissionAssessmentGenerated = "Generated"
+	PermissionAssessmentFailed    = "Failed"
+
 	// Namespace and resource constants.
 	ControllerNamespace = "sudo-service"
 	ControllerSAName    = "sudo-service-controller-sa"
@@ -229,6 +233,15 @@ type SudoRequestStatus struct {
 	// the human reviewer reading the command.
 	Summary string `json:"summary,omitempty"`
 
+	// PermissionAssessment is the optional, structured review aid generated once
+	// when the request enters Pending. It answers only what pressing Approve
+	// permits; the command and effective Pod spec remain the ground truth. The
+	// legacy Summary field is retained for records written by older controllers.
+	PermissionAssessment *PermissionAssessment `json:"permissionAssessment,omitempty"`
+	// PermissionAssessmentState separates optional model generation from the
+	// approval and notification lifecycles. Empty identifies older records.
+	PermissionAssessmentState string `json:"permissionAssessmentState,omitempty"`
+
 	// ExecutorJobName is the controller-minted, unguessable name of the executor
 	// Job. Like StdinSecretName it is a random token (not derived from the request
 	// UID), recorded before the Job is created so a requester who can create Jobs
@@ -263,6 +276,39 @@ type SudoRequestStatus struct {
 	// ApprovalTokenSecretName points at the controller-owned Secret containing
 	// the plaintext token needed to retry the same notification link.
 	ApprovalTokenSecretName string `json:"approvalTokenSecretName,omitempty"`
+}
+
+// PermissionEffect is a closed, factual vocabulary used for compact badges on
+// approval surfaces. Values are validated after every model response; arbitrary
+// model-produced labels are never persisted or rendered.
+type PermissionEffect string
+
+const (
+	EffectReadOnly         PermissionEffect = "READ_ONLY"
+	EffectChangesCluster   PermissionEffect = "CHANGES_CLUSTER"
+	EffectCreatesResource  PermissionEffect = "CREATES_RESOURCE"
+	EffectRestartsWorkload PermissionEffect = "RESTARTS_WORKLOAD"
+	EffectDeletesResource  PermissionEffect = "DELETES_RESOURCE"
+	EffectExportsData      PermissionEffect = "EXPORTS_DATA"
+	EffectReadsSecret      PermissionEffect = "READS_SECRET"
+	EffectUsesCredentials  PermissionEffect = "USES_CREDENTIALS"
+	EffectExternalEgress   PermissionEffect = "EXTERNAL_EGRESS"
+	EffectHostAccess       PermissionEffect = "HOST_ACCESS"
+	EffectSecurityConfig   PermissionEffect = "SECURITY_CONFIG"
+	EffectBroadScope       PermissionEffect = "BROAD_SCOPE"
+	EffectCleanupIncluded  PermissionEffect = "CLEANUP_INCLUDED"
+	EffectNonDefaultImage  PermissionEffect = "NON_DEFAULT_IMAGE"
+)
+
+// PermissionAssessment is versioned independently of the CRD so prompt and
+// schema changes remain attributable in the audit record.
+type PermissionAssessment struct {
+	Request       string             `json:"request"`
+	Effects       []PermissionEffect `json:"effects"`
+	SchemaVersion string             `json:"schemaVersion"`
+	PromptVersion string             `json:"promptVersion"`
+	Model         string             `json:"model"`
+	GeneratedAt   metav1.Time        `json:"generatedAt"`
 }
 
 // SudoRequest is the CRD root object.
@@ -360,6 +406,13 @@ func (in *SudoRequestStatus) DeepCopyInto(out *SudoRequestStatus) {
 	*out = *in
 	if in.PreflightWarnings != nil {
 		out.PreflightWarnings = append([]string(nil), in.PreflightWarnings...)
+	}
+	if in.PermissionAssessment != nil {
+		out.PermissionAssessment = new(PermissionAssessment)
+		*out.PermissionAssessment = *in.PermissionAssessment
+		if in.PermissionAssessment.Effects != nil {
+			out.PermissionAssessment.Effects = append([]PermissionEffect(nil), in.PermissionAssessment.Effects...)
+		}
 	}
 	if in.ApprovedAt != nil {
 		t := *in.ApprovedAt
