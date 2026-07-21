@@ -125,7 +125,6 @@ func (r *SudoRequestReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 }
 
 func (r *SudoRequestReconciler) handleNew(ctx context.Context, sr *SudoRequest) (ctrl.Result, error) {
-	log := ctrl.LoggerFrom(ctx)
 	profile, resolvedImage, warnings, profileErr := resolveAndPreflight(sr)
 	if profileErr == nil {
 		sr.Status.ResolvedImage = resolvedImage
