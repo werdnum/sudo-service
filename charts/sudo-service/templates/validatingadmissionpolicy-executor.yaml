@@ -53,9 +53,16 @@ spec:
         has(object.spec.backoffLimit) && object.spec.backoffLimit == 0
       message: "Job backoffLimit must be 0 (no retries)"
     - expression: >-
-        has(object.spec.ttlSecondsAfterFinished) &&
-        object.spec.ttlSecondsAfterFinished <= 3600
-      message: "Job must set ttlSecondsAfterFinished <= 3600 (1h)"
+        has(object.metadata.labels) &&
+        ((!("sudo.andrewgarrett.dev/execution-mode" in object.metadata.labels) &&
+          has(object.spec.ttlSecondsAfterFinished) &&
+          object.spec.ttlSecondsAfterFinished <= 3600) ||
+         (object.metadata.labels["sudo.andrewgarrett.dev/execution-mode"] == "managedJob" &&
+          !has(object.spec.ttlSecondsAfterFinished)) ||
+         (object.metadata.labels["sudo.andrewgarrett.dev/execution-mode"] == "foreground" &&
+          has(object.spec.ttlSecondsAfterFinished) &&
+          object.spec.ttlSecondsAfterFinished <= 3600))
+      message: "managedJob must defer TTL cleanup until result capture; foreground and legacy Jobs must set ttlSecondsAfterFinished <= 3600"
     - expression: >-
         has(object.spec.activeDeadlineSeconds) &&
         object.spec.activeDeadlineSeconds > 0 &&

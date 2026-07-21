@@ -215,3 +215,90 @@ func TestManagedJobForegroundDeleteUsesUIDPrecondition(t *testing.T) {
 		t.Fatal("delete interceptor was not called")
 	}
 }
+
+func assertManagedDeleteOptions(t *testing.T, job *batchv1.Job, opts []client.DeleteOption) {
+	t.Helper()
+	var options client.DeleteOptions
+	options.ApplyOptions(opts)
+	if options.PropagationPolicy == nil || *options.PropagationPolicy != metav1.DeletePropagationForeground {
+		t.Fatalf("propagation=%v, want Foreground", options.PropagationPolicy)
+	}
+	if options.Preconditions == nil || options.Preconditions.UID == nil || *options.Preconditions.UID != job.UID {
+		t.Fatalf("preconditions=%+v, want UID %s", options.Preconditions, job.UID)
+	}
+}
+
+func TestManagedJobStdinRollbackUsesUIDPrecondition(t *testing.T) {
+	ctx := context.Background()
+	sr := managedLifecycleRequest("")
+	sr.Spec.Stdin = "payload"
+	sr.Status.ExecutorJobUID = ""
+	sr.Status.StdinSecretName = "sudo-stdin-managed"
+	scheme := raceTestScheme(t)
+	base := fake.NewClientBuilder().WithScheme(scheme).Build()
+	secretErr := errors.New("stdin Secret unavailable")
+	checked := false
+	cl := interceptor.NewClient(base, interceptor.Funcs{
+		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			if job, ok := obj.(*batchv1.Job); ok {
+				job.UID = types.UID("created-job-uid")
+				return c.Create(ctx, obj, opts...)
+			}
+			if _, ok := obj.(*corev1.Secret); ok {
+				return secretErr
+			}
+			return c.Create(ctx, obj, opts...)
+		},
+		Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+			job := obj.(*batchv1.Job)
+			assertManagedDeleteOptions(t, job, opts)
+			checked = true
+			return c.Delete(ctx, obj, opts...)
+		},
+	})
+	r := &SudoRequestReconciler{Client: cl, APIReader: base, Scheme: scheme}
+	if _, err := r.findOrCreateJob(ctx, sr); !errors.Is(err, secretErr) {
+		t.Fatalf("findOrCreateJob error=%v, want %v", err, secretErr)
+	}
+	if !checked {
+		t.Fatal("managed stdin rollback did not delete the created Job")
+	}
+}
+
+func TestManagedJobUIDStatusRollbackUsesUIDPrecondition(t *testing.T) {
+	ctx := context.Background()
+	sr := managedLifecycleRequest("")
+	sr.Status.ExecutorJobUID = ""
+	scheme := raceTestScheme(t)
+	base := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&SudoRequest{}).WithObjects(sr).Build()
+	statusErr := errors.New("status unavailable")
+	checked := false
+	cl := interceptor.NewClient(base, interceptor.Funcs{
+		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			if job, ok := obj.(*batchv1.Job); ok {
+				job.UID = types.UID("created-job-uid")
+			}
+			return c.Create(ctx, obj, opts...)
+		},
+		SubResourceUpdate: func(context.Context, client.Client, string, client.Object, ...client.SubResourceUpdateOption) error {
+			return statusErr
+		},
+		Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+			job := obj.(*batchv1.Job)
+			assertManagedDeleteOptions(t, job, opts)
+			checked = true
+			return c.Delete(ctx, obj, opts...)
+		},
+	})
+	r := &SudoRequestReconciler{
+		Client: cl, APIReader: base, Scheme: scheme,
+		Recorder: record.NewFakeRecorder(32), Broadcaster: NewBroadcaster(),
+	}
+	if _, err := r.handleApproved(ctx, sr.DeepCopy()); !errors.Is(err, statusErr) {
+		t.Fatalf("handleApproved error=%v, want %v", err, statusErr)
+	}
+	if !checked {
+		t.Fatal("managed UID-status rollback did not delete the created Job")
+	}
+}

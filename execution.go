@@ -23,6 +23,8 @@ const (
 	JobLifecycleResultCaptured   = "ResultCaptured"
 	JobLifecycleCleanupRequested = "CleanupRequested"
 	JobLifecycleCleaned          = "Cleaned"
+
+	ExecutionModeLabelKey = "sudo.andrewgarrett.dev/execution-mode"
 )
 
 type effectiveExecutionPolicy struct {

@@ -276,7 +276,7 @@ func (r *SudoRequestReconciler) findOrCreateJob(ctx context.Context, sr *SudoReq
 		// permanently fail a request that hit only a transient stdin-Secret error.
 		// (A foreign pre-existing Secret yields errForeignChildObject, which is
 		// permanent — the rollback then just cleans up our orphaned Job.)
-		if delErr := r.stopJob(ctx, &job); delErr != nil {
+		if delErr := r.stopExecutorJob(ctx, sr, &job); delErr != nil {
 			return nil, fmt.Errorf("roll back job after stdin secret error (%v): %w", err, delErr)
 		}
 		return nil, err
@@ -372,19 +372,20 @@ func buildExecutorJob(sr *SudoRequest, ns, name string, extras *podExtras) batch
 		volumes = append(volumes, scratchVolume(homeVolumeName))
 	}
 
+	labels := executorLabels()
+	labels[ExecutionModeLabelKey] = execution.Mode
 	job := batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: ns,
-			Labels:    executorLabels(),
+			Labels:    labels,
 		},
 		Spec: batchv1.JobSpec{
 			BackoffLimit:            &one,
 			ActiveDeadlineSeconds:   &deadline,
-			TTLSecondsAfterFinished: &jobTTL,
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: executorLabels(),
+					Labels: labels,
 				},
 				Spec: corev1.PodSpec{
 					RestartPolicy:                corev1.RestartPolicyNever,
@@ -409,6 +410,16 @@ func buildExecutorJob(sr *SudoRequest, ns, name string, extras *podExtras) batch
 			},
 		},
 	}
+	// A managed Job must remain available until its exit code and bounded output
+	// have been durably recorded. Giving it a Kubernetes finished-Job TTL would
+	// let the TTL controller delete its Pod while sudo-service is unavailable,
+	// turning a successful detached run into an unrecoverable missing-Job failure.
+	// Managed cleanup is instead driven by the request's durable lifecycle and a
+	// UID-preconditioned foreground delete. Standard Jobs retain the historical
+	// bounded TTL as a fallback capture window.
+	if execution.Mode != ExecutionModeManagedJob {
+		job.Spec.TTLSecondsAfterFinished = &jobTTL
+	}
 
 	// Cross-namespace ownerReferences are not honoured by Kubernetes GC (and the
 	// executor VAP only requires the ownerRef for same-namespace cluster-admin
@@ -418,6 +429,17 @@ func buildExecutorJob(sr *SudoRequest, ns, name string, extras *podExtras) batch
 		job.OwnerReferences = []metav1.OwnerReference{ownerRef(sr)}
 	}
 	return job
+}
+
+// stopExecutorJob uses the stronger managed lifecycle cleanup whenever the
+// request selected managedJob, including rollback paths before the Job UID has
+// been persisted to SudoRequest status. The Job object itself carries the UID
+// needed for the precondition.
+func (r *SudoRequestReconciler) stopExecutorJob(ctx context.Context, sr *SudoRequest, job *batchv1.Job) error {
+	if isManagedJob(sr) {
+		return r.stopManagedJob(ctx, job)
+	}
+	return r.stopJob(ctx, job)
 }
 
 // executorCommand renders the container command. With no stdin it is the

@@ -81,6 +81,10 @@ A controller restart at any persisted state resumes that transition rather than
 creating another Job. A stuck deletion leaves the request Approved with captured
 output intact and visible. If the controller is unavailable while a command is
 running, Kubernetes `activeDeadlineSeconds` remains the independent stop bound.
+Managed Jobs deliberately have no `ttlSecondsAfterFinished` before result
+capture: otherwise Kubernetes could delete the finished Pod during a controller
+outage and make its exit code and logs unrecoverable. The controller's durable
+cleanup state supplies the finished-Job cleanup instead.
 Deleting the SudoRequest is also finalizer-gated on foreground deletion of the
 UID-bound managed Job.
 

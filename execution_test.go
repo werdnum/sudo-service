@@ -59,6 +59,12 @@ func TestManagedJobRendersBoundedResourcesDeadlineAndGroundTruth(t *testing.T) {
 	if job.Spec.ActiveDeadlineSeconds == nil || *job.Spec.ActiveDeadlineSeconds != 5400 {
 		t.Fatalf("activeDeadlineSeconds=%v", job.Spec.ActiveDeadlineSeconds)
 	}
+	if job.Spec.TTLSecondsAfterFinished != nil {
+		t.Fatalf("managed Job TTL=%d, want nil so output survives controller outage", *job.Spec.TTLSecondsAfterFinished)
+	}
+	if got := job.Labels[ExecutionModeLabelKey]; got != ExecutionModeManagedJob {
+		t.Fatalf("execution-mode label=%q, want %q", got, ExecutionModeManagedJob)
+	}
 	for _, container := range append(job.Spec.Template.Spec.InitContainers, job.Spec.Template.Spec.Containers...) {
 		if got := container.Resources.Limits.Memory().String(); got != "2Gi" {
 			t.Errorf("container %s memory limit=%s, want 2Gi", container.Name, got)
@@ -82,6 +88,17 @@ func TestManagedJobRendersBoundedResourcesDeadlineAndGroundTruth(t *testing.T) {
 		if !strings.Contains(rendered+view.Cleanup, want) {
 			t.Errorf("managed review ground truth missing %q", want)
 		}
+	}
+}
+
+func TestForegroundJobRetainsBoundedFinishedTTL(t *testing.T) {
+	sr := srWith(SudoRequestSpec{Requester: "alice", Reason: "quick check", Command: "kubectl get pods"})
+	job := buildExecutorJob(sr, ControllerNamespace, "sudo-exec-test", mustDecodePodExtras(t, sr))
+	if job.Spec.TTLSecondsAfterFinished == nil || *job.Spec.TTLSecondsAfterFinished != DefaultPostApproval {
+		t.Fatalf("foreground Job TTL=%v, want %d", job.Spec.TTLSecondsAfterFinished, DefaultPostApproval)
+	}
+	if got := job.Labels[ExecutionModeLabelKey]; got != ExecutionModeForeground {
+		t.Fatalf("execution-mode label=%q, want %q", got, ExecutionModeForeground)
 	}
 }
 

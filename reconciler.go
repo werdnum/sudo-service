@@ -708,7 +708,7 @@ func (r *SudoRequestReconciler) handleApproved(ctx context.Context, sr *SudoRequ
 			// finds this un-recorded Job, and (cross-namespace, where we can't
 			// authenticate it) fails the request as "foreign". Deleting it gives the
 			// retry a clean create.
-			if delErr := r.stopJob(ctx, job); delErr != nil {
+			if delErr := r.stopExecutorJob(ctx, sr, job); delErr != nil {
 				log.Error(delErr, "failed to roll back executor Job after UID-record failure", "job", job.Name)
 			}
 			return ctrl.Result{}, fmt.Errorf("record executorJobUID: %w", err)
