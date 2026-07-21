@@ -407,7 +407,10 @@ type approveView struct {
 	User        string
 	UserEmail   string
 	Error       string
+	CSRFToken   string
 }
+
+const csrfCookieName = "__Host-sudo_service_csrf"
 
 // resultView backs result.html, the styled confirmation page shown after an
 // approve or deny action.
@@ -453,6 +456,12 @@ func (a *APIServer) renderApprovePage(w http.ResponseWriter, r *http.Request, cl
 	var err error
 	if token != "" {
 		sr, err = a.Reconciler.VerifyApprovalToken(r.Context(), types.UID(id), token)
+		if errors.Is(err, errApprovalTokenExpired) && claims.IsInGroup(a.Config.AdminGroup) {
+			sr, err = a.findByUID(r.Context(), types.UID(id))
+			if err == nil && sr.Status.Phase == PhasePending {
+				token = ""
+			}
+		}
 	} else if claims.IsInGroup(a.Config.AdminGroup) {
 		sr, err = a.findByUID(r.Context(), types.UID(id))
 	} else {
@@ -460,9 +469,14 @@ func (a *APIServer) renderApprovePage(w http.ResponseWriter, r *http.Request, cl
 		return
 	}
 
+	csrfToken, csrfErr := ensureCSRFCookie(w, r)
 	view := approveView{
 		UID: id, Token: token,
 		User: claims.PreferredUsername, UserEmail: claims.Email,
+		CSRFToken: csrfToken,
+	}
+	if csrfErr != nil {
+		view.Error = "could not prepare the approval form"
 	}
 	if err != nil {
 		view.Error = err.Error()
@@ -493,11 +507,17 @@ func (a *APIServer) handleApprovePost(w http.ResponseWriter, r *http.Request, cl
 	}
 	id := r.Form.Get("id")
 	token := r.Form.Get("t")
+	if err := validateCSRF(r); err != nil {
+		http.Error(w, "forbidden: "+err.Error(), http.StatusForbidden)
+		return
+	}
 
 	if token != "" {
 		if _, err := a.Reconciler.VerifyApprovalToken(r.Context(), types.UID(id), token); err != nil {
-			http.Error(w, "approval token check failed: "+err.Error(), http.StatusBadRequest)
-			return
+			if !errors.Is(err, errApprovalTokenExpired) || !claims.IsInGroup(a.Config.AdminGroup) {
+				http.Error(w, "approval token check failed: "+err.Error(), http.StatusBadRequest)
+				return
+			}
 		}
 	} else if !claims.IsInGroup(a.Config.AdminGroup) {
 		http.Error(w, "forbidden: admin required for token-less approval", http.StatusForbidden)
@@ -537,6 +557,10 @@ func (a *APIServer) denyHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
+	a.denyHandlerWithClaims(w, r, claims)
+}
+
+func (a *APIServer) denyHandlerWithClaims(w http.ResponseWriter, r *http.Request, claims *HumanClaims) {
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "bad form", http.StatusBadRequest)
 		return
@@ -544,11 +568,17 @@ func (a *APIServer) denyHandler(w http.ResponseWriter, r *http.Request) {
 	id := r.Form.Get("id")
 	token := r.Form.Get("t")
 	reason := r.Form.Get("reason")
+	if err := validateCSRF(r); err != nil {
+		http.Error(w, "forbidden: "+err.Error(), http.StatusForbidden)
+		return
+	}
 
 	if token != "" {
 		if _, err := a.Reconciler.VerifyApprovalToken(r.Context(), types.UID(id), token); err != nil {
-			http.Error(w, "approval token check failed: "+err.Error(), http.StatusBadRequest)
-			return
+			if !errors.Is(err, errApprovalTokenExpired) || !claims.IsInGroup(a.Config.AdminGroup) {
+				http.Error(w, "approval token check failed: "+err.Error(), http.StatusBadRequest)
+				return
+			}
 		}
 	} else if !claims.IsInGroup(a.Config.AdminGroup) {
 		http.Error(w, "forbidden: admin required for token-less denial", http.StatusForbidden)
@@ -572,6 +602,34 @@ func (a *APIServer) denyHandler(w http.ResponseWriter, r *http.Request) {
 		User:      claims.PreferredUsername,
 		UserEmail: claims.Email,
 	})
+}
+
+func ensureCSRFCookie(w http.ResponseWriter, r *http.Request) (string, error) {
+	if existing, err := r.Cookie(csrfCookieName); err == nil && existing.Value != "" {
+		return existing.Value, nil
+	}
+	token, err := randomToken(32)
+	if err != nil {
+		return "", err
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name: csrfCookieName, Value: token, Path: "/", Secure: true,
+		HttpOnly: true, SameSite: http.SameSiteStrictMode,
+		MaxAge: PendingRequestTTL,
+	})
+	return token, nil
+}
+
+func validateCSRF(r *http.Request) error {
+	cookie, err := r.Cookie(csrfCookieName)
+	if err != nil || cookie.Value == "" {
+		return errors.New("missing CSRF cookie")
+	}
+	formToken := r.Form.Get("csrf_token")
+	if formToken == "" || !constantTimeEqual(cookie.Value, formToken) {
+		return errors.New("invalid CSRF token")
+	}
+	return nil
 }
 
 // authenticateHuman extracts the JWT from the request and verifies it against Keycloak's JWKS.

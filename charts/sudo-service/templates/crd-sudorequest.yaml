@@ -211,9 +211,24 @@ spec:
                     created" from "created then GC'd" (in which case the request
                     is failed rather than replayed), and detects a replaced Job.
                 pushoverRequestID: {type: string}
+                notificationState:
+                  type: string
+                  enum: [Pending, Delivered]
+                  description: >-
+                    Approval-notification delivery state, independent of phase.
+                    Empty on records written by older controllers.
+                notificationAttempts: {type: integer, format: int32, minimum: 0}
+                notificationLastAttemptAt: {type: string, format: date-time}
+                notificationDeliveredAt: {type: string, format: date-time}
+                notificationLastError: {type: string}
                 approvalTokenHash:
                   type: string
                   description: >-
-                    SHA-256 hex of the one-time approval token. Plaintext token is
-                    only ever sent in the Pushbullet push URL.
+                    SHA-256 hex of the one-time approval token. Plaintext is kept
+                    in a controller-owned Secret and sent only in the Pushover URL.
                 approvalTokenExpiresAt: {type: string, format: date-time}
+                approvalTokenSecretName:
+                  type: string
+                  description: >-
+                    Controller-owned Secret containing the notification token so
+                    delivery retries reuse one persisted approval link.

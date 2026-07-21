@@ -128,6 +128,7 @@ spec:
             - --cookie-refresh=5m
             - --cookie-expire=30m
             - --cookie-secure
+            - --cookie-samesite=lax
             - --cookie-name=__Host-sudo_service_oauth2_proxy
             - --cookie-csrf-per-request
             - --session-store-type=redis

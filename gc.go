@@ -6,6 +6,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -86,10 +87,16 @@ func (g *GarbageCollector) expirePending(ctx context.Context) error {
 			continue
 		}
 		sr.Status.Phase = PhaseExpired
+		tokenSecretName := sr.Status.ApprovalTokenSecretName
 		sr.Status.ApprovalTokenHash = ""
 		sr.Status.ApprovalTokenExpiresAt = nil
+		sr.Status.ApprovalTokenSecretName = ""
 		if err := g.Status().Update(ctx, sr); err != nil {
 			continue
+		}
+		if tokenSecretName != "" {
+			secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: sr.Namespace, Name: tokenSecretName}}
+			_ = g.Delete(ctx, secret)
 		}
 		// Same fan-out as handlePending's expiry path, so any SSE client
 		// connected to /requests/{uid}/events sees the terminal transition

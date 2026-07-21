@@ -17,6 +17,9 @@ const (
 	PhaseFailed   = "Failed"
 	PhaseExpired  = "Expired"
 
+	NotificationPending   = "Pending"
+	NotificationDelivered = "Delivered"
+
 	// Namespace and resource constants.
 	ControllerNamespace = "sudo-service"
 	ControllerSAName    = "sudo-service-controller-sa"
@@ -38,8 +41,11 @@ const (
 	RequesterTokenAudience = "sudo-service.andrewgarrett.dev"
 
 	// Token TTLs.
-	ApprovalTokenTTL    = 15 * 60 // 15 minutes (seconds)
-	PendingRequestTTL   = 60 * 60 // 1 hour (seconds)
+	PendingRequestTTL = 60 * 60 // 1 hour (seconds)
+	// Approval links remain usable for the same period as the Pending request.
+	// The link is not an authorization credential: a verified admin identity is
+	// still required before the request can be viewed or acted on.
+	ApprovalTokenTTL    = PendingRequestTTL
 	OutputSecretTTL     = 60 * 60 // 1 hour (seconds)
 	ExecutorJobTTL      = 60 * 60 // 1 hour (seconds)
 	DefaultPostApproval = 3600    // ttlSecondsAfterApproval default (1 hour)
@@ -235,10 +241,22 @@ type SudoRequestStatus struct {
 	// correlation with the Pushover dashboard.
 	PushoverRequestID string `json:"pushoverRequestID,omitempty"`
 
+	// Notification delivery is tracked separately from the approval phase so a
+	// failed external call can retry without reminting approval state.
+	NotificationState         string       `json:"notificationState,omitempty"`
+	NotificationAttempts      int32        `json:"notificationAttempts,omitempty"`
+	NotificationLastAttemptAt *metav1.Time `json:"notificationLastAttemptAt,omitempty"`
+	NotificationDeliveredAt   *metav1.Time `json:"notificationDeliveredAt,omitempty"`
+	NotificationLastError     string       `json:"notificationLastError,omitempty"`
+
 	// ApprovalTokenHash is the SHA-256 hex digest of the one-time approval token.
-	// The plaintext token is only ever sent in the Pushbullet push URL.
+	// The plaintext token is stored in a controller-owned Secret and sent only
+	// in the Pushover URL.
 	ApprovalTokenHash      string       `json:"approvalTokenHash,omitempty"`
 	ApprovalTokenExpiresAt *metav1.Time `json:"approvalTokenExpiresAt,omitempty"`
+	// ApprovalTokenSecretName points at the controller-owned Secret containing
+	// the plaintext token needed to retry the same notification link.
+	ApprovalTokenSecretName string `json:"approvalTokenSecretName,omitempty"`
 }
 
 // SudoRequest is the CRD root object.
@@ -357,6 +375,14 @@ func (in *SudoRequestStatus) DeepCopyInto(out *SudoRequestStatus) {
 	if in.ApprovalTokenExpiresAt != nil {
 		t := *in.ApprovalTokenExpiresAt
 		out.ApprovalTokenExpiresAt = &t
+	}
+	if in.NotificationLastAttemptAt != nil {
+		t := *in.NotificationLastAttemptAt
+		out.NotificationLastAttemptAt = &t
+	}
+	if in.NotificationDeliveredAt != nil {
+		t := *in.NotificationDeliveredAt
+		out.NotificationDeliveredAt = &t
 	}
 }
 
