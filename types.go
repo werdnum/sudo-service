@@ -246,6 +246,7 @@ type SudoRequestStatus struct {
 	NotificationState         string       `json:"notificationState,omitempty"`
 	NotificationAttempts      int32        `json:"notificationAttempts,omitempty"`
 	NotificationLastAttemptAt *metav1.Time `json:"notificationLastAttemptAt,omitempty"`
+	NotificationNextAttemptAt *metav1.Time `json:"notificationNextAttemptAt,omitempty"`
 	NotificationDeliveredAt   *metav1.Time `json:"notificationDeliveredAt,omitempty"`
 	NotificationLastError     string       `json:"notificationLastError,omitempty"`
 
@@ -379,6 +380,10 @@ func (in *SudoRequestStatus) DeepCopyInto(out *SudoRequestStatus) {
 	if in.NotificationLastAttemptAt != nil {
 		t := *in.NotificationLastAttemptAt
 		out.NotificationLastAttemptAt = &t
+	}
+	if in.NotificationNextAttemptAt != nil {
+		t := *in.NotificationNextAttemptAt
+		out.NotificationNextAttemptAt = &t
 	}
 	if in.NotificationDeliveredAt != nil {
 		t := *in.NotificationDeliveredAt

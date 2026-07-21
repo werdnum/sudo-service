@@ -7,11 +7,13 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -70,9 +72,16 @@ func TestNotificationLifecyclePersistsLinkBeforeDeliveryAndReusesIt(t *testing.T
 	if err := cl.Get(ctx, client.ObjectKey{Namespace: ControllerNamespace, Name: pending.Status.ApprovalTokenSecretName}, &tokenSecret); err != nil {
 		t.Fatalf("approval token Secret: %v", err)
 	}
+	if tokenSecret.Labels["role"] != "approval-token" || tokenSecret.Labels["expires-at"] == "" {
+		t.Fatalf("approval token Secret is not expiry-sweepable: labels=%v", tokenSecret.Labels)
+	}
 
-	if _, err := r.handlePending(ctx, pending.DeepCopy()); err != nil {
+	firstResult, err := r.handlePending(ctx, pending.DeepCopy())
+	if err != nil {
 		t.Fatalf("first delivery: %v", err)
+	}
+	if firstResult.RequeueAfter <= 0 {
+		t.Fatalf("failed delivery did not schedule a delayed retry: %+v", firstResult)
 	}
 	if err := cl.Get(ctx, client.ObjectKeyFromObject(sr), &pending); err != nil {
 		t.Fatal(err)
@@ -80,9 +89,21 @@ func TestNotificationLifecyclePersistsLinkBeforeDeliveryAndReusesIt(t *testing.T
 	if pending.Status.NotificationAttempts != 1 || pending.Status.NotificationState != NotificationPending || pending.Status.NotificationLastError == "" {
 		t.Fatalf("failed attempt not recorded separately: %+v", pending.Status)
 	}
+	if pending.Status.NotificationNextAttemptAt == nil || !pending.Status.NotificationNextAttemptAt.After(time.Now()) {
+		t.Fatalf("failed attempt did not persist its retry gate: %+v", pending.Status)
+	}
 	secretName := pending.Status.ApprovalTokenSecretName
 	hash := pending.Status.ApprovalTokenHash
 
+	gatedResult, err := r.handlePending(ctx, pending.DeepCopy())
+	if err != nil {
+		t.Fatalf("gated retry: %v", err)
+	}
+	if gatedResult.RequeueAfter <= 0 || len(links) != 1 {
+		t.Fatalf("retry gate allowed an immediate duplicate: result=%+v links=%#v", gatedResult, links)
+	}
+	past := metav1.NewTime(time.Now().Add(-time.Second))
+	pending.Status.NotificationNextAttemptAt = &past
 	if _, err := r.handlePending(ctx, pending.DeepCopy()); err != nil {
 		t.Fatalf("retry delivery: %v", err)
 	}
@@ -92,11 +113,63 @@ func TestNotificationLifecyclePersistsLinkBeforeDeliveryAndReusesIt(t *testing.T
 	if pending.Status.NotificationState != NotificationDelivered || pending.Status.NotificationAttempts != 2 || pending.Status.PushoverRequestID != "push-2" {
 		t.Fatalf("successful delivery not recorded: %+v", pending.Status)
 	}
+	if pending.Status.NotificationNextAttemptAt != nil {
+		t.Fatalf("successful delivery retained retry gate: %+v", pending.Status)
+	}
 	if pending.Status.ApprovalTokenSecretName != secretName || pending.Status.ApprovalTokenHash != hash {
 		t.Fatal("delivery retry reminted approval state")
 	}
 	if len(links) != 2 || links[0] != links[1] || !strings.Contains(links[0], "id=uid-notify") {
 		t.Fatalf("delivery retries did not reuse one valid URL: %#v", links)
+	}
+}
+
+func TestAmbiguousPendingStatusWriteKeepsReferencedTokenSecret(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme(t)
+	sr := &SudoRequest{
+		ObjectMeta: metav1.ObjectMeta{Name: "ambiguous", Namespace: ControllerNamespace, UID: "uid-ambiguous", CreationTimestamp: metav1.Now()},
+		Spec:       SudoRequestSpec{Requester: "alice", Reason: "inspect", Command: "kubectl get pods"},
+	}
+	base := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&SudoRequest{}).WithObjects(sr).Build()
+	cl := interceptor.NewClient(base, interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			if err := c.Status().Update(ctx, obj, opts...); err != nil {
+				return err
+			}
+			return errors.New("response lost after commit")
+		},
+	})
+	r := &SudoRequestReconciler{Client: cl, APIReader: base, Scheme: scheme, Recorder: record.NewFakeRecorder(20), Broadcaster: NewBroadcaster()}
+
+	if _, err := r.handleNew(ctx, sr.DeepCopy()); err == nil {
+		t.Fatal("expected ambiguous status update error")
+	}
+	var pending SudoRequest
+	if err := base.Get(ctx, client.ObjectKeyFromObject(sr), &pending); err != nil {
+		t.Fatal(err)
+	}
+	if pending.Status.Phase != PhasePending || pending.Status.ApprovalTokenSecretName == "" {
+		t.Fatalf("status was not committed before the lost response: %+v", pending.Status)
+	}
+	var tokenSecret corev1.Secret
+	if err := base.Get(ctx, client.ObjectKey{Namespace: pending.Namespace, Name: pending.Status.ApprovalTokenSecretName}, &tokenSecret); err != nil {
+		t.Fatalf("ambiguous write deleted the referenced token Secret: %v", err)
+	}
+}
+
+func TestGarbageCollectorSweepsExpiredApprovalTokenSecret(t *testing.T) {
+	ctx := context.Background()
+	expired := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+		Name: "expired-token", Namespace: ControllerNamespace,
+		Labels: map[string]string{"app": "sudo-service", "role": "approval-token", "expires-at": strconv.FormatInt(time.Now().Add(-time.Minute).Unix(), 10)},
+	}}
+	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(expired).Build()
+	if err := (&GarbageCollector{Client: cl}).sweepSecrets(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := cl.Get(ctx, client.ObjectKeyFromObject(expired), &corev1.Secret{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expired approval token Secret was not swept: %v", err)
 	}
 }
 

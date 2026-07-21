@@ -605,13 +605,19 @@ func (a *APIServer) denyHandlerWithClaims(w http.ResponseWriter, r *http.Request
 }
 
 func ensureCSRFCookie(w http.ResponseWriter, r *http.Request) (string, error) {
+	var token string
 	if existing, err := r.Cookie(csrfCookieName); err == nil && existing.Value != "" {
-		return existing.Value, nil
+		token = existing.Value
+	} else {
+		var err error
+		token, err = randomToken(32)
+		if err != nil {
+			return "", err
+		}
 	}
-	token, err := randomToken(32)
-	if err != nil {
-		return "", err
-	}
+	// Refresh Max-Age on every rendered form. Reusing the token keeps multiple
+	// concurrently-open review tabs valid while giving each render a full review
+	// window before the browser expires the cookie.
 	http.SetCookie(w, &http.Cookie{
 		Name: csrfCookieName, Value: token, Path: "/", Secure: true,
 		HttpOnly: true, SameSite: http.SameSiteStrictMode,

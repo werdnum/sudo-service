@@ -219,6 +219,11 @@ spec:
                     Empty on records written by older controllers.
                 notificationAttempts: {type: integer, format: int32, minimum: 0}
                 notificationLastAttemptAt: {type: string, format: date-time}
+                notificationNextAttemptAt:
+                  type: string
+                  format: date-time
+                  description: >-
+                    Earliest time a failed approval notification may be retried.
                 notificationDeliveredAt: {type: string, format: date-time}
                 notificationLastError: {type: string}
                 approvalTokenHash:

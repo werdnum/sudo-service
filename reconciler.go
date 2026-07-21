@@ -249,6 +249,11 @@ func (r *SudoRequestReconciler) handleNew(ctx context.Context, sr *SudoRequest) 
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: "sudo-approval-token-",
 			Namespace:    sr.Namespace,
+			Labels: map[string]string{
+				"app":        "sudo-service",
+				"role":       "approval-token",
+				"expires-at": fmt.Sprintf("%d", expiry.Unix()),
+			},
 		},
 		Data: map[string][]byte{"token": []byte(token)},
 	}
@@ -267,8 +272,10 @@ func (r *SudoRequestReconciler) handleNew(ctx context.Context, sr *SudoRequest) 
 	sr.Status.Summary = summary
 
 	if err := r.Status().Update(ctx, sr); err != nil {
-		// Best effort: without the status reference a retry must mint a new token.
-		_ = r.Delete(ctx, secret)
+		// The update result is ambiguous: the apiserver may have committed the
+		// status even when the client observed a timeout. Keep the referenced
+		// Secret rather than risk stranding a durable Pending request. Its owner
+		// reference and expires-at label bound cleanup if the write truly failed.
 		return ctrl.Result{}, fmt.Errorf("status update Pending: %w", err)
 	}
 
@@ -316,6 +323,11 @@ func (r *SudoRequestReconciler) handlePending(ctx context.Context, sr *SudoReque
 	// Empty means an older controller already delivered the notification before
 	// writing Pending. Only the explicit Pending marker opts into this lifecycle.
 	if sr.Status.NotificationState == NotificationPending {
+		if sr.Status.NotificationNextAttemptAt != nil {
+			if delay := time.Until(sr.Status.NotificationNextAttemptAt.Time); delay > 0 {
+				return ctrl.Result{RequeueAfter: delay}, nil
+			}
+		}
 		return r.deliverApprovalNotification(ctx, sr)
 	}
 	// Requeue at expiry.
@@ -355,9 +367,11 @@ func (r *SudoRequestReconciler) deliverApprovalNotification(ctx context.Context,
 	attemptedAt := metav1.NewTime(time.Now())
 	reqID, sendErr := r.Pushover.SendApproval(ctx, title, body, u.String())
 	if sendErr != nil {
+		nextAttemptAt := metav1.NewTime(attemptedAt.Add(30 * time.Second))
 		if err := r.updateStatus(ctx, sr, func(current *SudoRequest) {
 			current.Status.NotificationAttempts++
 			current.Status.NotificationLastAttemptAt = &attemptedAt
+			current.Status.NotificationNextAttemptAt = &nextAttemptAt
 			current.Status.NotificationLastError = truncate(sendErr.Error(), 512)
 		}); err != nil {
 			return ctrl.Result{}, fmt.Errorf("record Pushover failure: %w", err)
@@ -370,6 +384,7 @@ func (r *SudoRequestReconciler) deliverApprovalNotification(ctx context.Context,
 	if err := r.updateStatus(ctx, sr, func(current *SudoRequest) {
 		current.Status.NotificationAttempts++
 		current.Status.NotificationLastAttemptAt = &attemptedAt
+		current.Status.NotificationNextAttemptAt = nil
 		current.Status.NotificationDeliveredAt = &deliveredAt
 		current.Status.NotificationLastError = ""
 		current.Status.NotificationState = NotificationDelivered

@@ -80,6 +80,24 @@ func TestApprovePostRequiresCSRF(t *testing.T) {
 	}
 }
 
+func TestCSRFCookieIsRefreshedForEachRenderedForm(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/approve", nil)
+	req.AddCookie(&http.Cookie{Name: csrfCookieName, Value: "existing-token"})
+	rw := httptest.NewRecorder()
+
+	token, err := ensureCSRFCookie(rw, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if token != "existing-token" {
+		t.Fatalf("token = %q, want existing token", token)
+	}
+	cookies := rw.Result().Cookies()
+	if len(cookies) != 1 || cookies[0].Value != token || cookies[0].MaxAge != PendingRequestTTL {
+		t.Fatalf("CSRF cookie was not refreshed for a full review window: %#v", cookies)
+	}
+}
+
 func TestApprovePostAcceptsMatchingStrictCookieToken(t *testing.T) {
 	sr := pendingApprovalRequest()
 	a, cl, claims := approvalTestServer(t, sr)

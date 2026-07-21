@@ -12,7 +12,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 )
 
-// GarbageCollector deletes output Secrets past their expires-at label and finished Jobs
+// GarbageCollector deletes controller Secrets past their expires-at label and finished Jobs
 // past TTLSecondsAfterFinished (the API server handles Jobs natively, but we double-check).
 //
 // Also expires Pending SudoRequests whose CreationTimestamp is older than PendingRequestTTL
@@ -50,7 +50,7 @@ func (g *GarbageCollector) sweepSecrets(ctx context.Context) error {
 	var secs corev1.SecretList
 	if err := g.List(ctx, &secs,
 		client.InNamespace(ControllerNamespace),
-		client.MatchingLabels{"app": "sudo-service", "role": "output"},
+		client.MatchingLabels{"app": "sudo-service"},
 	); err != nil {
 		return err
 	}
