@@ -188,7 +188,7 @@ func visibleExecutables(command string) []string {
 		return nil
 	}
 	seen := map[string]bool{}
-	_ = syntax.Walk(file, func(node syntax.Node) bool {
+	syntax.Walk(file, func(node syntax.Node) bool {
 		call, ok := node.(*syntax.CallExpr)
 		if !ok || len(call.Args) == 0 {
 			return true
