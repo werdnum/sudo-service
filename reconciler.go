@@ -30,9 +30,12 @@ import (
 // not cascade them; the finalizer lets the controller stop the Job first.
 const executorCleanupFinalizer = "sudo.andrewgarrett.dev/executor-cleanup"
 
+var errApprovalTokenExpired = errors.New("approval token expired")
+
 // SudoRequestReconciler drives the state machine:
 //
-//	(no status)  -> Pending  (mint token, send Pushbullet push)
+//	(no status)  -> Pending  (persist token and review aid)
+//	Pending      -> Pending  (deliver the persisted approval notification)
 //	Pending      -> Expired  (after 1h)
 //	Approved     -> Executed (create Job, capture output, write Secret)
 //	Approved     -> Failed   (job didn't finish or pod errored)
@@ -210,28 +213,11 @@ func (r *SudoRequestReconciler) handleNew(ctx context.Context, sr *SudoRequest) 
 
 	expiry := metav1.NewTime(time.Now().Add(ApprovalTokenTTL * time.Second))
 
-	// Render approval URL.
-	u, err := url.Parse(r.PublicBaseURL)
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("parse PublicBaseURL: %w", err)
-	}
-	u.Path = "/approve"
-	q := u.Query()
-	q.Set("id", string(sr.UID))
-	q.Set("t", token)
-	u.RawQuery = q.Encode()
-	approvalURL := u.String()
-
-	// Best-effort AI review aid. Generated BEFORE the push (and thus before the
-	// adjacent status write) so that the instant the reviewer receives the
-	// approval URL, the request is already Pending with its token hash stored.
-	// Doing this slow call after the push would open a window where the
-	// freshly-delivered link is unusable — VerifyApprovalToken requires Pending
-	// + a stored hash, neither of which exists until the status update lands.
-	// Optional and never load-bearing: a failure here logs and proceeds with no
-	// summary, and a short timeout bounds it. (On a push retry the summary is
-	// regenerated; that wasted call on the rare error path is worth the
-	// correctness.)
+	// Best-effort AI review aid. Generate it once while initializing Pending,
+	// before delivery begins. Notification retries therefore reuse the cached
+	// text and cannot couple model availability to Pushover availability.
+	// Optional and never load-bearing: a failure logs and proceeds with no
+	// summary, and a short timeout bounds it.
 	var summary string
 	if r.Summarizer != nil {
 		// Give the AI the ground-truth pod spec to review (not just the curated
@@ -256,32 +242,44 @@ func (r *SudoRequestReconciler) handleNew(ctx context.Context, sr *SudoRequest) 
 		}
 	}
 
-	// Send the Pushover push first; if it fails, we don't want to mark Pending and lose the token.
-	title := fmt.Sprintf("sudo: %s wants to run %s", sr.Spec.Requester, truncate(sr.Spec.Command, 80))
-	body := fmt.Sprintf("reason: %s\ncommand: %s\nimage: %s",
-		sr.Spec.Reason, sr.Spec.Command, imageFor(sr))
-	// Redact literal env values: the push goes to the external Pushover service.
-	// The OIDC-protected approve page still shows the raw values for review.
-	if extras := specExtrasText(sr, true); extras != "" {
-		body += "\n" + extras
+	// Store the plaintext token before status references it. If the subsequent
+	// status update fails this Secret is harmless (and owner-GC'd): no external
+	// notification has been sent and no request is approvable with its token.
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			GenerateName: "sudo-approval-token-",
+			Namespace:    sr.Namespace,
+			Labels: map[string]string{
+				"app":        "sudo-service",
+				"role":       "approval-token",
+				"expires-at": fmt.Sprintf("%d", expiry.Unix()),
+			},
+		},
+		Data: map[string][]byte{"token": []byte(token)},
 	}
-	reqID, err := r.Pushover.SendApproval(ctx, title, body, approvalURL)
-	if err != nil {
-		log.Error(err, "Pushover send failed; will retry")
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	if err := controllerutil.SetControllerReference(sr, secret, r.Scheme); err != nil {
+		return ctrl.Result{}, fmt.Errorf("set approval-token Secret owner: %w", err)
+	}
+	if err := r.Create(ctx, secret); err != nil {
+		return ctrl.Result{}, fmt.Errorf("create approval-token Secret: %w", err)
 	}
 
 	sr.Status.Phase = PhasePending
 	sr.Status.ApprovalTokenHash = hash
 	sr.Status.ApprovalTokenExpiresAt = &expiry
-	sr.Status.PushoverRequestID = reqID
+	sr.Status.ApprovalTokenSecretName = secret.Name
+	sr.Status.NotificationState = NotificationPending
 	sr.Status.Summary = summary
 
 	if err := r.Status().Update(ctx, sr); err != nil {
+		// The update result is ambiguous: the apiserver may have committed the
+		// status even when the client observed a timeout. Keep the referenced
+		// Secret rather than risk stranding a durable Pending request. Its owner
+		// reference and expires-at label bound cleanup if the write truly failed.
 		return ctrl.Result{}, fmt.Errorf("status update Pending: %w", err)
 	}
 
-	r.Recorder.Eventf(sr, corev1.EventTypeNormal, "Pending", "Awaiting human approval (pushover request=%s)", reqID)
+	r.Recorder.Eventf(sr, corev1.EventTypeNormal, "Pending", "Awaiting human approval; notification queued")
 	r.Broadcaster.Publish(string(sr.UID), Event{
 		Type:      "phase",
 		Phase:     PhasePending,
@@ -291,8 +289,9 @@ func (r *SudoRequestReconciler) handleNew(ctx context.Context, sr *SudoRequest) 
 		CreatedAt: sr.CreationTimestamp.Format("2006-01-02 15:04:05 UTC"),
 	})
 
-	// Wake up to enforce TTL.
-	return ctrl.Result{RequeueAfter: time.Until(metav1.NewTime(time.Now().Add(PendingRequestTTL * time.Second)).Time)}, nil
+	// A separate reconcile delivers the notification. At this point both the
+	// Pending phase and the exact token referenced by the link are durable.
+	return ctrl.Result{Requeue: true}, nil
 }
 
 func (r *SudoRequestReconciler) handlePending(ctx context.Context, sr *SudoRequest) (ctrl.Result, error) {
@@ -301,11 +300,14 @@ func (r *SudoRequestReconciler) handlePending(ctx context.Context, sr *SudoReque
 	if age >= PendingRequestTTL*time.Second {
 		sr.Status.Phase = PhaseExpired
 		// Clear token so a stray push click can't approve.
+		tokenSecretName := sr.Status.ApprovalTokenSecretName
 		sr.Status.ApprovalTokenHash = ""
 		sr.Status.ApprovalTokenExpiresAt = nil
+		sr.Status.ApprovalTokenSecretName = ""
 		if err := r.Status().Update(ctx, sr); err != nil {
 			return ctrl.Result{}, err
 		}
+		r.deleteApprovalTokenSecret(ctx, sr.Namespace, tokenSecretName)
 		r.Recorder.Eventf(sr, corev1.EventTypeWarning, "Expired", "Request expired without approval after %s", age)
 		r.Broadcaster.Publish(string(sr.UID), Event{
 			Type:      "phase",
@@ -317,8 +319,84 @@ func (r *SudoRequestReconciler) handlePending(ctx context.Context, sr *SudoReque
 		})
 		return ctrl.Result{}, nil
 	}
+
+	// Empty means an older controller already delivered the notification before
+	// writing Pending. Only the explicit Pending marker opts into this lifecycle.
+	if sr.Status.NotificationState == NotificationPending {
+		if sr.Status.NotificationNextAttemptAt != nil {
+			if delay := time.Until(sr.Status.NotificationNextAttemptAt.Time); delay > 0 {
+				return ctrl.Result{RequeueAfter: delay}, nil
+			}
+		}
+		return r.deliverApprovalNotification(ctx, sr)
+	}
 	// Requeue at expiry.
 	return ctrl.Result{RequeueAfter: PendingRequestTTL*time.Second - age + time.Second}, nil
+}
+
+func (r *SudoRequestReconciler) deliverApprovalNotification(ctx context.Context, sr *SudoRequest) (ctrl.Result, error) {
+	var secret corev1.Secret
+	key := client.ObjectKey{Namespace: sr.Namespace, Name: sr.Status.ApprovalTokenSecretName}
+	if key.Name == "" {
+		return ctrl.Result{}, fmt.Errorf("pending notification has no approval-token Secret")
+	}
+	if err := r.Get(ctx, key, &secret); err != nil {
+		return ctrl.Result{}, fmt.Errorf("read approval-token Secret: %w", err)
+	}
+	token := string(secret.Data["token"])
+	if token == "" || !constantTimeEqual(sha256Hex(token), sr.Status.ApprovalTokenHash) {
+		return ctrl.Result{}, fmt.Errorf("approval-token Secret does not match persisted hash")
+	}
+
+	u, err := url.Parse(r.PublicBaseURL)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("parse PublicBaseURL: %w", err)
+	}
+	u.Path = "/approve"
+	q := u.Query()
+	q.Set("id", string(sr.UID))
+	q.Set("t", token)
+	u.RawQuery = q.Encode()
+
+	title := fmt.Sprintf("sudo: %s wants to run %s", sr.Spec.Requester, truncate(sr.Spec.Command, 80))
+	body := fmt.Sprintf("reason: %s\ncommand: %s\nimage: %s", sr.Spec.Reason, sr.Spec.Command, imageFor(sr))
+	if extras := specExtrasText(sr, true); extras != "" {
+		body += "\n" + extras
+	}
+
+	attemptedAt := metav1.NewTime(time.Now())
+	reqID, sendErr := r.Pushover.SendApproval(ctx, title, body, u.String())
+	if sendErr != nil {
+		nextAttemptAt := metav1.NewTime(attemptedAt.Add(30 * time.Second))
+		if err := r.updateStatus(ctx, sr, func(current *SudoRequest) {
+			current.Status.NotificationAttempts++
+			current.Status.NotificationLastAttemptAt = &attemptedAt
+			current.Status.NotificationNextAttemptAt = &nextAttemptAt
+			current.Status.NotificationLastError = truncate(sendErr.Error(), 512)
+		}); err != nil {
+			return ctrl.Result{}, fmt.Errorf("record Pushover failure: %w", err)
+		}
+		ctrl.LoggerFrom(ctx).Error(sendErr, "Pushover send failed; will retry the persisted link")
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
+	deliveredAt := metav1.NewTime(time.Now())
+	if err := r.updateStatus(ctx, sr, func(current *SudoRequest) {
+		current.Status.NotificationAttempts++
+		current.Status.NotificationLastAttemptAt = &attemptedAt
+		current.Status.NotificationNextAttemptAt = nil
+		current.Status.NotificationDeliveredAt = &deliveredAt
+		current.Status.NotificationLastError = ""
+		current.Status.NotificationState = NotificationDelivered
+		current.Status.PushoverRequestID = reqID
+	}); err != nil {
+		// A retry reuses this exact persisted token. Pushover has no idempotency
+		// key, so a status-write failure can duplicate a message, but never with a
+		// dead predecessor link.
+		return ctrl.Result{}, fmt.Errorf("record Pushover delivery: %w", err)
+	}
+	r.Recorder.Eventf(sr, corev1.EventTypeNormal, "Notified", "Approval notification delivered (pushover request=%s)", reqID)
+	return ctrl.Result{RequeueAfter: PendingRequestTTL*time.Second - time.Since(sr.CreationTimestamp.Time) + time.Second}, nil
 }
 
 // updateStatus applies mutate to the request's status and persists it, retrying
@@ -712,15 +790,18 @@ func (r *SudoRequestReconciler) Approve(ctx context.Context, uid types.UID, appr
 		return fmt.Errorf("request not pending (phase=%s)", sr.Status.Phase)
 	}
 	now := metav1.NewTime(time.Now())
+	tokenSecretName := sr.Status.ApprovalTokenSecretName
 	sr.Status.Phase = PhaseApproved
 	sr.Status.ApprovedBy = approvedBy
 	sr.Status.ApprovedAt = &now
 	// Burn the approval token.
 	sr.Status.ApprovalTokenHash = ""
 	sr.Status.ApprovalTokenExpiresAt = nil
+	sr.Status.ApprovalTokenSecretName = ""
 	if err := r.Status().Update(ctx, sr); err != nil {
 		return err
 	}
+	r.deleteApprovalTokenSecret(ctx, sr.Namespace, tokenSecretName)
 	r.Recorder.Eventf(sr, corev1.EventTypeNormal, "Approved", "Approved by %s", approvedBy)
 	r.Broadcaster.Publish(string(sr.UID), Event{
 		Type:       "phase",
@@ -744,15 +825,18 @@ func (r *SudoRequestReconciler) Deny(ctx context.Context, uid types.UID, deniedB
 		return fmt.Errorf("request not pending (phase=%s)", sr.Status.Phase)
 	}
 	now := metav1.NewTime(time.Now())
+	tokenSecretName := sr.Status.ApprovalTokenSecretName
 	sr.Status.Phase = PhaseDenied
 	sr.Status.DeniedBy = deniedBy
 	sr.Status.DeniedAt = &now
 	sr.Status.DenialReason = reason
 	sr.Status.ApprovalTokenHash = ""
 	sr.Status.ApprovalTokenExpiresAt = nil
+	sr.Status.ApprovalTokenSecretName = ""
 	if err := r.Status().Update(ctx, sr); err != nil {
 		return err
 	}
+	r.deleteApprovalTokenSecret(ctx, sr.Namespace, tokenSecretName)
 	r.Recorder.Eventf(sr, corev1.EventTypeWarning, "Denied", "Denied by %s: %s", deniedBy, reason)
 	r.Broadcaster.Publish(string(sr.UID), Event{
 		Type:         "phase",
@@ -778,7 +862,7 @@ func (r *SudoRequestReconciler) VerifyApprovalToken(ctx context.Context, uid typ
 		return nil, fmt.Errorf("not pending (phase=%s)", sr.Status.Phase)
 	}
 	if sr.Status.ApprovalTokenExpiresAt == nil || time.Now().After(sr.Status.ApprovalTokenExpiresAt.Time) {
-		return nil, fmt.Errorf("approval token expired")
+		return nil, errApprovalTokenExpired
 	}
 	if !constantTimeEqual(sha256Hex(token), sr.Status.ApprovalTokenHash) {
 		return nil, fmt.Errorf("invalid approval token")
@@ -797,6 +881,16 @@ func (r *SudoRequestReconciler) findByUID(ctx context.Context, uid types.UID) (*
 		}
 	}
 	return nil, fmt.Errorf("not found: %s", uid)
+}
+
+func (r *SudoRequestReconciler) deleteApprovalTokenSecret(ctx context.Context, namespace, name string) {
+	if name == "" {
+		return
+	}
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name}}
+	if err := r.Delete(ctx, secret); err != nil && !apierrors.IsNotFound(err) {
+		ctrl.LoggerFrom(ctx).Error(err, "delete spent approval-token Secret", "secret", name)
+	}
 }
 
 // --- helpers ---
