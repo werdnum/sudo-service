@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import datetime
+import importlib.machinery
+import importlib.util
 import json
 import subprocess
 import sys
@@ -14,6 +17,15 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CLI = ROOT / "sudo-service"
+
+
+def load_cli_module():
+    loader = importlib.machinery.SourceFileLoader("sudo_service_cli", str(CLI))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
 
 
 class FakeSudoServiceHandler(BaseHTTPRequestHandler):
@@ -218,6 +230,90 @@ class SudoServiceCLITest(unittest.TestCase):
         self.assertNotIn("image", FakeSudoServiceHandler.request_bodies[0])
         self.assertIn("profile=network-tools resolved-image=nicolaka/netshoot", result.stderr)
         self.assertIn("preflight warning: command may be long-running", result.stderr)
+
+    def test_exact_job_delete_helper_submits_canonical_typed_action(self) -> None:
+        FakeSudoServiceHandler.create_response = {
+            "uid": "uid-1", "name": "http-abc", "profile": "kubectl",
+            "image": "alpine/k8s@sha256:abc",
+            "permissionRequest": "Delete the exact Jobs alpha/one and zeta/two.",
+            "command": "kubectl delete job ...",
+        }
+        result = self.run_cli(
+            "--reason", "remove retained failed Jobs after recovery",
+            "job", "delete", "zeta/two", "alpha/one",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(FakeSudoServiceHandler.request_bodies, [{
+            "reason": "remove retained failed Jobs after recovery",
+            "action": {
+                "version": "v1", "operation": "job.delete",
+                "resources": [
+                    {"namespace": "alpha", "kind": "Job", "name": "one"},
+                    {"namespace": "zeta", "kind": "Job", "name": "two"},
+                ],
+            },
+        }])
+        self.assertIn("permission requested: Delete the exact Jobs", result.stderr)
+        self.assertIn("canonical command:\nkubectl delete job", result.stderr)
+
+    def test_cronjob_run_helper_makes_visible_timestamped_job_name(self) -> None:
+        result = self.run_cli(
+            "--reason", "rerun drift reconciliation after fixing credentials",
+            "--preview", "--quiet", "cronjob", "run", "ops/ansible-drift",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        action = FakeSudoServiceHandler.request_bodies[0]["action"]
+        self.assertEqual(action["operation"], "cronjob.run")
+        self.assertRegex(action["jobName"], r"^ansible-drift-manual-\d{14}$")
+        preview = json.loads(result.stderr)
+        self.assertEqual(preview["action"], action)
+        self.assertNotIn("command", preview)
+
+    def test_cronjob_job_name_uses_injected_utc_clock_and_truncates(self) -> None:
+        cli = load_cli_module()
+        now = datetime.datetime(2026, 7, 21, 15, 30, 45, tzinfo=datetime.timezone.utc)
+        long_name = "a" * 52
+        action = cli.typed_action_from_args(
+            ["cronjob", "run", f"ops/{long_name}"], now=now
+        )
+        self.assertEqual(action["jobName"], "a" * 41 + "-manual-20260721153045")
+        self.assertEqual(len(action["jobName"]), 63)
+
+    def test_workload_restart_and_secret_read_helpers_are_exact(self) -> None:
+        cases = (
+            (
+                ("workload", "restart", "apps/deployment/web"),
+                {"version": "v1", "operation": "workload.restart", "resources": [
+                    {"namespace": "apps", "kind": "Deployment", "name": "web"}
+                ]},
+            ),
+            (
+                ("secret", "read", "apps/database", "password.current"),
+                {"version": "v1", "operation": "secret.read", "resources": [
+                    {"namespace": "apps", "kind": "Secret", "name": "database"}
+                ], "key": "password.current"},
+            ),
+        )
+        for argv, expected in cases:
+            with self.subTest(argv=argv):
+                FakeSudoServiceHandler.request_bodies = []
+                result = self.run_cli("--reason", "recover the affected workload", *argv)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(FakeSudoServiceHandler.request_bodies[0]["action"], expected)
+                self.assertNotIn("command", FakeSudoServiceHandler.request_bodies[0])
+
+    def test_typed_helpers_reject_selectors_options_and_unsupported_kinds(self) -> None:
+        cases = (
+            ("job", "delete", "ops/one", "--all"),
+            ("job", "delete", "ops/name=selector"),
+            ("workload", "restart", "apps/pod/web"),
+            ("secret", "read", "apps/creds", "*"),
+        )
+        for argv in cases:
+            with self.subTest(argv=argv):
+                result = self.run_cli("--reason", "test rejection", *argv)
+                self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(FakeSudoServiceHandler.request_bodies, [])
 
     def test_image_and_profile_are_mutually_exclusive(self) -> None:
         result = self.run_cli(

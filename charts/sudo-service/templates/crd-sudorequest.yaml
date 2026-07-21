@@ -47,6 +47,8 @@ spec:
                     !(has(self.profile) && self.profile != '' &&
                       has(self.image) && self.image != '')
                   message: profile and image are mutually exclusive
+                - rule: self == oldSelf
+                  message: spec is immutable after request creation
               properties:
                 requester:
                   type: string
@@ -60,6 +62,33 @@ spec:
                 command:
                   type: string
                   description: Exact argv (single string) executed under cluster-admin.
+                action:
+                  type: object
+                  additionalProperties: false
+                  description: >-
+                    Optional server-validated semantic action. The controller requires
+                    command to equal its canonical expansion before requesting approval.
+                  required: [version, operation, resources]
+                  properties:
+                    version:
+                      type: string
+                      enum: [v1]
+                    operation:
+                      type: string
+                      enum: [job.delete, cronjob.run, workload.restart, secret.read]
+                    resources:
+                      type: array
+                      minItems: 1
+                      items:
+                        type: object
+                        additionalProperties: false
+                        required: [namespace, kind, name]
+                        properties:
+                          namespace: {type: string}
+                          kind: {type: string}
+                          name: {type: string}
+                    key: {type: string}
+                    jobName: {type: string}
                 image:
                   type: string
                   description: >-

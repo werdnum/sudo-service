@@ -7,6 +7,13 @@
             {{.Error}}
         </div>
     {{else}}
+		{{if .PermissionRequest}}
+		<div style="background: #eff6ff; border: 1px solid #93c5fd; padding: 0.75rem 1rem; border-radius: 0.375rem; margin-bottom: 1rem;">
+			<div style="font-weight: 600; color: var(--text-muted); text-transform: uppercase; font-size: 0.75rem; letter-spacing: 0.03em; margin-bottom: 0.5rem;">Permission requested</div>
+			<div style="line-height: 1.5;">{{.PermissionRequest}}</div>
+			<div style="color: var(--text-muted); font-size: 0.75rem; margin-top: 0.5rem;">Deterministically generated from the validated typed action below.</div>
+		</div>
+		{{end}}
         <dl>
             <dt>Requester</dt><dd>{{.Requester}}</dd>
             <dt>Reason</dt><dd>{{.Reason}}</dd>
