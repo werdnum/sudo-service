@@ -108,12 +108,13 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["create"]
-  # Lets the test submit blockOwnerDeletion=true on its forged Job owner. This
-  # is deliberately stronger than the Pod-only permission needed for the
-  # exploit, so the owner-reference admission plugin cannot mask the VAP result.
+  # Lets the test submit blockOwnerDeletion=true on its forged Job owner. The
+  # OwnerReferencesPermissionEnforcement plugin requires update on the owner's
+  # finalizers subresource and runs before VAP evaluation; grant it here so the
+  # test proves the VAP identity denial rather than an earlier authz denial.
   - apiGroups: ["batch"]
-    resources: ["jobs"]
-    verbs: ["delete"]
+    resources: ["jobs/finalizers"]
+    verbs: ["update"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
