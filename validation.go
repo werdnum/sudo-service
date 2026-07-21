@@ -56,6 +56,9 @@ func validateCommandSyntax(command string) error {
 // human reviewer remains the trust boundary. It only blocks fields that would
 // escalate privilege past what the request has explicitly, visibly asked for.
 func validateSpecExtras(sr *SudoRequest) error {
+	if _, err := resolveExecutionPolicy(sr.Spec.Execution); err != nil {
+		return err
+	}
 	// cluster-admin lives only in the controller namespace (that is where the
 	// cluster-admin-bound executor SA exists). A cross-namespace Job runs under
 	// the target namespace's default SA, so asking for both at once is incoherent

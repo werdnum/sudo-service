@@ -61,6 +61,31 @@ privileges: {clusterAdmin: false}
 client/cli/sudo-service --request-file request.yaml --preview
 ```
 
+Long-running work uses an explicit, bounded policy in the same request file:
+
+```yaml
+reason: "Run drift reconciliation after repairing its credential"
+command: "ansible-playbook /workspace/ansible/site.yaml --check --diff"
+image: "ghcr.io/example/ansible-runner@sha256:..."
+execution:
+  mode: managedJob
+  resourceClass: long-running
+  activeDeadlineSeconds: 3600
+```
+
+`managedJob` is sudo-service's controller-owned executor Job with curated
+resources, UID correlation, bounded output, and foreground cleanup before a
+terminal request phase. It does not authorize the command to create another
+Job. Wait normally, or detach after submission and print the UID:
+
+```sh
+client/cli/sudo-service --request-file managed.yaml --detach --quiet
+```
+
+Detached submission does not bypass human approval. Query the authenticated
+request API with the printed UID for lifecycle and output. See
+[Managed Jobs](../docs/managed-jobs.md) for limits and failure semantics.
+
 `--preview` writes the normalized effective request to stderr immediately before
 submission. Request-building flags cannot be mixed with `--request-file`, so the
 reviewed request has one unambiguous source. `--stdin-file` is the exception: it

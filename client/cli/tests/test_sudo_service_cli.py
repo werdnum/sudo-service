@@ -20,6 +20,7 @@ class FakeSudoServiceHandler(BaseHTTPRequestHandler):
     request_bodies: list[dict] = []
     auth_headers: list[str] = []
     phases: list[str] = ["Executed"]
+    job_lifecycles: list[str] = []
     denial_reason = ""
     output = b""
     exit_code: int | None = None
@@ -66,6 +67,9 @@ class FakeSudoServiceHandler(BaseHTTPRequestHandler):
                 "name": "http-abc",
                 "phase": phase,
             }
+            if self.job_lifecycles:
+                body["executorJobLifecycle"] = self.job_lifecycles[min(index, len(self.job_lifecycles) - 1)]
+                body["executorJobUID"] = "job-uid-1"
             if phase in {"Executed", "Failed"} and self.output:
                 body["outputSecretRef"] = "out-1"
             if phase == "Failed":
@@ -100,6 +104,7 @@ class SudoServiceCLITest(unittest.TestCase):
         FakeSudoServiceHandler.request_bodies = []
         FakeSudoServiceHandler.auth_headers = []
         FakeSudoServiceHandler.phases = ["Executed"]
+        FakeSudoServiceHandler.job_lifecycles = []
         FakeSudoServiceHandler.denial_reason = ""
         FakeSudoServiceHandler.failure_reason = ""
         FakeSudoServiceHandler.output = b""
@@ -260,6 +265,11 @@ class SudoServiceCLITest(unittest.TestCase):
             }],
             "imagePullSecrets": [{"name": "registry-creds"}],
             "privileges": {"clusterAdmin": False},
+            "execution": {
+                "mode": "managedJob",
+                "resourceClass": "long-running",
+                "activeDeadlineSeconds": 3600,
+            },
         }
         path = self.write_request_file(json.dumps(body), ".json")
 
@@ -364,6 +374,46 @@ class SudoServiceCLITest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stderr), FakeSudoServiceHandler.request_bodies[0])
         self.assertLess(result.stderr.index('"command"'), result.stderr.index('"reason"'))
+
+    def test_detach_managed_job_prints_uid_without_polling(self) -> None:
+        path = self.write_request_file(json.dumps({
+            "reason": "run drift reconciliation with enough memory",
+            "command": "ansible-playbook drift.yaml",
+            "execution": {
+                "mode": "managedJob", "resourceClass": "long-running",
+                "activeDeadlineSeconds": 3600,
+            },
+        }), ".json")
+
+        result = self.run_cli("--request-file", path, "--detach", "--quiet")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "uid-1\n")
+        self.assertEqual(FakeSudoServiceHandler.status_calls, 0)
+        self.assertEqual(FakeSudoServiceHandler.request_bodies[0]["execution"]["mode"], "managedJob")
+
+    def test_detach_rejects_non_managed_request_before_submission(self) -> None:
+        result = self.run_cli(
+            "--reason", "ordinary request", "--detach", "--command", "kubectl get nodes"
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("--detach requires execution.mode=managedJob", result.stderr)
+        self.assertEqual(FakeSudoServiceHandler.request_bodies, [])
+
+    def test_managed_job_lifecycle_changes_are_progress(self) -> None:
+        FakeSudoServiceHandler.phases = ["Approved", "Approved", "Executed"]
+        FakeSudoServiceHandler.job_lifecycles = ["Created", "Running", "Cleaned"]
+        path = self.write_request_file(json.dumps({
+            "reason": "long drift run", "command": "true",
+            "execution": {"mode": "managedJob", "resourceClass": "long-running", "activeDeadlineSeconds": 3600},
+        }), ".json")
+
+        result = self.run_cli("--request-file", path, "--poll-interval", "0.01")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("jobLifecycle=Created jobUID=job-uid-1", result.stderr)
+        self.assertIn("jobLifecycle=Running jobUID=job-uid-1", result.stderr)
+        self.assertIn("jobLifecycle=Cleaned jobUID=job-uid-1", result.stderr)
 
     def test_request_file_rejects_request_building_flags(self) -> None:
         path = self.write_request_file(

@@ -107,6 +107,21 @@ executed. Requesters cannot supply or override the resolution.
 for uncommon tools and are labeled as unprofiled; sudo-service does not pretend it
 can infer their `/bin/sh` behavior or installed tools.
 
+### Managed long-running Jobs
+
+Requests that need more than the standard 500m CPU/256 MiB executor limit can
+select the curated `managedJob` execution policy in a request file. The
+controller's existing executor Job becomes the long-running workload; the shell
+is not being authorized to create an untracked child Job. The approval surfaces
+show its exact resources, hard deadline, and full Job template.
+
+The controller persists the Job UID, bounded output, exit code, and cleanup state.
+It foreground-deletes that exact UID and waits for deletion before recording a
+terminal SudoRequest phase. See [Managed Jobs](docs/managed-jobs.md) for the
+request schema, restart semantics, limits, detached CLI submission, and threat
+model. Privileged host/node diagnostics are explicitly out of scope and require a
+separate admission-enforced design.
+
 ### Authorizing HTTP requesters
 
 The requester HTTP API has two distinct Kubernetes checks. `TokenReview`

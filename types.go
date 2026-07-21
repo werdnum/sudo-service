@@ -114,6 +114,12 @@ type SudoRequestSpec struct {
 	// TTLSecondsAfterApproval defaults to 3600 seconds.
 	TTLSecondsAfterApproval *int32 `json:"ttlSecondsAfterApproval,omitempty"`
 
+	// Execution selects a controller-owned, bounded lifecycle. Empty preserves
+	// the standard foreground policy. managedJob is the same UID-correlated
+	// executor Job with a larger curated resource class and explicit deadline;
+	// it does not permit the command to create an untracked child workload.
+	Execution SudoRequestExecution `json:"execution,omitempty"`
+
 	// Namespace is the namespace the executor Job runs in. Defaults to the
 	// controller namespace (sudo-service). Targeting another namespace lets the
 	// command mount that namespace's Secrets/PVCs as files (pods cannot mount
@@ -165,6 +171,15 @@ type SudoRequestSpec struct {
 	// the approve page. Only ClusterAdmin is wired up today — privileged, runAsRoot,
 	// hostPath, etc. are the planned extensions.
 	Privileges SudoRequestPrivileges `json:"privileges,omitempty"`
+}
+
+// SudoRequestExecution contains only curated lifecycle choices. Arbitrary
+// resource requests/limits would make review inconsistent and could starve the
+// cluster, so callers select a controller-owned resource class instead.
+type SudoRequestExecution struct {
+	Mode                  string `json:"mode,omitempty"`
+	ResourceClass         string `json:"resourceClass,omitempty"`
+	ActiveDeadlineSeconds *int32 `json:"activeDeadlineSeconds,omitempty"`
 }
 
 // SudoRequestPrivileges is the set of explicit capability toggles a request may
@@ -254,6 +269,13 @@ type SudoRequestStatus struct {
 	// (set, but the Job is now gone → fail rather than replay), and lets the
 	// reconciler reject a Job that was deleted and replaced at the same name.
 	ExecutorJobUID string `json:"executorJobUID,omitempty"`
+
+	// ExecutorJobLifecycle is the durable managed-job state machine. Result and
+	// output fields are persisted before CleanupRequested; terminal request phase
+	// is not recorded until foreground deletion reaches Cleaned.
+	ExecutorJobLifecycle  string       `json:"executorJobLifecycle,omitempty"`
+	ExecutorJobStartedAt  *metav1.Time `json:"executorJobStartedAt,omitempty"`
+	ExecutorJobFinishedAt *metav1.Time `json:"executorJobFinishedAt,omitempty"`
 
 	// PushoverRequestID is the Pushover API's per-request UUID, for audit-trail
 	// correlation with the Pushover dashboard.
@@ -380,6 +402,10 @@ func (in *SudoRequestSpec) DeepCopyInto(out *SudoRequestSpec) {
 		v := *in.TTLSecondsAfterApproval
 		out.TTLSecondsAfterApproval = &v
 	}
+	if in.Execution.ActiveDeadlineSeconds != nil {
+		v := *in.Execution.ActiveDeadlineSeconds
+		out.Execution.ActiveDeadlineSeconds = &v
+	}
 	copyRaw := func(in []runtime.RawExtension) []runtime.RawExtension {
 		if in == nil {
 			return nil
@@ -425,6 +451,14 @@ func (in *SudoRequestStatus) DeepCopyInto(out *SudoRequestStatus) {
 	if in.ExitCode != nil {
 		v := *in.ExitCode
 		out.ExitCode = &v
+	}
+	if in.ExecutorJobStartedAt != nil {
+		t := *in.ExecutorJobStartedAt
+		out.ExecutorJobStartedAt = &t
+	}
+	if in.ExecutorJobFinishedAt != nil {
+		t := *in.ExecutorJobFinishedAt
+		out.ExecutorJobFinishedAt = &t
 	}
 	if in.OutputTotalBytes != nil {
 		v := *in.OutputTotalBytes

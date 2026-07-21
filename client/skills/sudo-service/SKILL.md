@@ -84,6 +84,23 @@ All request fields must come from the request file: mixing it with `--reason`,
 `--command`, command arguments, image/profile, namespace, privilege, TTL, or image-pull
 Secret flags is rejected rather than applying surprising precedence.
 
+For a command that genuinely needs more than the standard 500m CPU/256 MiB
+executor, put an explicit managed policy in the request file:
+
+```yaml
+execution:
+  mode: managedJob
+  resourceClass: long-running
+  activeDeadlineSeconds: 3600
+```
+
+This is the controller-owned executor Job with a recorded UID, 2 CPU/2 GiB hard
+limits, bounded output, and foreground cleanup before terminal request status.
+It is not permission to run `kubectl create job` inside the command. Use
+`sudo-service --request-file request.yaml --detach --quiet` only when the caller
+should stop polling after submission; human approval is still required and the
+printed UID is needed to query status later.
+
 It creates the request through the controller HTTP API, polls
 `/requests/{uid}`, prints progress on stderr, and writes the command output
 from `/requests/{uid}/output` to stdout when the command executes. For shell

@@ -105,6 +105,9 @@ func autoApproveTokens(sr *SudoRequest) ([]string, bool) {
 // from the auto-approve allowlist, which only reasons about command+image.
 func hasSpecExtras(sr *SudoRequest) bool {
 	return sr.Spec.Namespace != "" ||
+		sr.Spec.Execution.Mode != "" ||
+		sr.Spec.Execution.ResourceClass != "" ||
+		sr.Spec.Execution.ActiveDeadlineSeconds != nil ||
 		sr.Spec.Stdin != "" ||
 		len(sr.Spec.Env) > 0 ||
 		len(sr.Spec.EnvFrom) > 0 ||
@@ -288,6 +291,8 @@ func (r *SudoRequestReconciler) findOrCreateJob(ctx context.Context, sr *SudoReq
 // pod spec.
 func buildExecutorJob(sr *SudoRequest, ns, name string, extras *podExtras) batchv1.Job {
 	one := int32(0)
+	execution := executionPolicyFor(sr)
+	deadline := int64(execution.ActiveDeadlineSeconds)
 	// Output retention is the requester's ttlSecondsAfterApproval, but the Job
 	// itself must outlive its completion long enough for the reconciler to capture
 	// the pod logs — hence the floor. (See ExecutorJobTTLFloor.)
@@ -308,7 +313,7 @@ func buildExecutorJob(sr *SudoRequest, ns, name string, extras *podExtras) batch
 		// Copy so the stdin-mount append below never mutates the spec's slice.
 		VolumeMounts:    append([]corev1.VolumeMount(nil), extras.VolumeMounts...),
 		SecurityContext: hardenedContainerSecurityContext(),
-		Resources:       standardResources(),
+		Resources:       executionResources(execution.ResourceClass),
 	}
 
 	volumes := make([]corev1.Volume, len(extras.Volumes))
@@ -343,7 +348,7 @@ func buildExecutorJob(sr *SudoRequest, ns, name string, extras *podExtras) batch
 	for i := range extras.InitContainers {
 		extras.InitContainers[i].DeepCopyInto(&initContainers[i])
 		initContainers[i].SecurityContext = hardenedContainerSecurityContext()
-		initContainers[i].Resources = standardResources()
+		initContainers[i].Resources = executionResources(execution.ResourceClass)
 	}
 
 	// Splice writable /tmp and HOME scratch into every container that hasn't
@@ -375,6 +380,7 @@ func buildExecutorJob(sr *SudoRequest, ns, name string, extras *podExtras) batch
 		},
 		Spec: batchv1.JobSpec{
 			BackoffLimit:            &one,
+			ActiveDeadlineSeconds:   &deadline,
 			TTLSecondsAfterFinished: &jobTTL,
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
@@ -763,13 +769,27 @@ func containerToReport(pod *corev1.Pod) (container string, exitCode int32, err e
 
 // stopJob deletes the executor Job with background propagation, terminating its
 // pod and cascading its owned stdin Secret. Used when we fail a request whose pod
-// never started: without this the Job (which has no activeDeadlineSeconds, and no
-// ownerRef when cross-namespace) would keep its pod and could still run the
-// privileged command after the request is recorded Failed, and would leak in the
-// target namespace. Best-effort: a NotFound (already gone) is fine.
+// never started: without immediate cleanup the Job could still start and run the
+// privileged command until its hard deadline after the request is recorded
+// Failed. Best-effort: a NotFound (already gone) is fine.
 func (r *SudoRequestReconciler) stopJob(ctx context.Context, job *batchv1.Job) error {
 	policy := metav1.DeletePropagationBackground
 	if err := r.Delete(ctx, job, &client.DeleteOptions{PropagationPolicy: &policy}); err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+	return nil
+}
+
+// stopManagedJob uses foreground propagation plus a UID precondition. A
+// ManagedJob request does not become terminal until a later uncached Get
+// observes the exact Job gone, which also proves its dependent Pod is gone.
+func (r *SudoRequestReconciler) stopManagedJob(ctx context.Context, job *batchv1.Job) error {
+	policy := metav1.DeletePropagationForeground
+	uid := job.UID
+	if err := r.Delete(ctx, job, &client.DeleteOptions{
+		PropagationPolicy: &policy,
+		Preconditions:     &metav1.Preconditions{UID: &uid},
+	}); err != nil && !apierrors.IsNotFound(err) {
 		return err
 	}
 	return nil

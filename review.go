@@ -35,6 +35,56 @@ func displayPodTemplate(sr *SudoRequest, redactEnv bool) (string, error) {
 	return string(out), nil
 }
 
+// displayJobTemplate renders the complete controller-owned Job for managedJob
+// review. Unlike the Pod-only view, this includes the hard active deadline and
+// TTL policy that bound the asynchronous lifecycle.
+func displayJobTemplate(sr *SudoRequest, redactEnv bool) (string, error) {
+	extras, err := decodePodExtras(sr)
+	if err != nil {
+		return "", err
+	}
+	d := sr.DeepCopy()
+	if d.Spec.Stdin != "" && d.Status.StdinSecretName == "" {
+		d.Status.StdinSecretName = "<minted-at-approval>"
+	}
+	job := buildExecutorJob(d, executorNamespace(d), "<minted-at-approval>", extras)
+	if redactEnv {
+		redactPodEnv(&job.Spec.Template.Spec)
+	}
+	out, err := yaml.Marshal(job)
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
+}
+
+type executionView struct {
+	Mode                  string
+	ResourceClass         string
+	ActiveDeadlineSeconds int32
+	Requests              string
+	Limits                string
+	Cleanup               string
+}
+
+func newExecutionView(sr *SudoRequest) executionView {
+	policy := executionPolicyFor(sr)
+	resources := executionResources(policy.ResourceClass)
+	return executionView{
+		Mode: policy.Mode, ResourceClass: policy.ResourceClass,
+		ActiveDeadlineSeconds: policy.ActiveDeadlineSeconds,
+		Requests:              fmt.Sprintf("cpu=%s, memory=%s", resources.Requests.Cpu().String(), resources.Requests.Memory().String()),
+		Limits:                fmt.Sprintf("cpu=%s, memory=%s", resources.Limits.Cpu().String(), resources.Limits.Memory().String()),
+		Cleanup:               map[bool]string{true: "foreground deletion completes before terminal request status", false: "finished Job retained only for bounded TTL"}[isManagedJob(sr)],
+	}
+}
+
+func executionText(sr *SudoRequest) string {
+	v := newExecutionView(sr)
+	return fmt.Sprintf("execution: %s; resource class: %s; requests: %s; limits: %s; active deadline: %ds; cleanup: %s",
+		v.Mode, v.ResourceClass, v.Requests, v.Limits, v.ActiveDeadlineSeconds, v.Cleanup)
+}
+
 func redactPodEnv(pod *corev1.PodSpec) {
 	redact := func(cs []corev1.Container) {
 		for i := range cs {

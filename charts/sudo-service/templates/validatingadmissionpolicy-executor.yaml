@@ -57,6 +57,11 @@ spec:
         object.spec.ttlSecondsAfterFinished <= 3600
       message: "Job must set ttlSecondsAfterFinished <= 3600 (1h)"
     - expression: >-
+        has(object.spec.activeDeadlineSeconds) &&
+        object.spec.activeDeadlineSeconds > 0 &&
+        object.spec.activeDeadlineSeconds <= 7200
+      message: "Executor Job must set activeDeadlineSeconds between 1 and 7200"
+    - expression: >-
         object.spec.template.spec.restartPolicy == "Never"
       message: "Job pods must have restartPolicy=Never"
     - expression: >-

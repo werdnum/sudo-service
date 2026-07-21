@@ -56,11 +56,12 @@ func (a *APIServer) healthHandler(w http.ResponseWriter, _ *http.Request) {
 // ---- HTTP API (requester side) ----
 
 type createRequestBody struct {
-	Reason                  string `json:"reason"`
-	Command                 string `json:"command"`
-	Image                   string `json:"image,omitempty"`
-	Profile                 string `json:"profile,omitempty"`
-	TTLSecondsAfterApproval *int32 `json:"ttlSecondsAfterApproval,omitempty"`
+	Reason                  string               `json:"reason"`
+	Command                 string               `json:"command"`
+	Image                   string               `json:"image,omitempty"`
+	Profile                 string               `json:"profile,omitempty"`
+	TTLSecondsAfterApproval *int32               `json:"ttlSecondsAfterApproval,omitempty"`
+	Execution               SudoRequestExecution `json:"execution,omitempty"`
 
 	// Widened pod fields — same shape as the CRD spec, carried as raw JSON so a
 	// malformed item is rejected by validateSpecExtras (400) rather than failing
@@ -77,33 +78,45 @@ type createRequestBody struct {
 }
 
 type requestStatusResponse struct {
-	UID                       string                `json:"uid"`
-	Name                      string                `json:"name"`
-	Phase                     string                `json:"phase"`
-	Requester                 string                `json:"requester"`
-	Command                   string                `json:"command"`
-	Image                     string                `json:"image"`
-	Profile                   string                `json:"profile,omitempty"`
-	PreflightWarnings         []string              `json:"preflightWarnings,omitempty"`
-	Namespace                 string                `json:"namespace"`
-	ClusterAdmin              bool                  `json:"clusterAdmin"`
-	ApprovedBy                string                `json:"approvedBy,omitempty"`
-	ApprovedAt                string                `json:"approvedAt,omitempty"`
-	DeniedBy                  string                `json:"deniedBy,omitempty"`
-	DeniedAt                  string                `json:"deniedAt,omitempty"`
-	DenialReason              string                `json:"denialReason,omitempty"`
-	FailureReason             string                `json:"failureReason,omitempty"`
-	ExitCode                  *int32                `json:"exitCode,omitempty"`
-	OutputSecretRef           string                `json:"outputSecretRef,omitempty"`
-	OutputCaptureState        string                `json:"outputCaptureState,omitempty"`
-	OutputDeliveryState       string                `json:"outputDeliveryState,omitempty"`
-	OutputFailureReason       string                `json:"outputFailureReason,omitempty"`
-	OutputTotalBytes          *int64                `json:"outputTotalBytes,omitempty"`
-	OutputRetainedBytes       *int64                `json:"outputRetainedBytes,omitempty"`
-	OutputSHA256              string                `json:"outputSHA256,omitempty"`
-	Summary                   string                `json:"summary,omitempty"`
-	PermissionAssessment      *PermissionAssessment `json:"permissionAssessment,omitempty"`
-	PermissionAssessmentState string                `json:"permissionAssessmentState,omitempty"`
+	UID                       string                  `json:"uid"`
+	Name                      string                  `json:"name"`
+	Phase                     string                  `json:"phase"`
+	Requester                 string                  `json:"requester"`
+	Command                   string                  `json:"command"`
+	Image                     string                  `json:"image"`
+	Profile                   string                  `json:"profile,omitempty"`
+	PreflightWarnings         []string                `json:"preflightWarnings,omitempty"`
+	Namespace                 string                  `json:"namespace"`
+	ClusterAdmin              bool                    `json:"clusterAdmin"`
+	ApprovedBy                string                  `json:"approvedBy,omitempty"`
+	ApprovedAt                string                  `json:"approvedAt,omitempty"`
+	DeniedBy                  string                  `json:"deniedBy,omitempty"`
+	DeniedAt                  string                  `json:"deniedAt,omitempty"`
+	DenialReason              string                  `json:"denialReason,omitempty"`
+	FailureReason             string                  `json:"failureReason,omitempty"`
+	ExitCode                  *int32                  `json:"exitCode,omitempty"`
+	OutputSecretRef           string                  `json:"outputSecretRef,omitempty"`
+	OutputCaptureState        string                  `json:"outputCaptureState,omitempty"`
+	OutputDeliveryState       string                  `json:"outputDeliveryState,omitempty"`
+	OutputFailureReason       string                  `json:"outputFailureReason,omitempty"`
+	OutputTotalBytes          *int64                  `json:"outputTotalBytes,omitempty"`
+	OutputRetainedBytes       *int64                  `json:"outputRetainedBytes,omitempty"`
+	OutputSHA256              string                  `json:"outputSHA256,omitempty"`
+	Summary                   string                  `json:"summary,omitempty"`
+	PermissionAssessment      *PermissionAssessment   `json:"permissionAssessment,omitempty"`
+	PermissionAssessmentState string                  `json:"permissionAssessmentState,omitempty"`
+	Execution                 executionStatusResponse `json:"execution"`
+	ExecutorJobName           string                  `json:"executorJobName,omitempty"`
+	ExecutorJobUID            string                  `json:"executorJobUID,omitempty"`
+	ExecutorJobLifecycle      string                  `json:"executorJobLifecycle,omitempty"`
+	ExecutorJobStartedAt      string                  `json:"executorJobStartedAt,omitempty"`
+	ExecutorJobFinishedAt     string                  `json:"executorJobFinishedAt,omitempty"`
+}
+
+type executionStatusResponse struct {
+	Mode                  string `json:"mode"`
+	ResourceClass         string `json:"resourceClass"`
+	ActiveDeadlineSeconds int32  `json:"activeDeadlineSeconds"`
 }
 
 // createRequestHandler is POST /requests. The SA bearer token is authenticated
@@ -156,6 +169,7 @@ func (a *APIServer) createRequestHandler(w http.ResponseWriter, r *http.Request)
 			Image:                   body.Image,
 			Profile:                 body.Profile,
 			TTLSecondsAfterApproval: body.TTLSecondsAfterApproval,
+			Execution:               body.Execution,
 			Namespace:               body.Namespace,
 			Stdin:                   body.Stdin,
 			Env:                     body.Env,
@@ -265,6 +279,7 @@ func (a *APIServer) requestSubpathHandler(w http.ResponseWriter, r *http.Request
 }
 
 func (a *APIServer) serveStatus(w http.ResponseWriter, sr *SudoRequest) {
+	execution := executionPolicyFor(sr)
 	resp := requestStatusResponse{
 		UID:                       string(sr.UID),
 		Name:                      sr.Name,
@@ -291,6 +306,16 @@ func (a *APIServer) serveStatus(w http.ResponseWriter, sr *SudoRequest) {
 		Summary:                   sr.Status.Summary,
 		PermissionAssessment:      sr.Status.PermissionAssessment,
 		PermissionAssessmentState: sr.Status.PermissionAssessmentState,
+		Execution:                 executionStatusResponse{Mode: execution.Mode, ResourceClass: execution.ResourceClass, ActiveDeadlineSeconds: execution.ActiveDeadlineSeconds},
+		ExecutorJobName:           sr.Status.ExecutorJobName,
+		ExecutorJobUID:            sr.Status.ExecutorJobUID,
+		ExecutorJobLifecycle:      sr.Status.ExecutorJobLifecycle,
+	}
+	if sr.Status.ExecutorJobStartedAt != nil {
+		resp.ExecutorJobStartedAt = sr.Status.ExecutorJobStartedAt.UTC().Format("2006-01-02T15:04:05Z")
+	}
+	if sr.Status.ExecutorJobFinishedAt != nil {
+		resp.ExecutorJobFinishedAt = sr.Status.ExecutorJobFinishedAt.UTC().Format("2006-01-02T15:04:05Z")
 	}
 	if sr.Status.ApprovedAt != nil {
 		resp.ApprovedAt = sr.Status.ApprovedAt.UTC().Format("2006-01-02T15:04:05Z")
@@ -454,7 +479,9 @@ type approveView struct {
 	PreflightWarnings       []string
 	Stdin                   string
 	Extras                  specExtrasView
+	Execution               executionView
 	PodTemplate             string
+	JobTemplate             string
 	Summary                 string
 	PermissionRequest       string
 	PermissionEffects       []string
@@ -547,10 +574,16 @@ func (a *APIServer) renderApprovePage(w http.ResponseWriter, r *http.Request, cl
 		view.PreflightWarnings = sr.Status.PreflightWarnings
 		view.Stdin = sr.Spec.Stdin
 		view.Extras = newSpecExtrasView(sr, false)
+		view.Execution = newExecutionView(sr)
 		// Ground-truth pod spec (raw — the approve page is OIDC-protected). On the
 		// off chance it can't render, the curated rows above still stand.
 		if tmpl, err := displayPodTemplate(sr, false); err == nil {
 			view.PodTemplate = tmpl
+		}
+		if isManagedJob(sr) {
+			if tmpl, err := displayJobTemplate(sr, false); err == nil {
+				view.JobTemplate = tmpl
+			}
 		}
 		view.Summary = sr.Status.Summary
 		if assessment := sr.Status.PermissionAssessment; assessment != nil {

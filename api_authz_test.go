@@ -1,19 +1,51 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	authv1 "k8s.io/api/authentication/v1"
 	authorizationv1 "k8s.io/api/authorization/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
 	ktesting "k8s.io/client-go/testing"
 	ctrlfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
+
+func TestStatusResponseExposesManagedJobCorrelation(t *testing.T) {
+	deadline := int32(5400)
+	started := metav1.NewTime(time.Date(2026, 7, 21, 15, 0, 0, 0, time.UTC))
+	sr := &SudoRequest{
+		ObjectMeta: metav1.ObjectMeta{Name: "managed", UID: "request-uid"},
+		Spec: SudoRequestSpec{Execution: SudoRequestExecution{
+			Mode: ExecutionModeManagedJob, ResourceClass: ResourceClassLongRunning,
+			ActiveDeadlineSeconds: &deadline,
+		}},
+		Status: SudoRequestStatus{
+			Phase: PhaseApproved, ExecutorJobName: "sudo-exec-x", ExecutorJobUID: "job-uid",
+			ExecutorJobLifecycle: JobLifecycleRunning, ExecutorJobStartedAt: &started,
+		},
+	}
+	response := httptest.NewRecorder()
+	(&APIServer{}).serveStatus(response, sr)
+	var body map[string]any
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	execution := body["execution"].(map[string]any)
+	if execution["mode"] != ExecutionModeManagedJob || execution["activeDeadlineSeconds"] != float64(5400) {
+		t.Fatalf("execution=%v", execution)
+	}
+	if body["executorJobUID"] != "job-uid" || body["executorJobLifecycle"] != JobLifecycleRunning || body["executorJobStartedAt"] != "2026-07-21T15:00:00Z" {
+		t.Fatalf("correlation fields=%v", body)
+	}
+}
 
 func TestCreateRequestRequiresRequesterAuthorization(t *testing.T) {
 	const (

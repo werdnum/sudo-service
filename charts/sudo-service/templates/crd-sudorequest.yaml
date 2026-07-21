@@ -82,6 +82,25 @@ spec:
                   # Capped at 3600 to match the executor VAP's ttlSecondsAfterFinished
                   # guard (kubernetes/manifests/workloads/sudo-service/validatingadmissionpolicy-executor.yaml).
                   maximum: 3600
+                execution:
+                  type: object
+                  additionalProperties: false
+                  description: >-
+                    Curated execution lifecycle. managedJob is the controller-owned
+                    executor Job with bounded long-running resources, not permission
+                    for the command to create another workload.
+                  properties:
+                    mode:
+                      type: string
+                      enum: [foreground, managedJob]
+                    resourceClass:
+                      type: string
+                      enum: [standard, long-running]
+                    activeDeadlineSeconds:
+                      type: integer
+                      format: int32
+                      minimum: 300
+                      maximum: 7200
                 namespace:
                   type: string
                   description: >-
@@ -286,6 +305,12 @@ spec:
                     UID of the created executor Job. Distinguishes "not yet
                     created" from "created then GC'd" (in which case the request
                     is failed rather than replayed), and detects a replaced Job.
+                executorJobLifecycle:
+                  type: string
+                  enum: [Created, Running, ResultCaptured, CleanupRequested, Cleaned]
+                  description: Durable lifecycle of the UID-correlated managed Job.
+                executorJobStartedAt: {type: string, format: date-time}
+                executorJobFinishedAt: {type: string, format: date-time}
                 pushoverRequestID: {type: string}
                 notificationState:
                   type: string

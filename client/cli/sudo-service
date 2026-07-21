@@ -32,6 +32,7 @@ REQUEST_FIELDS = {
     "initContainers",
     "imagePullSecrets",
     "privileges",
+    "execution",
 }
 LIST_REQUEST_FIELDS = {
     "env",
@@ -159,6 +160,11 @@ def parse_args() -> argparse.Namespace:
         "--quiet",
         action="store_true",
         help="Suppress progress messages on stderr.",
+    )
+    parser.add_argument(
+        "--detach",
+        action="store_true",
+        help="Submit an explicit managedJob request, print its UID, and return without polling.",
     )
     parser.add_argument(
         "--no-validate",
@@ -295,6 +301,29 @@ def validate_request_body(body: dict[str, Any]) -> None:
             )
         if "clusterAdmin" in privileges and not isinstance(privileges["clusterAdmin"], bool):
             raise SudoServiceError("request field 'privileges.clusterAdmin' must be a boolean")
+    if "execution" in body:
+        execution = body["execution"]
+        if not isinstance(execution, dict):
+            raise SudoServiceError("request field 'execution' must be an object")
+        unknown_execution = sorted(set(execution) - {"mode", "resourceClass", "activeDeadlineSeconds"})
+        if unknown_execution:
+            raise SudoServiceError("unsupported execution field(s): " + ", ".join(unknown_execution))
+        if "mode" in execution and execution["mode"] not in {"foreground", "managedJob"}:
+            raise SudoServiceError("execution.mode must be foreground or managedJob")
+        if "resourceClass" in execution and execution["resourceClass"] not in {"standard", "long-running"}:
+            raise SudoServiceError("execution.resourceClass must be standard or long-running")
+        if "activeDeadlineSeconds" in execution and (isinstance(execution["activeDeadlineSeconds"], bool) or not isinstance(execution["activeDeadlineSeconds"], int)):
+            raise SudoServiceError("execution.activeDeadlineSeconds must be an integer")
+        mode = execution.get("mode")
+        if mode == "managedJob" and (
+            execution.get("resourceClass") != "long-running"
+            or not isinstance(execution.get("activeDeadlineSeconds"), int)
+            or isinstance(execution.get("activeDeadlineSeconds"), bool)
+            or not 300 <= execution["activeDeadlineSeconds"] <= 7200
+        ):
+            raise SudoServiceError(
+                "managedJob requires resourceClass=long-running and activeDeadlineSeconds between 300 and 7200"
+            )
     try:
         json.dumps(body)
     except (TypeError, ValueError) as exc:
@@ -395,6 +424,10 @@ def status_message(status: dict[str, Any]) -> str:
         bits.append(f"name={status['name']}")
     if status.get("exitCode") is not None:
         bits.append(f"exitCode={status['exitCode']}")
+    if status.get("executorJobLifecycle"):
+        bits.append(f"jobLifecycle={status['executorJobLifecycle']}")
+    if status.get("executorJobUID"):
+        bits.append(f"jobUID={status['executorJobUID']}")
     return " ".join(bits)
 
 
@@ -461,6 +494,8 @@ def main() -> int:
     validate_request_body(body)
     if body.get("image") and body.get("profile"):
         raise SudoServiceError("request fields 'image' and 'profile' are mutually exclusive")
+    if args.detach and (body.get("execution") or {}).get("mode") != "managedJob":
+        raise SudoServiceError("--detach requires execution.mode=managedJob")
 
     if not args.no_validate:
         syntax_error = validate_command_syntax(body["command"])
@@ -485,16 +520,20 @@ def main() -> int:
             print(f"executor {prefix}resolved-image={resolved}", file=sys.stderr)
     for warning in create_response.get("warnings") or []:
         print(f"sudo-service preflight warning: {warning}", file=sys.stderr)
+    if args.detach:
+        print(uid)
+        return 0
 
     deadline = time.monotonic() + args.timeout
-    last_phase = None
+    last_message = None
     status: dict[str, Any] = {}
     while True:
         status = get_status(base_url, args.token_file, uid)
         phase = str(status.get("phase") or "Pending")
-        if phase != last_phase and not args.quiet:
-            print(status_message(status), file=sys.stderr)
-            last_phase = phase
+        message = status_message(status)
+        if message != last_message and not args.quiet:
+            print(message, file=sys.stderr)
+            last_message = message
         if phase in TERMINAL_PHASES:
             break
         if time.monotonic() >= deadline:

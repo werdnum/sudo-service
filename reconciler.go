@@ -94,8 +94,22 @@ func (r *SudoRequestReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 					return ctrl.Result{}, fmt.Errorf("read executor job during finalize: %w", err)
 				}
 				if job != nil {
-					if err := r.stopJob(ctx, job); err != nil {
+					if isManagedJob(&sr) && sr.Status.ExecutorJobUID != "" && string(job.UID) != sr.Status.ExecutorJobUID {
+						// The approved UID is already gone; never delete a replacement
+						// merely because it reused the recorded random name.
+						job = nil
+					}
+				}
+				if job != nil {
+					stop := r.stopJob
+					if isManagedJob(&sr) {
+						stop = r.stopManagedJob
+					}
+					if err := stop(ctx, job); err != nil {
 						return ctrl.Result{}, fmt.Errorf("stop executor job during finalize: %w", err)
+					}
+					if isManagedJob(&sr) {
+						return ctrl.Result{RequeueAfter: time.Second}, nil
 					}
 				}
 			}
@@ -338,12 +352,20 @@ func (r *SudoRequestReconciler) generatePermissionAssessment(ctx context.Context
 	if r.Summarizer == nil {
 		return nil, nil
 	}
-	// Give the model the ground-truth Pod spec, but redact literal env values
+	// Give the model the ground-truth workload spec, but redact literal env values
 	// because this context leaves the cluster. Human review surfaces keep raw
-	// values as ground truth.
+	// values as ground truth. Managed execution includes the complete Job so the
+	// assessment sees its resource, deadline, and cleanup controls.
 	aiContext := ""
 	if hasSpecExtras(sr) {
-		if tmpl, err := displayPodTemplate(sr, true); err == nil {
+		var tmpl string
+		var err error
+		if isManagedJob(sr) {
+			tmpl, err = displayJobTemplate(sr, true)
+		} else {
+			tmpl, err = displayPodTemplate(sr, true)
+		}
+		if err == nil {
 			aiContext = tmpl
 		} else {
 			aiContext = specExtrasText(sr, true)
@@ -397,6 +419,7 @@ func (r *SudoRequestReconciler) deliverApprovalNotification(ctx context.Context,
 	for _, warning := range sr.Status.PreflightWarnings {
 		body += "\npreflight warning: " + warning
 	}
+	body += "\n" + executionText(sr)
 	if extras := specExtrasText(sr, true); extras != "" {
 		body += "\n" + extras
 	}
@@ -478,6 +501,9 @@ func (r *SudoRequestReconciler) markFailed(ctx context.Context, sr *SudoRequest,
 	if err := r.updateStatus(ctx, sr, func(s *SudoRequest) {
 		s.Status.Phase = PhaseFailed
 		s.Status.FailureReason = reason
+		if isManagedJob(s) && s.Status.ExecutorJobUID != "" {
+			s.Status.ExecutorJobLifecycle = JobLifecycleCleaned
+		}
 	}); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -496,13 +522,40 @@ func (r *SudoRequestReconciler) markFailed(ctx context.Context, sr *SudoRequest,
 
 // failApproved moves an Approved request to Failed with a reason.
 //
-// It first best-effort stops any executor Job sitting at the minted name. That
+// It first stops any executor Job sitting at the minted name. That
 // Job may be one we must not leave running: a foreign/pre-created Job, a Job that
 // replaced ours (UID mismatch), our own Job that ended up mounting a foreign
-// stdin Secret, or a stuck pod past its start deadline. None of these have an
-// ownerRef/activeDeadlineSeconds to stop them, so without this they'd keep
-// running (an unapproved or unreviewed workload) after we record Failed.
+// stdin Secret, or a stuck pod past its start deadline. The hard deadline is
+// only a backstop; without synchronous cleanup these workloads could
+// keep running until that deadline after we record Failed.
 func (r *SudoRequestReconciler) failApproved(ctx context.Context, sr *SudoRequest, reason string) (ctrl.Result, error) {
+	if isManagedJob(sr) && sr.Status.ExecutorJobUID != "" {
+		job, err := r.getExecutorJob(ctx, sr)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		// A replacement is not the approved UID-bound workload. Do not delete an
+		// unrelated object merely because it reused our random name.
+		if job != nil && string(job.UID) != sr.Status.ExecutorJobUID {
+			return r.markFailed(ctx, sr, reason)
+		}
+		finished := metav1.NewTime(time.Now())
+		if err := r.updateStatus(ctx, sr, func(s *SudoRequest) {
+			s.Status.FailureReason = reason
+			s.Status.ExecutorJobLifecycle = JobLifecycleCleanupRequested
+			if s.Status.ExecutorJobFinishedAt == nil {
+				s.Status.ExecutorJobFinishedAt = &finished
+			}
+		}); err != nil {
+			return ctrl.Result{}, err
+		}
+		if job != nil {
+			if err := r.stopManagedJob(ctx, job); err != nil {
+				return ctrl.Result{}, fmt.Errorf("foreground-delete managed Job before failing: %w", err)
+			}
+		}
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
 	if sr.Status.ExecutorJobName != "" {
 		job, err := r.getExecutorJob(ctx, sr)
 		if err != nil {
@@ -519,6 +572,27 @@ func (r *SudoRequestReconciler) failApproved(ctx context.Context, sr *SudoReques
 		}
 	}
 	return r.markFailed(ctx, sr, reason)
+}
+
+func (r *SudoRequestReconciler) finalizeManagedFailure(ctx context.Context, sr *SudoRequest) (ctrl.Result, error) {
+	reason := sr.Status.FailureReason
+	if reason == "" {
+		reason = "managed Job failed before producing a command result"
+	}
+	if err := r.updateStatus(ctx, sr, func(s *SudoRequest) {
+		s.Status.Phase = PhaseFailed
+		s.Status.FailureReason = reason
+		s.Status.ExecutorJobLifecycle = JobLifecycleCleaned
+	}); err != nil {
+		return ctrl.Result{}, err
+	}
+	r.Recorder.Eventf(sr, corev1.EventTypeWarning, "Failed", "%s", reason)
+	r.Broadcaster.Publish(string(sr.UID), Event{
+		Type: "phase", Phase: PhaseFailed, FailureReason: reason,
+		Requester: sr.Spec.Requester, Reason: sr.Spec.Reason, Command: sr.Spec.Command,
+		CreatedAt: sr.CreationTimestamp.Format("2006-01-02 15:04:05 UTC"),
+	})
+	return ctrl.Result{}, nil
 }
 
 func (r *SudoRequestReconciler) handleApproved(ctx context.Context, sr *SudoRequest) (ctrl.Result, error) {
@@ -544,10 +618,11 @@ func (r *SudoRequestReconciler) handleApproved(ctx context.Context, sr *SudoRequ
 		return ctrl.Result{Requeue: true}, nil
 	}
 
-	// A cross-namespace executor Job carries no ownerRef, so it won't cascade when
-	// the SudoRequest is deleted. Add the cleanup finalizer before creating any
-	// Job (same-namespace Jobs cascade via their ownerRef and don't need it).
-	if executorNamespace(sr) != ControllerNamespace && !controllerutil.ContainsFinalizer(sr, executorCleanupFinalizer) {
+	// A cross-namespace Job needs a finalizer because ownerRefs cannot cross
+	// namespaces. ManagedJob uses the finalizer in every namespace so deletion of
+	// the SudoRequest waits for foreground deletion of its exact UID-bound Job.
+	needsCleanupFinalizer := executorNamespace(sr) != ControllerNamespace || isManagedJob(sr)
+	if needsCleanupFinalizer && !controllerutil.ContainsFinalizer(sr, executorCleanupFinalizer) {
 		controllerutil.AddFinalizer(sr, executorCleanupFinalizer)
 		if err := r.Update(ctx, sr); err != nil {
 			return ctrl.Result{}, fmt.Errorf("add executor-cleanup finalizer: %w", err)
@@ -623,6 +698,9 @@ func (r *SudoRequestReconciler) handleApproved(ctx context.Context, sr *SudoRequ
 				return
 			}
 			s.Status.ExecutorJobUID = uid
+			if isManagedJob(s) && s.Status.ExecutorJobLifecycle == "" {
+				s.Status.ExecutorJobLifecycle = JobLifecycleCreated
+			}
 		}); err != nil {
 			// The status write failed even after refetch+retry — this is no longer a
 			// transient cache-lag conflict. Roll back the Job we just created.
@@ -647,6 +725,31 @@ func (r *SudoRequestReconciler) handleApproved(ctx context.Context, sr *SudoRequ
 		// Don't read its logs/exit code as if it were the approved workload.
 		return r.failApproved(ctx, sr, "executor Job was replaced by a different object; refusing to use it")
 	}
+
+	// ManagedJob cleanup is a durable, restart-safe state. Captured output or a
+	// pending failure is persisted before CleanupRequested. Foreground deletion
+	// uses a UID precondition, and terminal request status waits for an uncached
+	// Get to observe the Job (and therefore its dependent Pod) gone.
+	if isManagedJob(sr) && (sr.Status.ExecutorJobLifecycle == JobLifecycleResultCaptured || sr.Status.ExecutorJobLifecycle == JobLifecycleCleanupRequested) {
+		if sr.Status.ExecutorJobLifecycle == JobLifecycleResultCaptured {
+			if err := r.updateStatus(ctx, sr, func(s *SudoRequest) {
+				s.Status.ExecutorJobLifecycle = JobLifecycleCleanupRequested
+			}); err != nil {
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{Requeue: true}, nil
+		}
+		if job != nil {
+			if err := r.stopManagedJob(ctx, job); err != nil {
+				return ctrl.Result{}, fmt.Errorf("foreground-delete managed Job %s: %w", job.Name, err)
+			}
+			return ctrl.Result{RequeueAfter: time.Second}, nil
+		}
+		if sr.Status.ExitCode != nil {
+			return r.finalizeFromRecordedResult(ctx, sr)
+		}
+		return r.finalizeManagedFailure(ctx, sr)
+	}
 	if job == nil {
 		// If we already captured the result (the sidecar two-phase below records
 		// outputSecret+exitCode before tearing the Job down), the Job being gone now
@@ -659,7 +762,7 @@ func (r *SudoRequestReconciler) handleApproved(ctx context.Context, sr *SudoRequ
 		// rather than re-creating (which would re-run the privileged command).
 		log.Info("executor Job missing before completion; failing request to prevent replay",
 			"jobName", sr.Status.ExecutorJobName)
-		return r.markFailed(ctx, sr, fmt.Sprintf(
+		return r.failApproved(ctx, sr, fmt.Sprintf(
 			"Executor Job %s disappeared before controller observed completion (likely ttlSecondsAfterApproval too short)",
 			sr.Status.ExecutorJobName))
 	}
@@ -675,6 +778,18 @@ func (r *SudoRequestReconciler) handleApproved(ctx context.Context, sr *SudoRequ
 	}
 	jobFinished := job.Status.Succeeded > 0 || job.Status.Failed > 0
 	executorDone := pod != nil && executorContainerTerminated(pod)
+	if isManagedJob(sr) && !jobFinished && !executorDone && pod != nil && pod.Status.Phase == corev1.PodRunning && sr.Status.ExecutorJobLifecycle != JobLifecycleRunning {
+		now := metav1.NewTime(time.Now())
+		if err := r.updateStatus(ctx, sr, func(s *SudoRequest) {
+			s.Status.ExecutorJobLifecycle = JobLifecycleRunning
+			if s.Status.ExecutorJobStartedAt == nil {
+				s.Status.ExecutorJobStartedAt = &now
+			}
+		}); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	}
 	if !jobFinished && !executorDone {
 		// Still running — requeue, but guard against a pod that never starts. An
 		// unsatisfiable mount (a Secret/ConfigMap/PVC that doesn't exist in the
@@ -687,9 +802,8 @@ func (r *SudoRequestReconciler) handleApproved(ctx context.Context, sr *SudoRequ
 			return ctrl.Result{}, err
 		}
 		if timedOut {
-			// failApproved stops the Job (it has no activeDeadlineSeconds and, cross
-			// namespace, no ownerRef, so leaving it would let the pod start and run
-			// the privileged command after we record Failed).
+			// failApproved stops the Job before terminal state; the hard deadline is
+			// a backstop, not permission to leave a stuck pod alive until it expires.
 			return r.failApproved(ctx, sr, fmt.Sprintf("executor pod did not start within %ds: %s", ExecutorStartDeadline, reason))
 		}
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
@@ -709,7 +823,29 @@ func (r *SudoRequestReconciler) handleApproved(ctx context.Context, sr *SudoRequ
 			return ctrl.Result{}, fmt.Errorf("capture output while sidecar holds job %s open: %w", job.Name, err)
 		}
 		log.Error(err, "determine executor result")
+		if isManagedJob(sr) {
+			return r.failApproved(ctx, sr, fmt.Sprintf("Failed to determine executor result: %v", err))
+		}
 		return r.markFailed(ctx, sr, fmt.Sprintf("Failed to determine executor result: %v", err))
+	}
+
+	if isManagedJob(sr) {
+		// Persist the complete bounded result before requesting cleanup. If the
+		// controller restarts or deletion sticks, output remains available and the
+		// request stays visibly Approved rather than losing the result.
+		finished := metav1.NewTime(time.Now())
+		ec := result.ExitCode
+		if err := r.updateStatus(ctx, sr, func(s *SudoRequest) {
+			applyCapturedOutputStatus(s, result)
+			s.Status.ExitCode = &ec
+			s.Status.ExecutorJobLifecycle = JobLifecycleResultCaptured
+			if s.Status.ExecutorJobFinishedAt == nil {
+				s.Status.ExecutorJobFinishedAt = &finished
+			}
+		}); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{Requeue: true}, nil
 	}
 
 	// If the executor finished but the Job hasn't (an injected sidecar is keeping
@@ -787,6 +923,9 @@ func (r *SudoRequestReconciler) finalizeFromRecordedResult(ctx context.Context, 
 			s.Status.Phase = PhaseExecuted
 		} else {
 			s.Status.Phase = PhaseFailed
+		}
+		if isManagedJob(s) {
+			s.Status.ExecutorJobLifecycle = JobLifecycleCleaned
 		}
 	}); err != nil {
 		return ctrl.Result{}, err

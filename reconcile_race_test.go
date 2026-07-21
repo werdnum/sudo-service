@@ -143,6 +143,9 @@ func driveApproved(t *testing.T, sr *SudoRequest, extra ...client.Object) {
 	if final.Status.ExecutorJobUID == "" {
 		t.Fatal("ExecutorJobUID not recorded")
 	}
+	if isManagedJob(&final) && final.Status.ExecutorJobLifecycle != JobLifecycleCreated {
+		t.Fatalf("managed lifecycle=%q, want Created", final.Status.ExecutorJobLifecycle)
+	}
 
 	var jobs batchv1.JobList
 	if err := apiserver.List(ctx, &jobs, client.InNamespace(executorNamespace(sr))); err != nil {
@@ -174,6 +177,25 @@ func TestApprovedPlainCommandSurvivesCacheLag(t *testing.T) {
 			Requester: "alice",
 			Reason:    "seaweedfs preflight",
 			Command:   "kubectl apply -f -",
+		},
+		Status: SudoRequestStatus{Phase: PhaseApproved, ApprovedBy: "andrew"},
+	}
+	driveApproved(t, sr)
+}
+
+func TestApprovedManagedJobSurvivesCacheLagAndRecordsCreated(t *testing.T) {
+	deadline := int32(3600)
+	sr := &SudoRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "http-managed", Namespace: ControllerNamespace,
+			UID: "uid-managed", ResourceVersion: "100",
+		},
+		Spec: SudoRequestSpec{
+			Requester: "alice", Reason: "long drift run", Command: "ansible-playbook drift.yaml",
+			Execution: SudoRequestExecution{
+				Mode: ExecutionModeManagedJob, ResourceClass: ResourceClassLongRunning,
+				ActiveDeadlineSeconds: &deadline,
+			},
 		},
 		Status: SudoRequestStatus{Phase: PhaseApproved, ApprovedBy: "andrew"},
 	}
