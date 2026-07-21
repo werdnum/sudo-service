@@ -172,6 +172,13 @@ func (a *APIServer) retryRequest(ctx context.Context, source *SudoRequest, submi
 		}
 		return duplicate, false, &pendingDuplicateError{UID: duplicate.UID}
 	}
+	// A retry is a fresh submission, so re-run current profile resolution and
+	// preflight before creating it. Catalog support may have changed since the
+	// predecessor was accepted; fail synchronously instead of creating a request
+	// that handleNew will immediately deny.
+	if _, _, _, err := resolveAndPreflight(successor); err != nil {
+		return nil, false, fmt.Errorf("retry preflight: %w", err)
+	}
 	if err := validateCommandSyntax(successor.Spec.Command); err != nil {
 		return nil, false, err
 	}

@@ -511,6 +511,7 @@ type resultView struct {
 	Title     string
 	Message   string
 	UID       string
+	LinkUID   bool
 	Variant   string // "success" or "error"
 	User      string
 	UserEmail string
@@ -649,13 +650,25 @@ func (a *APIServer) resubmitHandlerWithClaims(w http.ResponseWriter, r *http.Req
 	successor, _, retryErr := a.retryRequest(r.Context(), source, actor, true)
 	a.requestMu.Unlock()
 	if retryErr != nil {
+		var duplicate *pendingDuplicateError
+		if errors.As(retryErr, &duplicate) {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(http.StatusConflict)
+			_ = a.Templates.ExecuteTemplate(w, "result.html", resultView{
+				Title:   "Equivalent request already pending",
+				Message: "Use the active request below instead of creating another retry.",
+				UID:     string(duplicate.UID), LinkUID: true, Variant: "error",
+				User: claims.PreferredUsername, UserEmail: claims.Email,
+			})
+			return
+		}
 		http.Error(w, "resubmit: "+retryErr.Error(), http.StatusConflict)
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = a.Templates.ExecuteTemplate(w, "result.html", resultView{
 		Title: "Resubmitted", Message: "A new request was created for explicit review.",
-		UID: string(successor.UID), Variant: "success",
+		UID: string(successor.UID), LinkUID: true, Variant: "success",
 		User: claims.PreferredUsername, UserEmail: claims.Email,
 	})
 }

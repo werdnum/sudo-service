@@ -238,3 +238,38 @@ func TestAdminResubmitRejectsVerifiedNonAdminClaims(t *testing.T) {
 		t.Fatalf("non-admin status=%d body=%s", rw.Code, rw.Body.String())
 	}
 }
+
+func TestAdminResubmitDuplicateLinksActiveRequest(t *testing.T) {
+	source := pendingApprovalRequest()
+	source.Status.Phase = PhaseDenied
+	a, cl, claims := approvalTestServer(t, source)
+	pending := source.DeepCopy()
+	pending.Name = "equivalent-pending"
+	pending.UID = "equivalent-pending-uid"
+	pending.ResourceVersion = ""
+	pending.Status = SudoRequestStatus{Phase: PhasePending}
+	if err := cl.Create(context.Background(), pending); err != nil {
+		t.Fatal(err)
+	}
+
+	form := url.Values{"id": {string(source.UID)}, "csrf_token": {"csrf-value"}}
+	req := httptest.NewRequest(http.MethodPost, "/resubmit", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(&http.Cookie{Name: csrfCookieName, Value: "csrf-value"})
+	rw := httptest.NewRecorder()
+	a.resubmitHandlerWithClaims(rw, req, claims)
+	if rw.Code != http.StatusConflict {
+		t.Fatalf("duplicate resubmit status=%d body=%s", rw.Code, rw.Body.String())
+	}
+	body := rw.Body.String()
+	if !strings.Contains(body, string(pending.UID)) || !strings.Contains(body, "/approve?id="+string(pending.UID)) {
+		t.Fatalf("duplicate response does not link active UID: %s", body)
+	}
+	var current SudoRequest
+	if err := cl.Get(context.Background(), client.ObjectKeyFromObject(source), &current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Status.SupersededByUID != "" {
+		t.Fatalf("unrelated pending request became lineage successor: %s", current.Status.SupersededByUID)
+	}
+}

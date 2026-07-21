@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -265,6 +266,24 @@ func TestRetryPreservesConflictForUnrelatedEquivalentPendingRequest(t *testing.T
 	var duplicate *pendingDuplicateError
 	if !errors.As(err, &duplicate) || duplicate.UID != pending.UID {
 		t.Fatalf("error=%v, want pending duplicate for %s", err, pending.UID)
+	}
+}
+
+func TestRetryRevalidatesCurrentProfileBeforeCreating(t *testing.T) {
+	source := expiredSource()
+	source.Spec.Profile = "removed-profile"
+	cl := retryTestClient(t, source, nil)
+	api := &APIServer{Client: cl}
+	if _, _, err := api.retryRequest(context.Background(), source, "alice", false); err == nil ||
+		!strings.Contains(err.Error(), "unknown executor profile") {
+		t.Fatalf("retry error=%v, want current profile rejection", err)
+	}
+	var requests SudoRequestList
+	if err := cl.List(context.Background(), &requests); err != nil {
+		t.Fatal(err)
+	}
+	if len(requests.Items) != 1 {
+		t.Fatalf("retry created a successor before profile rejection; count=%d", len(requests.Items))
 	}
 }
 
