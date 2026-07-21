@@ -1,0 +1,76 @@
+# Close the direct-Pod escape hatch around the cluster-admin executor ServiceAccount.
+#
+# The Job policy is the approval boundary: only the sudo-service controller can
+# create an executor Job. This policy preserves the next, legitimate hop (the
+# Kubernetes Job controller creating that Job's Pod) while rejecting every other
+# direct Pod creation that selects the executor SA.
+#
+# Kubernetes controller-manager can run controllers under per-controller service
+# accounts (--use-service-account-credentials=true) or its shared credential. The
+# two usernames below cover both upstream modes. They are authenticated usernames,
+# not caller-controlled object fields; users who can impersonate either system
+# identity are therefore part of the cluster's trusted control-plane boundary.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: sudo-service-executor-pod-restrictions
+  annotations:
+    kubernetes.io/description: >-
+      Prevent direct Pods from selecting the sudo-service cluster-admin executor
+      ServiceAccount; only Job-controller Pods with matching Job lineage are allowed.
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["pods"]
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: {{ .Values.namespace }}
+  matchConditions:
+    - name: uses-cluster-admin-executor-service-account
+      expression: >-
+        has(object.spec.serviceAccountName) &&
+        object.spec.serviceAccountName == "sudo-service-executor-sa"
+  validations:
+    - expression: >-
+        request.userInfo.username in [
+          "system:serviceaccount:kube-system:job-controller",
+          "system:kube-controller-manager"
+        ]
+      message: "Only the Kubernetes Job controller may create executor Pods"
+    - expression: >-
+        has(object.metadata.ownerReferences) &&
+        object.metadata.ownerReferences.filter(o,
+          has(o.controller) && o.controller
+        ).size() == 1 &&
+        object.metadata.ownerReferences.exists(o,
+          o.apiVersion == "batch/v1" &&
+          o.kind == "Job" &&
+          has(o.controller) && o.controller &&
+          has(o.blockOwnerDeletion) && o.blockOwnerDeletion &&
+          o.name != "" && o.uid != ""
+        )
+      message: "Executor Pod must be controlled by exactly one batch/v1 Job"
+    - expression: >-
+        has(object.metadata.labels) &&
+        "batch.kubernetes.io/controller-uid" in object.metadata.labels &&
+        "batch.kubernetes.io/job-name" in object.metadata.labels &&
+        object.metadata.ownerReferences.exists(o,
+          o.apiVersion == "batch/v1" &&
+          o.kind == "Job" &&
+          has(o.controller) && o.controller &&
+          object.metadata.labels["batch.kubernetes.io/controller-uid"] == o.uid &&
+          object.metadata.labels["batch.kubernetes.io/job-name"] == o.name
+        )
+      message: "Executor Pod Job labels must match its controller ownerReference"
+    - expression: >-
+        has(object.metadata.labels) &&
+        has(object.metadata.labels.app) &&
+        (object.metadata.labels.app == "sudo-service-executor" ||
+         object.metadata.labels.app == "sudo-service") &&
+        has(object.metadata.labels.role) &&
+        object.metadata.labels.role == "executor"
+      message: "Executor Pod must carry the admitted executor Job labels"

@@ -74,6 +74,35 @@ under the `default` SA) would slip past the policy entirely. Keeping the SA bran
 means a Job using the cluster-admin SA still can't dodge the policy by omitting the
 label.
 
+The Job policy alone is not sufficient for a reusable chart: a namespace editor
+with `create pods` could otherwise create a raw Pod with
+`serviceAccountName: sudo-service-executor-sa` and skip the Job admission check.
+`validatingadmissionpolicy-executor-pod.yaml` closes that path. It permits a Pod
+using the executor SA only when:
+
+- the authenticated caller is the upstream Job controller (either its
+  per-controller ServiceAccount or the shared kube-controller-manager identity),
+- the Pod has exactly one controlling `batch/v1` Job ownerReference, and
+- the stable Job name/controller UID labels agree with that ownerReference and
+  the executor labels copied from the admitted Job are present.
+
+The authenticated username is the important boundary here. OwnerReferences and
+labels are caller-supplied on a direct Pod and therefore prove nothing by
+themselves; they are checked only to keep the trusted Job-controller exception as
+narrow as possible. Kubernetes may run controllers with individual ServiceAccount
+credentials (`--use-service-account-credentials`) or one controller-manager
+credential, so the policy accepts both upstream identities. A distribution that
+uses a different Job-controller username must adapt this cluster-scoped policy as
+part of installing the chart.
+
+ValidatingAdmissionPolicy cannot dereference the Job. The chain is instead
+composed from two admission decisions: only the sudo-service controller can create
+an executor Job, and only the Kubernetes Job controller can turn such a Job into
+a Pod. An actor allowed to impersonate either accepted system identity could forge
+that second hop; such impersonation must remain control-plane-admin-only. The
+chart deliberately does not grant it, does not grant the sudo-service controller
+Pod creation, and does not broaden executor or controller RBAC for this policy.
+
 Note that cross-namespace ownerReferences are not honoured by Kubernetes GC, so
 the executor Job only carries an ownerRef to its SudoRequest in the controller
 namespace; cross-namespace Jobs are reclaimed by `ttlSecondsAfterFinished`

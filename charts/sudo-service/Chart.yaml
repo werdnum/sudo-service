@@ -8,7 +8,7 @@ description: |-
 type: application
 # Chart version is bumped on chart changes; appVersion tracks the container
 # image and is rewritten by .github/workflows/build.yaml on each push to main.
-version: 0.1.0
+version: 0.1.1
 appVersion: "20260626_070233-6d45c41"
 keywords:
   - sudo
