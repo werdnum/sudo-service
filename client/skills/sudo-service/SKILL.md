@@ -122,6 +122,20 @@ command: "exact shell command, single string"
 # privileges: {clusterAdmin: true}    # default true in sudo-service ns, unavailable elsewhere
 ```
 
+If no convenient image contains an uncommon tool combination, remember that the
+CLI can build an arm64 Nixery image with repeated `--tool` flags. For example,
+`--tool openssh --tool ansible --tool kubectl --tool opentofu` submits the normal
+raw image
+`nixery.dev/arm64/shell/ansible/kubectl/openssh/opentofu`; there is no special
+server-side Nixery profile. Prefer this to spending time searching for a bespoke
+image. Use `--image` directly for another architecture or a manually composed
+Nixery URL. Nixery images may pull slowly the first time.
+
+OpenSSH is unusual because it requires a passwd entry for the executor's numeric
+UID. If it reports `No user exists for uid 1000`, use the documented structured
+init-container and `/etc/passwd` subPath workaround in `client/README.md`; do not
+infer that all Nixery tools require special handling.
+
 The HTTP API stamps the authenticated requester and the request file must not
 contain `requester`. In the lower-level direct-CRD fallback below, a
 `ValidatingAdmissionPolicy` enforces `spec.requester == request.userInfo.username`,
