@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"html/template"
 	"strings"
 	"testing"
 )
@@ -68,6 +70,24 @@ func TestPreflightRejectsKnownMissingVisibleExecutable(t *testing.T) {
 	if _, err := preflightCommand(`tool=ssh; "$tool" host.example`, &profile); err != nil {
 		t.Fatalf("dynamic command was treated as statically certain: %v", err)
 	}
+
+	// The catalog describes the base image, not tools staged into arbitrary
+	// approved mounts by an init container.
+	if _, err := preflightCommand(`/tools/ssh host.example`, &profile); err != nil {
+		t.Fatalf("staged executable was compared with the base-image catalog: %v", err)
+	}
+}
+
+func TestPreflightInspectsBuiltinExecutionTargets(t *testing.T) {
+	profile := executorProfiles["kubectl"]
+	for _, command := range []string{`exec ssh "$host"`, "command ssh host.example", "command -p ssh host.example"} {
+		if _, err := preflightCommand(command, &profile); err == nil || !strings.Contains(err.Error(), `executable "ssh"`) {
+			t.Errorf("preflightCommand(%q) error = %v, want missing ssh", command, err)
+		}
+	}
+	if _, err := preflightCommand("command -v ssh", &profile); err != nil {
+		t.Fatalf("presence query was treated as execution: %v", err)
+	}
 }
 
 func TestPreflightWarningsAreConservative(t *testing.T) {
@@ -96,9 +116,34 @@ func TestPreflightWarnsUnknownRawImagePipefail(t *testing.T) {
 
 func TestPreflightRejectsPipefailWhenProfileDoesNotGuaranteeIt(t *testing.T) {
 	profile := executorProfiles["kubectl"]
-	_, err := preflightCommand("set -o pipefail; kubectl get pods | jq .", &profile)
-	if err == nil || !strings.Contains(err.Error(), "does not support 'set -o pipefail'") {
-		t.Fatalf("preflight error = %v", err)
+	for _, command := range []string{
+		"set -o pipefail; kubectl get pods | jq .",
+		"set -e -o pipefail; kubectl get pods | jq .",
+		"set -o errexit -o pipefail; kubectl get pods | jq .",
+		"set -eo pipefail; kubectl get pods | jq .",
+	} {
+		_, err := preflightCommand(command, &profile)
+		if err == nil || !strings.Contains(err.Error(), "does not support 'set -o pipefail'") {
+			t.Errorf("preflightCommand(%q) error = %v", command, err)
+		}
+	}
+}
+
+func TestPreflightWarnsForBashTestAfterShellKeyword(t *testing.T) {
+	profile := executorProfiles["kubectl"]
+	for _, command := range []string{
+		"if [[ -f /tmp/x ]]; then echo yes; fi",
+		"if false; then :; else [[ -f /tmp/x ]]; fi",
+		"while true; do [[ -f /tmp/x ]]; break; done",
+		"! [[ -f /tmp/x ]]",
+	} {
+		warnings, err := preflightCommand(command, &profile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Join(warnings, "\n"); !strings.Contains(got, "Bash-specific syntax") {
+			t.Errorf("preflightCommand(%q) warnings = %q, want Bash-specific syntax warning", command, got)
+		}
 	}
 }
 
@@ -107,5 +152,30 @@ func TestImageForUsesRecordedResolution(t *testing.T) {
 	sr.Status.ResolvedImage = "registry.example/executor@sha256:reviewed"
 	if got := imageFor(sr); got != sr.Status.ResolvedImage {
 		t.Fatalf("imageFor = %q, want recorded resolution %q", got, sr.Status.ResolvedImage)
+	}
+}
+
+func TestApproveTemplateDistinguishesRawAndResolvedImages(t *testing.T) {
+	tmpl := template.Must(template.New("root").Parse(`{{define "header"}}{{end}}{{define "footer"}}{{end}}`))
+	tmpl = template.Must(tmpl.ParseFiles("templates/approve.html"))
+
+	for _, tc := range []struct {
+		name    string
+		profile string
+		want    string
+		notWant string
+	}{
+		{name: "raw", want: "Requested image (unprofiled)", notWant: "Resolved image"},
+		{name: "profile", profile: "kubectl", want: "Resolved image", notWant: "Requested image (unprofiled)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var rendered bytes.Buffer
+			if err := tmpl.ExecuteTemplate(&rendered, "approve.html", approveView{Profile: tc.profile, Image: "example.invalid/executor:latest"}); err != nil {
+				t.Fatal(err)
+			}
+			if got := rendered.String(); !strings.Contains(got, tc.want) || strings.Contains(got, tc.notWant) {
+				t.Fatalf("rendered template does not distinguish image provenance: want %q and not %q", tc.want, tc.notWant)
+			}
+		})
 	}
 }

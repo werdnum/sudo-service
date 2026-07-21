@@ -13,7 +13,7 @@
             <dt>Namespace</dt><dd>{{.Extras.Namespace}}</dd>
             <dt>Privileges</dt><dd>{{if .Extras.ClusterAdmin}}<strong>cluster-admin</strong>{{else}}none (namespace default ServiceAccount){{end}}</dd>
             {{if .Profile}}<dt>Executor profile</dt><dd><strong>{{.Profile}}</strong></dd>{{end}}
-            <dt>Resolved image</dt><dd><code style="word-break: break-all;">{{.Image}}</code></dd>
+            {{if .Profile}}<dt>Resolved image</dt>{{else}}<dt>Requested image (unprofiled)</dt>{{end}}<dd><code style="word-break: break-all;">{{.Image}}</code></dd>
             <dt>Command</dt><dd><pre style="white-space: pre-wrap; word-break: break-word; margin: 0; font-family: ui-monospace, monospace;">{{.Command}}</pre></dd>
             {{if .Stdin}}<dt>Stdin</dt><dd><pre style="white-space: pre-wrap; word-break: break-word; margin: 0; max-height: 18rem; overflow: auto; font-family: ui-monospace, monospace;">{{.Stdin}}</pre></dd>{{end}}
             {{if .Extras.Volumes}}<dt>Volumes</dt><dd>{{range .Extras.Volumes}}{{.}}<br>{{end}}</dd>{{end}}
