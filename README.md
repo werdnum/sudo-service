@@ -107,6 +107,27 @@ executed. Requesters cannot supply or override the resolution.
 for uncommon tools and are labeled as unprofiled; sudo-service does not pretend it
 can infer their `/bin/sh` behavior or installed tools.
 
+### Executor resources and lifetime
+
+Approved executor and requester init containers have modest scheduling requests
+(50m CPU and 64 MiB memory) but no sudo-service-specific CPU, memory, or
+scratch-space limits. Aggregate resource protection belongs to the cluster's
+ordinary quota, scheduling and eviction policy; an additional 256 MiB ceiling in
+the human-approved cluster-admin path caused legitimate Ansible work to exit
+137 without strengthening the privilege boundary.
+
+There is no server-side execution timeout. `ExecutorStartDeadline` is a distinct
+10-minute deadline for a Pod that never starts its executor—for example because
+it is unschedulable, cannot mount a volume, or cannot pull its image. Once the
+executor starts, that deadline no longer applies. `ttlSecondsAfterApproval` is
+also not an execution timeout: it controls output and completed-Job retention
+after execution, with a short completed-Job floor so the controller has time to
+capture logs.
+
+The requester CLI waits for 12 hours by default. `--timeout 0` waits
+indefinitely; `--detach` submits any request, prints its UID, and returns without
+polling. Neither client option changes server execution.
+
 ### Authorizing HTTP requesters
 
 The requester HTTP API has two distinct Kubernetes checks. `TokenReview`

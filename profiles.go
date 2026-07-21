@@ -154,7 +154,7 @@ func preflightCommand(command string, profile *ExecutorProfile) ([]string, error
 		warnings = append(warnings, "command contains a large heredoc; pass the payload with stdin/request-file to reduce quoting and review errors")
 	}
 	if likelyLongRuntime(command) {
-		warnings = append(warnings, "command may be long-running; this is an advisory heuristic, and the one-shot executor has bounded resources and approval TTL")
+		warnings = append(warnings, "command may be long-running; this is an advisory heuristic, and the CLI wait and output-retention windows are client/data-lifecycle settings, not execution deadlines")
 	}
 	return warnings, nil
 }

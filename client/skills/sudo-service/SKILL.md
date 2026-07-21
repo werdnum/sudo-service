@@ -95,6 +95,12 @@ sudo-service \
   --command 'kubectl get secret keep-postgres-credentials -n keep -o jsonpath={.data.password}'
 ```
 
+The CLI waits for up to 12 hours by default. That is only a client-side wait;
+it does not terminate an executor that is already running. Use `--timeout 0`
+when the caller should wait indefinitely, or `--detach` to print the request UID
+and return without polling. Detach is appropriate when another agent turn will
+resume the request; retain the printed UID and query that exact request later.
+
 ### 1. Draft the request
 
 Pick the smallest, most legible command. The human sees the verbatim
@@ -145,8 +151,10 @@ so don't put another ServiceAccount in there.
 
 Normally the CLI submits the request and retains its uid automatically. Use
 `sudo-service --request-file request.yaml` and let it wait for the terminal
-state. The lower-level direct-CRD flow below is only for environments where the
-CLI is unavailable.
+state. For asynchronous work, use
+`REQUEST_UID=$(sudo-service --request-file request.yaml --detach --quiet)`.
+The lower-level direct-CRD flow below is only for environments where the CLI is
+unavailable.
 
 The requester SA has `create` only — no get/list/watch. So you MUST capture
 the uid at submission time; you can't look it up later by name.
@@ -328,6 +336,13 @@ yourself, opts out of the corresponding default.
   Setup section.
 - `ttlSecondsAfterApproval` defaults to 3600s and is hard-capped at 3600s by
   the CRD schema and the executor VAP. Don't ask for longer.
+- Executor and requester init containers have modest CPU/memory scheduling
+  requests but no sudo-service CPU, memory, or scratch-space limits. The
+  executor has no runtime deadline. A separate 10-minute start deadline only
+  fails a Pod that never reaches the executor (for example an unschedulable Pod
+  or failed image pull); it does not stop a running command. Finished Jobs are
+  retained for the requested post-approval TTL (with a short capture floor) so
+  the controller can collect logs; that TTL begins after completion.
 - In the `sudo-service` namespace the image runs under `cluster-admin` by
   default; a Job you target at another `namespace` runs under that namespace's
   unprivileged `default` ServiceAccount instead. Either way the human reviewer is

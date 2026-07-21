@@ -60,14 +60,15 @@ func TestScratchDefaultsTmpAndHome(t *testing.T) {
 		t.Errorf("HOME env = %q, want %q", home, homeMountDir)
 	}
 
-	// Both backing volumes exist and are bounded emptyDirs.
+	// Both backing volumes exist as emptyDirs without sudo-service-specific size
+	// ceilings; cluster scheduling/quota/eviction policy governs aggregate use.
 	for _, name := range []string{tmpVolumeName, homeVolumeName} {
 		v, ok := volumeByName(pod.Volumes, name)
 		if !ok {
 			t.Fatalf("scratch volume %q missing: %+v", name, pod.Volumes)
 		}
-		if v.EmptyDir == nil || v.EmptyDir.SizeLimit == nil || !v.EmptyDir.SizeLimit.Equal(DefaultEmptyDirSizeLimit) {
-			t.Errorf("scratch volume %q not a bounded emptyDir: %+v", name, v)
+		if v.EmptyDir == nil || v.EmptyDir.SizeLimit != nil {
+			t.Errorf("scratch volume %q is not an unbounded emptyDir: %+v", name, v)
 		}
 	}
 }
