@@ -394,6 +394,23 @@ def exit_code(status: dict[str, Any]) -> int:
     return 1
 
 
+def report_output_state(status: dict[str, Any]) -> None:
+    """Report output loss on stderr, keeping command stdout byte-for-byte clean."""
+    capture = status.get("outputCaptureState")
+    delivery = status.get("outputDeliveryState")
+    if capture == "Truncated":
+        total = status.get("outputTotalBytes")
+        retained = status.get("outputRetainedBytes")
+        detail = ""
+        if isinstance(total, int) and isinstance(retained, int):
+            detail = f" ({retained} of {total} bytes retained)"
+        print(f"sudo-service: command output was truncated{detail}", file=sys.stderr)
+    if capture == "Failed" or delivery == "Failed":
+        reason = status.get("outputFailureReason")
+        suffix = f": {reason}" if reason else ""
+        print(f"sudo-service: command finished, but output is unavailable{suffix}", file=sys.stderr)
+
+
 def main() -> int:
     args = parse_args()
     base_url = args.url.rstrip("/")
@@ -461,10 +478,16 @@ def main() -> int:
 
     phase = str(status.get("phase") or "")
     if phase in {"Executed", "Failed"}:
+        report_output_state(status)
         if status.get("outputSecretRef"):
             sys.stdout.buffer.write(http_bytes(output_url(base_url, uid), args.token_file))
             sys.stdout.buffer.flush()
-        elif phase == "Failed":
+        elif (
+            phase == "Failed"
+            and status.get("exitCode") is None
+            and status.get("outputCaptureState") != "Failed"
+            and status.get("outputDeliveryState") != "Failed"
+        ):
             # No output to return: the controller's failureReason is the only
             # explanation, so surface it like Denied/Expired do — even under
             # --quiet, which suppresses progress, not the terminal error reason.

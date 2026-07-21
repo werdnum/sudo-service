@@ -6,19 +6,25 @@ import (
 
 // Event is what gets pushed over SSE on /requests/{uid}/events.
 type Event struct {
-	Type            string `json:"type"`
-	UID             string `json:"uid,omitempty"`
-	Phase           string `json:"phase,omitempty"`
-	Requester       string `json:"requester,omitempty"`
-	Reason          string `json:"reason,omitempty"`
-	Command         string `json:"command,omitempty"`
-	CreatedAt       string `json:"createdAt,omitempty"`
-	ApprovedBy      string `json:"approvedBy,omitempty"`
-	DeniedBy        string `json:"deniedBy,omitempty"`
-	DenialReason    string `json:"denialReason,omitempty"`
-	FailureReason   string `json:"failureReason,omitempty"`
-	ExitCode        *int32 `json:"exitCode,omitempty"`
-	OutputSecretRef string `json:"outputSecretRef,omitempty"`
+	Type                string `json:"type"`
+	UID                 string `json:"uid,omitempty"`
+	Phase               string `json:"phase,omitempty"`
+	Requester           string `json:"requester,omitempty"`
+	Reason              string `json:"reason,omitempty"`
+	Command             string `json:"command,omitempty"`
+	CreatedAt           string `json:"createdAt,omitempty"`
+	ApprovedBy          string `json:"approvedBy,omitempty"`
+	DeniedBy            string `json:"deniedBy,omitempty"`
+	DenialReason        string `json:"denialReason,omitempty"`
+	FailureReason       string `json:"failureReason,omitempty"`
+	ExitCode            *int32 `json:"exitCode,omitempty"`
+	OutputSecretRef     string `json:"outputSecretRef,omitempty"`
+	OutputCaptureState  string `json:"outputCaptureState,omitempty"`
+	OutputDeliveryState string `json:"outputDeliveryState,omitempty"`
+	OutputFailureReason string `json:"outputFailureReason,omitempty"`
+	OutputTotalBytes    *int64 `json:"outputTotalBytes,omitempty"`
+	OutputRetainedBytes *int64 `json:"outputRetainedBytes,omitempty"`
+	OutputSHA256        string `json:"outputSHA256,omitempty"`
 }
 
 // Broadcaster is a simple pub/sub keyed by SudoRequest UID. SSE handlers Subscribe;

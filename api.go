@@ -75,23 +75,29 @@ type createRequestBody struct {
 }
 
 type requestStatusResponse struct {
-	UID             string `json:"uid"`
-	Name            string `json:"name"`
-	Phase           string `json:"phase"`
-	Requester       string `json:"requester"`
-	Command         string `json:"command"`
-	Image           string `json:"image"`
-	Namespace       string `json:"namespace"`
-	ClusterAdmin    bool   `json:"clusterAdmin"`
-	ApprovedBy      string `json:"approvedBy,omitempty"`
-	ApprovedAt      string `json:"approvedAt,omitempty"`
-	DeniedBy        string `json:"deniedBy,omitempty"`
-	DeniedAt        string `json:"deniedAt,omitempty"`
-	DenialReason    string `json:"denialReason,omitempty"`
-	FailureReason   string `json:"failureReason,omitempty"`
-	ExitCode        *int32 `json:"exitCode,omitempty"`
-	OutputSecretRef string `json:"outputSecretRef,omitempty"`
-	Summary         string `json:"summary,omitempty"`
+	UID                 string `json:"uid"`
+	Name                string `json:"name"`
+	Phase               string `json:"phase"`
+	Requester           string `json:"requester"`
+	Command             string `json:"command"`
+	Image               string `json:"image"`
+	Namespace           string `json:"namespace"`
+	ClusterAdmin        bool   `json:"clusterAdmin"`
+	ApprovedBy          string `json:"approvedBy,omitempty"`
+	ApprovedAt          string `json:"approvedAt,omitempty"`
+	DeniedBy            string `json:"deniedBy,omitempty"`
+	DeniedAt            string `json:"deniedAt,omitempty"`
+	DenialReason        string `json:"denialReason,omitempty"`
+	FailureReason       string `json:"failureReason,omitempty"`
+	ExitCode            *int32 `json:"exitCode,omitempty"`
+	OutputSecretRef     string `json:"outputSecretRef,omitempty"`
+	OutputCaptureState  string `json:"outputCaptureState,omitempty"`
+	OutputDeliveryState string `json:"outputDeliveryState,omitempty"`
+	OutputFailureReason string `json:"outputFailureReason,omitempty"`
+	OutputTotalBytes    *int64 `json:"outputTotalBytes,omitempty"`
+	OutputRetainedBytes *int64 `json:"outputRetainedBytes,omitempty"`
+	OutputSHA256        string `json:"outputSHA256,omitempty"`
+	Summary             string `json:"summary,omitempty"`
 }
 
 // createRequestHandler is POST /requests. The SA bearer token is authenticated
@@ -213,21 +219,27 @@ func (a *APIServer) requestSubpathHandler(w http.ResponseWriter, r *http.Request
 
 func (a *APIServer) serveStatus(w http.ResponseWriter, sr *SudoRequest) {
 	resp := requestStatusResponse{
-		UID:             string(sr.UID),
-		Name:            sr.Name,
-		Phase:           sr.Status.Phase,
-		Requester:       sr.Spec.Requester,
-		Command:         sr.Spec.Command,
-		Image:           imageFor(sr),
-		Namespace:       executorNamespace(sr),
-		ClusterAdmin:    clusterAdminEnabled(sr),
-		ApprovedBy:      sr.Status.ApprovedBy,
-		DeniedBy:        sr.Status.DeniedBy,
-		DenialReason:    sr.Status.DenialReason,
-		FailureReason:   sr.Status.FailureReason,
-		ExitCode:        sr.Status.ExitCode,
-		OutputSecretRef: sr.Status.OutputSecretRef,
-		Summary:         sr.Status.Summary,
+		UID:                 string(sr.UID),
+		Name:                sr.Name,
+		Phase:               sr.Status.Phase,
+		Requester:           sr.Spec.Requester,
+		Command:             sr.Spec.Command,
+		Image:               imageFor(sr),
+		Namespace:           executorNamespace(sr),
+		ClusterAdmin:        clusterAdminEnabled(sr),
+		ApprovedBy:          sr.Status.ApprovedBy,
+		DeniedBy:            sr.Status.DeniedBy,
+		DenialReason:        sr.Status.DenialReason,
+		FailureReason:       sr.Status.FailureReason,
+		ExitCode:            sr.Status.ExitCode,
+		OutputSecretRef:     sr.Status.OutputSecretRef,
+		OutputCaptureState:  sr.Status.OutputCaptureState,
+		OutputDeliveryState: sr.Status.OutputDeliveryState,
+		OutputFailureReason: sr.Status.OutputFailureReason,
+		OutputTotalBytes:    sr.Status.OutputTotalBytes,
+		OutputRetainedBytes: sr.Status.OutputRetainedBytes,
+		OutputSHA256:        sr.Status.OutputSHA256,
+		Summary:             sr.Status.Summary,
 	}
 	if sr.Status.ApprovedAt != nil {
 		resp.ApprovedAt = sr.Status.ApprovedAt.UTC().Format("2006-01-02T15:04:05Z")
@@ -278,7 +290,7 @@ func (a *APIServer) serveEvents(w http.ResponseWriter, r *http.Request, sr *Sudo
 		sr = fresh
 	}
 
-	snap := Event{Type: "snapshot", Phase: sr.Status.Phase, ExitCode: sr.Status.ExitCode, OutputSecretRef: sr.Status.OutputSecretRef, DenialReason: sr.Status.DenialReason, FailureReason: sr.Status.FailureReason}
+	snap := Event{Type: "snapshot", Phase: sr.Status.Phase, ExitCode: sr.Status.ExitCode, OutputSecretRef: sr.Status.OutputSecretRef, DenialReason: sr.Status.DenialReason, FailureReason: sr.Status.FailureReason, OutputCaptureState: sr.Status.OutputCaptureState, OutputDeliveryState: sr.Status.OutputDeliveryState, OutputFailureReason: sr.Status.OutputFailureReason, OutputTotalBytes: sr.Status.OutputTotalBytes, OutputRetainedBytes: sr.Status.OutputRetainedBytes, OutputSHA256: sr.Status.OutputSHA256}
 	writeSSE(w, snap)
 	flusher.Flush()
 

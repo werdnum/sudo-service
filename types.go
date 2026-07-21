@@ -66,6 +66,17 @@ const (
 	// the failure in front of the reviewer. Headroom is left for the data key name
 	// and any other Secret fields.
 	MaxStdinBytes = 1024*1024 - 4096
+
+	// MaxOutputBytes caps the bytes retained in the output Secret. Kubernetes limits
+	// a Secret's data to 1 MiB; reserve headroom for the data key and object metadata.
+	// The complete log stream is still counted and hashed before this prefix is kept.
+	MaxOutputBytes = 1024*1024 - 4096
+
+	OutputCaptureComplete   = "Complete"
+	OutputCaptureTruncated  = "Truncated"
+	OutputCaptureFailed     = "Failed"
+	OutputDeliveryAvailable = "Available"
+	OutputDeliveryFailed    = "Failed"
 )
 
 var GroupVersionResource = schema.GroupVersionResource{
@@ -171,14 +182,26 @@ type SudoRequestStatus struct {
 	DeniedAt     *metav1.Time `json:"deniedAt,omitempty"`
 	DenialReason string       `json:"denialReason,omitempty"`
 
-	// FailureReason explains a Failed request that carries no exitCode/output —
-	// e.g. the executor Job disappeared before completion, or output capture
-	// failed. (A command that ran and exited nonzero is conveyed by ExitCode and
-	// the output Secret instead.) Surfaced to the requester via the HTTP status.
+	// FailureReason explains a Failed request whose command outcome is unknown,
+	// e.g. the executor Job disappeared before completion. A command that ran is
+	// conveyed independently by ExitCode even if its output could not be captured.
 	FailureReason string `json:"failureReason,omitempty"`
 
 	ExitCode        *int32 `json:"exitCode,omitempty"`
 	OutputSecretRef string `json:"outputSecretRef,omitempty"`
+
+	// OutputCaptureState describes reading and bounding the terminated container's
+	// logs: Complete, Truncated, or Failed. OutputDeliveryState separately records
+	// whether the retained bytes were made Available in OutputSecretRef or Secret
+	// creation Failed. Empty fields identify records written by older controllers.
+	OutputCaptureState  string `json:"outputCaptureState,omitempty"`
+	OutputDeliveryState string `json:"outputDeliveryState,omitempty"`
+	OutputFailureReason string `json:"outputFailureReason,omitempty"`
+	OutputTotalBytes    *int64 `json:"outputTotalBytes,omitempty"`
+	OutputRetainedBytes *int64 `json:"outputRetainedBytes,omitempty"`
+	// OutputSHA256 is the lowercase SHA-256 digest of the complete observed stream,
+	// including bytes that were not retained after truncation.
+	OutputSHA256 string `json:"outputSHA256,omitempty"`
 
 	// StdinSecretName is the controller-minted, unguessable name of the Secret
 	// holding spec.stdin. It is generated randomly (not derived from the request
@@ -322,6 +345,14 @@ func (in *SudoRequestStatus) DeepCopyInto(out *SudoRequestStatus) {
 	if in.ExitCode != nil {
 		v := *in.ExitCode
 		out.ExitCode = &v
+	}
+	if in.OutputTotalBytes != nil {
+		v := *in.OutputTotalBytes
+		out.OutputTotalBytes = &v
+	}
+	if in.OutputRetainedBytes != nil {
+		v := *in.OutputRetainedBytes
+		out.OutputRetainedBytes = &v
 	}
 	if in.ApprovalTokenExpiresAt != nil {
 		t := *in.ApprovalTokenExpiresAt

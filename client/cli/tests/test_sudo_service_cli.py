@@ -23,6 +23,7 @@ class FakeSudoServiceHandler(BaseHTTPRequestHandler):
     denial_reason = ""
     output = b""
     exit_code: int | None = None
+    output_status: dict = {}
     status_calls = 0
     require_rotated_token_after_first_status = False
 
@@ -72,6 +73,7 @@ class FakeSudoServiceHandler(BaseHTTPRequestHandler):
                     body["failureReason"] = self.failure_reason
             if phase == "Denied":
                 body["denialReason"] = self.denial_reason
+            body.update(self.output_status)
             self.write_json(body)
             return
         if self.path == "/requests/uid-1/output":
@@ -101,6 +103,7 @@ class SudoServiceCLITest(unittest.TestCase):
         FakeSudoServiceHandler.failure_reason = ""
         FakeSudoServiceHandler.output = b""
         FakeSudoServiceHandler.exit_code = None
+        FakeSudoServiceHandler.output_status = {}
         FakeSudoServiceHandler.status_calls = 0
         FakeSudoServiceHandler.require_rotated_token_after_first_status = False
         self.tmp = tempfile.TemporaryDirectory()
@@ -418,6 +421,55 @@ class SudoServiceCLITest(unittest.TestCase):
         self.assertEqual(result.stdout, "")
         self.assertIn("failed before output was available", result.stderr)
         self.assertIn("sudo-exec-abc disappeared", result.stderr)
+
+    def test_truncation_is_reported_on_stderr_without_changing_stdout(self) -> None:
+        FakeSudoServiceHandler.output = b"retained bytes\n"
+        FakeSudoServiceHandler.output_status = {
+            "outputCaptureState": "Truncated",
+            "outputDeliveryState": "Available",
+            "outputTotalBytes": 2_000_000,
+            "outputRetainedBytes": len(FakeSudoServiceHandler.output),
+        }
+
+        result = self.run_cli("--reason", "large audit", "--quiet", "--command", "kubectl get pods -A")
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "retained bytes\n")
+        self.assertIn("command output was truncated", result.stderr)
+        self.assertIn("15 of 2000000 bytes retained", result.stderr)
+
+    def test_output_delivery_failure_does_not_change_success_exit(self) -> None:
+        FakeSudoServiceHandler.output_status = {
+            "exitCode": 0,
+            "outputCaptureState": "Complete",
+            "outputDeliveryState": "Failed",
+            "outputFailureReason": "create output secret: forbidden",
+        }
+
+        result = self.run_cli("--reason", "audit", "--quiet", "--command", "kubectl get pods -A")
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("command finished, but output is unavailable", result.stderr)
+        self.assertIn("forbidden", result.stderr)
+
+    def test_output_failure_after_nonzero_exit_does_not_report_pre_execution_failure(self) -> None:
+        FakeSudoServiceHandler.phases = ["Failed"]
+        FakeSudoServiceHandler.exit_code = 7
+        FakeSudoServiceHandler.failure_reason = "capture command output: logs expired"
+        FakeSudoServiceHandler.output_status = {
+            "outputCaptureState": "Failed",
+            "outputDeliveryState": "Failed",
+            "outputFailureReason": "read executor logs: not found",
+        }
+
+        result = self.run_cli("--reason", "audit", "--quiet", "--command", "kubectl get missing")
+
+        self.assertEqual(result.returncode, 7)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("command finished, but output is unavailable", result.stderr)
+        self.assertIn("logs: not found", result.stderr)
+        self.assertNotIn("failed before output was available", result.stderr)
 
     def test_rereads_projected_token_between_polls_and_output_fetch(self) -> None:
         FakeSudoServiceHandler.phases = ["Pending", "Executed"]

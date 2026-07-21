@@ -106,7 +106,7 @@ shell pipeline.
 reason: "One sentence: WHY you need this, what alert/task it's for."
 command: "exact shell command, single string"
 # image: alpine/k8s:1.35.5          # optional, this is the default
-# ttlSecondsAfterApproval: 600       # output retention, default 600s, max 3600
+# ttlSecondsAfterApproval: 3600      # output retention, default/max 3600s
 # --- optional, for more than a one-liner (see "Richer jobs" below) ---
 # namespace: seaweedfs               # run the Job here to mount this ns's Secrets/PVCs
 # stdin: |                            # fed to the command's stdin, no shell quoting
@@ -195,14 +195,18 @@ stdout+stderr live in a short-TTL Secret that the controller fronts on
 curl -sS "$BASE/requests/$REQUEST_UID/output" -H "Authorization: Bearer $TOKEN"
 ```
 
-Output is GC'd `ttlSecondsAfterApproval` seconds after execution (default 600s).
+Output is GC'd `ttlSecondsAfterApproval` seconds after execution (default and
+maximum 3600s). Large output is returned as a bounded prefix; the CLI reports
+truncation and byte counts on stderr without changing command output on stdout.
 
 ### 5. Handle terminal states
 
-- **`Executed`**: command ran, exit 0, output available on `/output`. Report.
-- **`Failed`**: command ran but exited non-zero (see `.exitCode` and `/output`),
-  OR it failed before producing output — e.g. the executor Job disappeared
-  before the controller saw it complete, or output capture failed. In the
+- **`Executed`**: command ran and exited 0. Output capture/delivery is reported
+  separately and may be truncated or unavailable; inspect `outputCaptureState`,
+  `outputDeliveryState`, and `outputFailureReason` in status.
+- **`Failed`**: command exited non-zero (see `.exitCode` and `/output`), or it
+  failed before its exit code was known — e.g. the executor Job disappeared
+  before the controller saw it complete. In the
   no-output case read `.failureReason` from the status response for the
   explanation. `/output` may or may not be populated.
 - **`Denied`**: read `.denialReason` from the status response and report it
@@ -306,7 +310,7 @@ yourself, opts out of the corresponding default.
   not `sudo-service.andrewgarrett.dev`. If the controller returns 401, you
   almost certainly forgot to mount the audience-bound projected token from the
   Setup section.
-- `ttlSecondsAfterApproval` defaults to 600s and is hard-capped at 3600s by
+- `ttlSecondsAfterApproval` defaults to 3600s and is hard-capped at 3600s by
   the CRD schema and the executor VAP. Don't ask for longer.
 - In the `sudo-service` namespace the image runs under `cluster-admin` by
   default; a Job you target at another `namespace` runs under that namespace's

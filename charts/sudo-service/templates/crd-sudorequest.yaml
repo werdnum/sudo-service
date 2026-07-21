@@ -153,10 +153,8 @@ spec:
                 failureReason:
                   type: string
                   description: >-
-                    Explains a Failed request that carries no exitCode/output
-                    (e.g. the executor Job disappeared before completion, or
-                    output capture failed). Surfaced to the requester via the
-                    HTTP status.
+                    Explains a Failed request whose command outcome is unknown
+                    (e.g. the executor Job disappeared before completion).
                 exitCode: {type: integer, format: int32}
                 outputSecretRef:
                   type: string
@@ -164,6 +162,27 @@ spec:
                     Name of the short-TTL Secret in sudo-service namespace holding
                     stdout/stderr. Reads go through the controller HTTP API, not
                     direct RBAC.
+                outputCaptureState:
+                  type: string
+                  enum: [Complete, Truncated, Failed]
+                  description: >-
+                    Outcome of reading and bounding the terminated container's
+                    logs. Empty on records written by older controllers.
+                outputDeliveryState:
+                  type: string
+                  enum: [Available, Failed]
+                  description: >-
+                    Whether retained output was made available in outputSecretRef.
+                    Empty when delivery was not attempted or on older records.
+                outputFailureReason:
+                  type: string
+                  description: Output capture or delivery error, independent of command exit.
+                outputTotalBytes: {type: integer, format: int64, minimum: 0}
+                outputRetainedBytes: {type: integer, format: int64, minimum: 0}
+                outputSHA256:
+                  type: string
+                  pattern: '^[0-9a-f]{64}$'
+                  description: SHA-256 of the complete observed output stream.
                 stdinSecretName:
                   type: string
                   description: >-
