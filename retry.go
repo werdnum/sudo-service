@@ -18,18 +18,23 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// executionFingerprint hashes every execution-affecting spec field after JSON
+// executionFingerprint hashes every execution-affecting field after JSON
 // canonicalization. Requester, reason, attribution, and lineage are excluded;
 // stdin and env values contribute only inside the digest and are never emitted.
-func executionFingerprint(spec *SudoRequestSpec) (string, error) {
+//
+// Profile aliases are normalized and the exact resolved image is included. That
+// makes an omitted default profile equivalent to an explicit default, while a
+// catalog image update does not collapse a new request into an older request
+// whose reviewer saw a different executor image.
+func executionFingerprint(sr *SudoRequest) (string, error) {
 	var effective SudoRequestSpec
-	spec.DeepCopyInto(&effective)
+	sr.Spec.DeepCopyInto(&effective)
 	effective.Requester = ""
 	effective.Reason = ""
 	effective.SubmittedBy = ""
 	effective.RetryOfUID = ""
-	if effective.Image == "" {
-		effective.Image = DefaultExecutorImage
+	if effective.Image == "" && effective.Profile == "" {
+		effective.Profile = DefaultExecutorProfile
 	}
 	if effective.Namespace == "" {
 		effective.Namespace = ControllerNamespace
@@ -42,7 +47,21 @@ func executionFingerprint(spec *SudoRequestSpec) (string, error) {
 		value := effective.Namespace == ControllerNamespace
 		effective.Privileges.ClusterAdmin = &value
 	}
-	raw, err := json.Marshal(effective)
+	resolvedImage := sr.Status.ResolvedImage
+	if resolvedImage == "" {
+		candidate := sr.DeepCopy()
+		candidate.Spec = effective
+		_, image, err := resolveExecutorProfile(candidate)
+		if err != nil {
+			return "", err
+		}
+		resolvedImage = image
+	}
+	fingerprintInput := struct {
+		Spec          SudoRequestSpec `json:"spec"`
+		ResolvedImage string          `json:"resolvedImage"`
+	}{Spec: effective, ResolvedImage: resolvedImage}
+	raw, err := json.Marshal(fingerprintInput)
 	if err != nil {
 		return "", err
 	}
@@ -59,21 +78,26 @@ func executionFingerprint(spec *SudoRequestSpec) (string, error) {
 }
 
 func (a *APIServer) findPendingDuplicate(ctx context.Context, candidate *SudoRequest) (*SudoRequest, error) {
-	want, err := executionFingerprint(&candidate.Spec)
+	want, err := executionFingerprint(candidate)
 	if err != nil {
 		return nil, err
 	}
 	var list SudoRequestList
-	if err := a.Client.List(ctx, &list, client.InNamespace(ControllerNamespace)); err != nil {
+	reader := a.APIReader
+	if reader == nil {
+		reader = a.Client
+	}
+	if err := reader.List(ctx, &list, client.InNamespace(ControllerNamespace)); err != nil {
 		return nil, err
 	}
 	for i := range list.Items {
 		current := &list.Items[i]
 		// Cross-requester matches are deliberately indistinguishable from no match.
-		if (current.Status.Phase != "" && current.Status.Phase != PhasePending) || current.Spec.Requester != candidate.Spec.Requester {
+		phase := current.Status.Phase
+		if (phase != "" && phase != PhasePending && phase != PhaseApproved) || current.Spec.Requester != candidate.Spec.Requester {
 			continue
 		}
-		got, err := executionFingerprint(&current.Spec)
+		got, err := executionFingerprint(current)
 		if err != nil { // one malformed legacy/direct object must not block submissions
 			continue
 		}
@@ -106,11 +130,21 @@ func validateRetrySuccessor(source, successor *SudoRequest) error {
 	if successor.Spec.RetryOfUID != string(source.UID) || successor.Spec.Requester != source.Spec.Requester {
 		return errors.New("deterministic retry name is occupied by an unrelated request")
 	}
-	want, err := executionFingerprint(&source.Spec)
+	// Retry creation deliberately re-resolves a profile against the current
+	// catalog. Compare the normalized specs under that same current catalog,
+	// rather than requiring the successor to retain the predecessor's reviewed
+	// image digest. Duplicate detection still uses each request's persisted
+	// resolved image so two concurrently active requests with different images
+	// are never collapsed.
+	sourceCurrent := source.DeepCopy()
+	sourceCurrent.Status.ResolvedImage = ""
+	successorCurrent := successor.DeepCopy()
+	successorCurrent.Status.ResolvedImage = ""
+	want, err := executionFingerprint(sourceCurrent)
 	if err != nil {
 		return fmt.Errorf("fingerprint retry source: %w", err)
 	}
-	got, err := executionFingerprint(&successor.Spec)
+	got, err := executionFingerprint(successorCurrent)
 	if err != nil {
 		return fmt.Errorf("fingerprint retry successor: %w", err)
 	}

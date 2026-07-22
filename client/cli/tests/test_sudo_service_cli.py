@@ -27,6 +27,7 @@ class FakeSudoServiceHandler(BaseHTTPRequestHandler):
     status_calls = 0
     require_rotated_token_after_first_status = False
     create_response: dict = {"uid": "uid-1", "name": "http-abc"}
+    create_status = HTTPStatus.OK
 
     def log_message(self, _fmt: str, *_args: object) -> None:
         return
@@ -51,7 +52,7 @@ class FakeSudoServiceHandler(BaseHTTPRequestHandler):
             return
         length = int(self.headers.get("Content-Length", "0"))
         self.request_bodies.append(json.loads(self.rfile.read(length)))
-        self.write_json(self.create_response)
+        self.write_json(self.create_response, self.create_status)
 
     def do_GET(self) -> None:
         if not self.authenticated():
@@ -86,9 +87,9 @@ class FakeSudoServiceHandler(BaseHTTPRequestHandler):
             return
         self.send_error(HTTPStatus.NOT_FOUND)
 
-    def write_json(self, body: dict) -> None:
+    def write_json(self, body: dict, status: HTTPStatus = HTTPStatus.OK) -> None:
         payload = json.dumps(body).encode()
-        self.send_response(HTTPStatus.OK)
+        self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
@@ -108,6 +109,7 @@ class SudoServiceCLITest(unittest.TestCase):
         FakeSudoServiceHandler.status_calls = 0
         FakeSudoServiceHandler.require_rotated_token_after_first_status = False
         FakeSudoServiceHandler.create_response = {"uid": "uid-1", "name": "http-abc"}
+        FakeSudoServiceHandler.create_status = HTTPStatus.OK
         self.tmp = tempfile.TemporaryDirectory()
         self.token_file = Path(self.tmp.name) / "token"
         self.token_file.write_text("test-token\n")
@@ -309,6 +311,16 @@ class SudoServiceCLITest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("--retry cannot be combined with --reason", result.stderr)
         self.assertEqual(FakeSudoServiceHandler.request_bodies, [])
+
+    def test_retry_conflict_reuses_equivalent_pending_request(self) -> None:
+        FakeSudoServiceHandler.create_status = HTTPStatus.CONFLICT
+        FakeSudoServiceHandler.create_response = {
+            "error": "equivalent request is already pending",
+            "uid": "uid-1",
+        }
+        result = self.run_cli("--retry", "expired-uid", "--quiet")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("equivalent request already exists", result.stderr)
 
     def test_duplicate_response_reuses_uid_and_warns_even_when_quiet(self) -> None:
         FakeSudoServiceHandler.create_response = {

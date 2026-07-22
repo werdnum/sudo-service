@@ -28,7 +28,11 @@ var templatesFS embed.FS
 // it borrows the manager's client (cached, so reads are cheap) and pokes the reconciler
 // through Approve/Deny helpers.
 type APIServer struct {
-	Client        client.Client
+	Client client.Client
+	// APIReader bypasses the controller-runtime cache for duplicate detection,
+	// where a stale negative read could otherwise admit an equivalent request.
+	// Tests and small embedders may leave it nil and fall back to Client.
+	APIReader     client.Reader
 	Verifier      *JWTVerifier
 	TokenReviewer *TokenReviewer
 	Authorizer    *RequesterAuthorizer

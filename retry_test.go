@@ -30,16 +30,16 @@ func TestExecutionFingerprintIsSemanticAndSecretSafe(t *testing.T) {
 		Env: []runtime.RawExtension{{Raw: []byte(`{"name":"TOKEN","value":"secret"}`)}},
 	}
 	ttl := int32(DefaultPostApproval)
-	b.Image = DefaultExecutorImage
+	b.Profile = DefaultExecutorProfile
 	b.Namespace = ControllerNamespace
 	b.TTLSecondsAfterApproval = &ttl
 	clusterAdmin := true
 	b.Privileges.ClusterAdmin = &clusterAdmin
-	fa, err := executionFingerprint(&a)
+	fa, err := executionFingerprint(&SudoRequest{Spec: a})
 	if err != nil {
 		t.Fatal(err)
 	}
-	fb, err := executionFingerprint(&b)
+	fb, err := executionFingerprint(&SudoRequest{Spec: b})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,9 +50,35 @@ func TestExecutionFingerprintIsSemanticAndSecretSafe(t *testing.T) {
 		t.Fatalf("fingerprint exposed a value: %q", fa)
 	}
 	b.Stdin = "different-secret"
-	fc, _ := executionFingerprint(&b)
+	fc, _ := executionFingerprint(&SudoRequest{Spec: b})
 	if fc == fa {
 		t.Fatal("changing stdin did not change fingerprint")
+	}
+}
+
+func TestExecutionFingerprintNormalizesDefaultProfileAndPinsResolvedImage(t *testing.T) {
+	implicit := &SudoRequest{Spec: SudoRequestSpec{Command: "kubectl get pods"}}
+	explicit := &SudoRequest{Spec: SudoRequestSpec{Command: "kubectl get pods", Profile: DefaultExecutorProfile}}
+	implicitFingerprint, err := executionFingerprint(implicit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	explicitFingerprint, err := executionFingerprint(explicit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if implicitFingerprint != explicitFingerprint {
+		t.Fatal("omitted and explicit default profiles produced different fingerprints")
+	}
+
+	reviewed := explicit.DeepCopy()
+	reviewed.Status.ResolvedImage = "registry.example/executor@sha256:previously-reviewed"
+	reviewedFingerprint, err := executionFingerprint(reviewed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reviewedFingerprint == explicitFingerprint {
+		t.Fatal("resolved image change did not change execution fingerprint")
 	}
 }
 
@@ -76,6 +102,45 @@ func TestPendingDuplicateIsRequesterScoped(t *testing.T) {
 	duplicate, err = api.findPendingDuplicate(context.Background(), candidate)
 	if err != nil || duplicate != nil {
 		t.Fatalf("cross-requester match leaked: duplicate=%#v err=%v", duplicate, err)
+	}
+}
+
+func TestDuplicateDetectionIncludesApprovedRequests(t *testing.T) {
+	spec := SudoRequestSpec{Requester: "alice", Command: "kubectl get pods"}
+	approved := &SudoRequest{
+		ObjectMeta: metav1.ObjectMeta{Name: "approved", Namespace: ControllerNamespace, UID: "approved-uid"},
+		Spec:       spec,
+		Status:     SudoRequestStatus{Phase: PhaseApproved, ResolvedImage: DefaultExecutorImage},
+	}
+	cl := ctrlfake.NewClientBuilder().WithScheme(scheme).WithObjects(approved).Build()
+	duplicate, err := (&APIServer{Client: cl}).findPendingDuplicate(
+		context.Background(), &SudoRequest{Spec: spec},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if duplicate == nil || duplicate.UID != approved.UID {
+		t.Fatalf("duplicate = %#v, want approved request %s", duplicate, approved.UID)
+	}
+}
+
+func TestDuplicateDetectionUsesUncachedReader(t *testing.T) {
+	spec := SudoRequestSpec{Requester: "alice", Command: "kubectl get pods"}
+	pending := &SudoRequest{
+		ObjectMeta: metav1.ObjectMeta{Name: "pending", Namespace: ControllerNamespace, UID: "pending-uid"},
+		Spec:       spec,
+		Status:     SudoRequestStatus{Phase: PhasePending, ResolvedImage: DefaultExecutorImage},
+	}
+	staleCache := ctrlfake.NewClientBuilder().WithScheme(scheme).Build()
+	directReader := ctrlfake.NewClientBuilder().WithScheme(scheme).WithObjects(pending).Build()
+	duplicate, err := (&APIServer{Client: staleCache, APIReader: directReader}).findPendingDuplicate(
+		context.Background(), &SudoRequest{Spec: spec},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if duplicate == nil || duplicate.UID != pending.UID {
+		t.Fatalf("duplicate = %#v, want uncached request %s", duplicate, pending.UID)
 	}
 }
 
@@ -200,6 +265,20 @@ func TestRetryAdoptsDeterministicChildFoundByPendingDedupe(t *testing.T) {
 	}
 	if updated.Status.SupersededByUID != string(successor.UID) {
 		t.Fatalf("supersededByUID=%q, want %q", updated.Status.SupersededByUID, successor.UID)
+	}
+}
+
+func TestRetrySuccessorValidationAllowsCurrentProfileResolution(t *testing.T) {
+	source := expiredSource()
+	source.Spec.Profile = DefaultExecutorProfile
+	source.Status.ResolvedImage = "registry.example/executor@sha256:previously-reviewed"
+	successor := &SudoRequest{
+		Spec: source.Spec,
+	}
+	successor.Spec.RetryOfUID = string(source.UID)
+	successor.Status.ResolvedImage = DefaultExecutorImage
+	if err := validateRetrySuccessor(source, successor); err != nil {
+		t.Fatalf("current profile resolution rejected: %v", err)
 	}
 }
 
@@ -336,5 +415,18 @@ func TestAdminRetryAttributesActorWithoutImpersonatingRequester(t *testing.T) {
 	}
 	if successor.Spec.RetryOfUID != string(source.UID) {
 		t.Fatalf("retryOfUID = %q", successor.Spec.RetryOfUID)
+	}
+}
+
+func TestLiveDashboardTemplateRendersRetryLineage(t *testing.T) {
+	raw, err := templatesFS.ReadFile("templates/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := string(raw)
+	for _, field := range []string{"ev.retryOfUID", "lineageHTML(ev)"} {
+		if !strings.Contains(page, field) {
+			t.Fatalf("live dashboard template does not render %s", field)
+		}
 	}
 }

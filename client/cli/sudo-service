@@ -410,7 +410,14 @@ def read_token(path: str) -> str:
     return token
 
 
-def http_json(url: str, token_file: str, *, method: str = "GET", body: dict[str, Any] | None = None) -> dict[str, Any]:
+def http_json(
+    url: str,
+    token_file: str,
+    *,
+    method: str = "GET",
+    body: dict[str, Any] | None = None,
+    acceptable_statuses: frozenset[int] = frozenset(),
+) -> dict[str, Any]:
     token = read_token(token_file)
     data = None
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
@@ -422,8 +429,10 @@ def http_json(url: str, token_file: str, *, method: str = "GET", body: dict[str,
         with urllib.request.urlopen(request, timeout=15) as response:
             payload = response.read()
     except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace").strip()
-        raise SudoServiceError(f"{method} {url}: HTTP {exc.code}: {detail}") from exc
+        payload = exc.read()
+        if exc.code not in acceptable_statuses:
+            detail = payload.decode("utf-8", errors="replace").strip()
+            raise SudoServiceError(f"{method} {url}: HTTP {exc.code}: {detail}") from exc
     except urllib.error.URLError as exc:
         raise SudoServiceError(f"{method} {url}: {exc.reason}") from exc
     try:
@@ -455,10 +464,14 @@ def create_request(base_url: str, token_file: str, body: dict[str, Any]) -> dict
 def retry_request(base_url: str, token_file: str, uid: str) -> dict[str, Any]:
     response = http_json(
         f"{base_url.rstrip('/')}/requests/{uid}/retry", token_file,
-        method="POST", body={},
+        method="POST", body={}, acceptable_statuses=frozenset({409}),
     )
     if not response.get("uid"):
         raise SudoServiceError(f"retry response did not include uid: {response}")
+    # A 409 with a UID means the server found an equivalent in-flight request.
+    # Reuse it exactly like the normal create endpoint's duplicate response.
+    if response.get("error"):
+        response["duplicate"] = True
     return response
 
 
