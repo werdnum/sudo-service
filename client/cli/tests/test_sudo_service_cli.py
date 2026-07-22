@@ -248,7 +248,7 @@ class SudoServiceCLITest(unittest.TestCase):
             result.stderr,
         )
 
-    def test_tools_reject_server_selection_and_unsafe_paths(self) -> None:
+    def test_tools_reject_server_selection_and_non_docker_paths(self) -> None:
         with_profile = self.run_cli(
             "--reason", "invalid", "--profile", "kubectl", "--tool", "openssh",
             "--", "true",
@@ -256,11 +256,19 @@ class SudoServiceCLITest(unittest.TestCase):
         self.assertNotEqual(with_profile.returncode, 0)
         self.assertIn("--tool cannot be combined with --image or --profile", with_profile.stderr)
 
-        unsafe = self.run_cli(
-            "--reason", "invalid", "--tool", "../openssh", "--", "true",
+        for invalid_tool in ("../openssh", "R", "gcc+toolchain"):
+            with self.subTest(tool=invalid_tool):
+                unsafe = self.run_cli(
+                    "--reason", "invalid", "--tool", invalid_tool, "--", "true",
+                )
+                self.assertNotEqual(unsafe.returncode, 0)
+                self.assertIn("must be lowercase Docker path components", unsafe.stderr)
+
+        too_long = self.run_cli(
+            "--reason", "invalid", "--tool", "a" * 240, "--", "true",
         )
-        self.assertNotEqual(unsafe.returncode, 0)
-        self.assertIn("invalid or reserved Nixery tool", unsafe.stderr)
+        self.assertNotEqual(too_long.returncode, 0)
+        self.assertIn("exceeds Docker's 255-character limit", too_long.stderr)
         self.assertEqual(FakeSudoServiceHandler.request_bodies, [])
 
     def test_json_request_file_submits_every_supported_structured_field(self) -> None:
