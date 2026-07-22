@@ -144,9 +144,13 @@ Configuration (flags override env, which override in-cluster defaults):
 
 | Flag | Env | Default |
 |---|---|---|
-| `--url` | `SUDO_SERVICE_URL`, `K8S_AGENT_SUDO_SERVICE_URL` | `http://sudo-service.sudo-service.svc.cluster.local` |
+| `--url` | `SUDO_SERVICE_URL`, `K8S_AGENT_SUDO_SERVICE_URL` | `http://sudo-service.${SUDO_SERVICE_NAMESPACE:-sudo-service}.svc.cluster.local` |
 | `--token-file` | `SUDO_SERVICE_TOKEN_FILE` | `/var/run/secrets/sudo-service/token` |
 | `--timeout` | — | `43200` seconds (12 hours; `0` means unlimited) |
+
+`SUDO_SERVICE_NAMESPACE` changes only the namespace in the generated default
+Service URL. Set it to the chart's `namespace` value in each requester workload,
+or use `SUDO_SERVICE_URL` when the Service name or endpoint is also different.
 
 Run the tests:
 

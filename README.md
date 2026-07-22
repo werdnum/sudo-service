@@ -43,6 +43,13 @@ authorization checks, executor defaults, output/token Secrets, and garbage
 collection. When running the binary outside Kubernetes, an unset
 `POD_NAMESPACE` retains the historical `sudo-service` default.
 
+Requester workloads are deployed separately from this chart, so give them the
+same namespace explicitly: set `SUDO_SERVICE_NAMESPACE` to the chart's
+`namespace` value (or set the complete `SUDO_SERVICE_URL`), create their
+submission Role/RoleBinding in that namespace, and create any direct
+`SudoRequest` CR there. The historical defaults remain correct when the chart
+namespace is `sudo-service`.
+
 The Secrets the controller and its oauth2-proxy sidecar consume
 (`sudo-service-pushover`, `sudo-service-oauth2-proxy`) are **not** part of the
 chart — they are cluster-specific and expected to be provided out-of-band
@@ -165,14 +172,17 @@ then requires that identity to have `create` on the virtual
 correctly scoped token alone is therefore not permission to create a request or
 page an administrator.
 
-Grant the HTTP permission to each requester ServiceAccount with ordinary RBAC:
+Grant the HTTP permission to each requester ServiceAccount with ordinary RBAC.
+Set `CONTROLLER_NAMESPACE` to the same value as the chart's `namespace` value:
 
-```yaml
+```bash
+CONTROLLER_NAMESPACE=sudo-service
+kubectl apply -f - <<EOF
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: sudo-service-request-submitter
-  namespace: sudo-service
+  namespace: ${CONTROLLER_NAMESPACE}
 rules:
   - apiGroups: ["sudo.andrewgarrett.dev"]
     resources: ["sudorequests/submit"]
@@ -182,7 +192,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: k8s-agent-sudo-service-request-submitter
-  namespace: sudo-service
+  namespace: ${CONTROLLER_NAMESPACE}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
@@ -191,6 +201,7 @@ subjects:
   - kind: ServiceAccount
     name: k8s-agent-sa
     namespace: k8s-agent
+EOF
 ```
 
 This permission is intentionally separate from direct CR authorization.

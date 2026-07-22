@@ -105,7 +105,7 @@ func TestCreateRequestDeduplicatesOnlyForAuthenticatedRequester(t *testing.T) {
 				return true, &authorizationv1.SubjectAccessReview{Status: authorizationv1.SubjectAccessReviewStatus{Allowed: true}}, nil
 			})
 			existing := &SudoRequest{
-				ObjectMeta: metav1.ObjectMeta{Name: "existing", Namespace: ControllerNamespace, UID: "existing-uid"},
+				ObjectMeta: metav1.ObjectMeta{Name: "existing", Namespace: DefaultControllerNamespace, UID: "existing-uid"},
 				Spec:       SudoRequestSpec{Requester: tt.existingRequester, Reason: "older reason", Command: "tool run", Stdin: "sensitive-payload"},
 				Status:     SudoRequestStatus{Phase: PhasePending},
 			}
@@ -139,7 +139,7 @@ func TestCreateRequestDeduplicatesOnlyForAuthenticatedRequester(t *testing.T) {
 
 func TestRetryEndpointRejectsAuthenticatedNonOwnerWithoutCreatingSuccessor(t *testing.T) {
 	source := &SudoRequest{
-		ObjectMeta: metav1.ObjectMeta{Name: "source", Namespace: ControllerNamespace, UID: "source-uid"},
+		ObjectMeta: metav1.ObjectMeta{Name: "source", Namespace: DefaultControllerNamespace, UID: "source-uid"},
 		Spec:       SudoRequestSpec{Requester: "system:serviceaccount:agents:alice", Command: "true", Reason: "test"},
 		Status:     SudoRequestStatus{Phase: PhaseExpired},
 	}

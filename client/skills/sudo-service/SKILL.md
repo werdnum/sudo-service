@@ -32,7 +32,8 @@ Don't use it for read-only operations you can already do (`kubectl get/list/watc
 ## Setup the requester pod needs (one-time)
 
 **RBAC.** HTTP submission requires `create` on the virtual
-`sudorequests/submit` subresource in the `sudo-service` namespace. Direct CR
+`sudorequests/submit` subresource in the controller namespace (the chart's
+`namespace` value). Direct CR
 submission separately requires `create` on
 `sudorequests.sudo.andrewgarrett.dev`; neither permission implies the other.
 The operator must grant the path the requester uses. `get`/`list`/`watch` is
@@ -57,6 +58,12 @@ volumeMounts:
 ```
 
 The default apiserver-audience SA token will be rejected with 401.
+
+**Controller namespace.** Set `SUDO_SERVICE_NAMESPACE` on the requester Pod to
+the same value as the chart's `namespace` value. The CLI then defaults to
+`http://sudo-service.${SUDO_SERVICE_NAMESPACE}.svc.cluster.local`. Alternatively
+set the complete `SUDO_SERVICE_URL`. The submission Role/RoleBinding and any
+direct `SudoRequest` CR must use this same controller namespace.
 
 ## The flow
 
@@ -163,12 +170,13 @@ Store it in a variable like `REQUEST_UID` — **not** `UID`, which is a read-onl
 shell variable in bash (`UID=...` fails with `bash: UID: readonly variable`).
 
 ```bash
-REQUEST_UID=$(kubectl create -f - -o jsonpath='{.metadata.uid}' <<'YAML'
+CONTROLLER_NAMESPACE=${SUDO_SERVICE_NAMESPACE:-sudo-service}
+REQUEST_UID=$(kubectl create -f - -o jsonpath='{.metadata.uid}' <<YAML
 apiVersion: sudo.andrewgarrett.dev/v1alpha1
 kind: SudoRequest
 metadata:
   generateName: agent-
-  namespace: sudo-service
+  namespace: ${CONTROLLER_NAMESPACE}
 spec:
   requester: system:serviceaccount:k8s-agent:k8s-agent-sa
   reason: "Confirming PSQL credentials for keep-backend after auth alert"
@@ -186,7 +194,8 @@ oauth2-proxy (port 80 is fronted by the sidecar, but `/requests*` is on a
 
 ```bash
 TOKEN=$(cat /var/run/secrets/sudo-service/token)
-BASE=http://sudo-service.sudo-service.svc.cluster.local
+CONTROLLER_NAMESPACE=${SUDO_SERVICE_NAMESPACE:-sudo-service}
+BASE=${SUDO_SERVICE_URL:-http://sudo-service.${CONTROLLER_NAMESPACE}.svc.cluster.local}
 # Or externally: BASE=https://sudo.andrewgarrett.dev — same routes.
 
 while :; do
@@ -352,7 +361,7 @@ corresponding default.
   or failed image pull); it does not stop a running command. Finished Jobs are
   retained for the requested post-approval TTL (with a short capture floor) so
   the controller can collect logs; that TTL begins after completion.
-- In the `sudo-service` namespace the image runs under `cluster-admin` by
+- In the configured controller namespace the image runs under `cluster-admin` by
   default; a Job you target at another `namespace` runs under that namespace's
   unprivileged `default` ServiceAccount instead. Either way the human reviewer is
   the trust boundary — they see the image, namespace, privileges and mounts on the
@@ -383,10 +392,12 @@ Smoke test from inside the requester pod:
 
 ```bash
 TOKEN=$(cat /var/run/secrets/sudo-service/token)
-REQUEST_UID=$(kubectl create -f - -o jsonpath='{.metadata.uid}' <<'YAML'
+CONTROLLER_NAMESPACE=${SUDO_SERVICE_NAMESPACE:-sudo-service}
+BASE=${SUDO_SERVICE_URL:-http://sudo-service.${CONTROLLER_NAMESPACE}.svc.cluster.local}
+REQUEST_UID=$(kubectl create -f - -o jsonpath='{.metadata.uid}' <<YAML
 apiVersion: sudo.andrewgarrett.dev/v1alpha1
 kind: SudoRequest
-metadata: { generateName: smoketest-, namespace: sudo-service }
+metadata: { generateName: smoketest-, namespace: ${CONTROLLER_NAMESPACE} }
 spec:
   requester: system:serviceaccount:<your-ns>:<your-sa>
   reason: "verify sudo-service end-to-end"
@@ -394,6 +405,6 @@ spec:
 YAML
 )
 # approve in the Pushover push, then:
-curl -sS "http://sudo-service.sudo-service.svc.cluster.local/requests/$REQUEST_UID/output" \
+curl -sS "$BASE/requests/$REQUEST_UID/output" \
   -H "Authorization: Bearer $TOKEN"
 ```

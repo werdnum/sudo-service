@@ -216,7 +216,7 @@ func TestAdminResubmitRequiresCSRFAndRecordsVerifiedActor(t *testing.T) {
 		t.Fatalf("valid resubmit status=%d body=%s", rw.Code, rw.Body.String())
 	}
 	var successor SudoRequest
-	if err := cl.Get(context.Background(), client.ObjectKey{Namespace: ControllerNamespace, Name: retryChildName(sr.UID)}, &successor); err != nil {
+	if err := cl.Get(context.Background(), client.ObjectKey{Namespace: DefaultControllerNamespace, Name: retryChildName(sr.UID)}, &successor); err != nil {
 		t.Fatal(err)
 	}
 	if successor.Spec.Requester != sr.Spec.Requester || successor.Spec.SubmittedBy != claims.PreferredUsername {
