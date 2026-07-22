@@ -199,6 +199,33 @@ class SudoServiceCLITest(unittest.TestCase):
             ],
         )
 
+    def test_detach_prints_uid_without_polling(self) -> None:
+        FakeSudoServiceHandler.phases = ["Pending"]
+
+        result = self.run_cli(
+            "--reason", "start a long reconciliation", "--detach", "--quiet",
+            "--command", "ansible-playbook drift.yaml",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "uid-1\n")
+        self.assertEqual(FakeSudoServiceHandler.status_calls, 0)
+        self.assertEqual(
+            FakeSudoServiceHandler.request_bodies[0]["command"],
+            "ansible-playbook drift.yaml",
+        )
+
+    def test_timeout_zero_waits_without_a_local_deadline(self) -> None:
+        FakeSudoServiceHandler.phases = ["Pending", "Executed"]
+
+        result = self.run_cli(
+            "--reason", "wait as long as needed", "--timeout", "0",
+            "--poll-interval", "0.01", "--quiet", "--command", "true",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertGreaterEqual(FakeSudoServiceHandler.status_calls, 2)
+
     def test_profile_submission_shows_resolved_digest_and_warnings(self) -> None:
         FakeSudoServiceHandler.create_response = {
             "uid": "uid-1",

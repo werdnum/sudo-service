@@ -227,9 +227,9 @@ func shellQuote(s string) string {
 func describeVolumeSource(v corev1.Volume) (desc string, allowed bool) {
 	switch {
 	case v.EmptyDir != nil:
-		// Show the effective scratch cap so the reviewer sees how much node disk
-		// the command can use (the requester's sizeLimit, or the stamped default).
-		size := DefaultEmptyDirSizeLimit.String()
+		// Show an explicit requester-provided sizeLimit. Without one, make the
+		// absence of a sudo-service-specific ceiling equally explicit.
+		size := "no sizeLimit"
 		if v.EmptyDir.SizeLimit != nil {
 			size = v.EmptyDir.SizeLimit.String()
 		}

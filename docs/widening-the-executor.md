@@ -185,7 +185,7 @@ ordinary commands write a scratch file under `/tmp` or a dotfile/cache under
 `$HOME` and fail with `EROFS`, and every requester would re-discover this the hard
 way and have to hand-roll the same two `emptyDir` mounts.
 
-So `buildExecutorJob` splices a writable, bounded `emptyDir` into each container
+So `buildExecutorJob` splices a writable `emptyDir` into each container
 at `/tmp` and at `/home/sudo-service`, and points `HOME` at the latter (an
 arbitrary UID has no `/etc/passwd` home, so without this `$HOME` resolves to a
 read-only default). These are controller-owned, like the stdin volume: their names
@@ -204,9 +204,10 @@ a volume over a requester mount or overrides a requester-set value:
   pointed there without adding a second volume.
 
 So a request that wants `/tmp` backed by a large PVC, or a specific `HOME`, is never
-fought by the default. The scratch emptyDirs are bounded by the same
-`DefaultEmptyDirSizeLimit` as any other unbounded scratch, so they can't fill node
-disk.
+fought by the default. The default scratch emptyDirs have no sudo-service-specific
+size limit; aggregate disk protection belongs to the cluster's ordinary quota and
+eviction policy. A requester can still provide an explicit `sizeLimit` when the
+operation itself calls for one.
 
 ### stdin without escaping
 

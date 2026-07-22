@@ -567,8 +567,8 @@ func TestContainerToReportPicksFailedInit(t *testing.T) {
 	}
 }
 
-func TestInitContainerResourcesAreStamped(t *testing.T) {
-	// A requester init container with no resources still ends up bounded.
+func TestInitContainerGetsSchedulingRequestsWithoutLimits(t *testing.T) {
+	// Requester init containers get the same modest scheduler hints as the executor.
 	sr := srWith(SudoRequestSpec{InitContainers: rawList(corev1.Container{Name: "i", Image: "busybox", Command: []string{"sh"}})})
 	extras, err := decodePodExtras(sr)
 	if err != nil {
@@ -576,12 +576,15 @@ func TestInitContainerResourcesAreStamped(t *testing.T) {
 	}
 	job := buildExecutorJob(sr, ControllerNamespace, "sudo-exec-test", extras)
 	got := job.Spec.Template.Spec.InitContainers[0].Resources
-	if got.Limits.Memory().IsZero() || got.Limits.Cpu().IsZero() {
-		t.Errorf("init container resources not stamped: %+v", got)
+	if got.Requests.Memory().IsZero() || got.Requests.Cpu().IsZero() {
+		t.Errorf("init container scheduling requests not stamped: %+v", got)
+	}
+	if len(got.Limits) != 0 {
+		t.Errorf("init container has unexpected hard resource limits: %+v", got.Limits)
 	}
 }
 
-func TestEmptyDirSizeLimitDefaultAndOverride(t *testing.T) {
+func TestEmptyDirHasNoDefaultLimitAndPreservesExplicitLimit(t *testing.T) {
 	custom := resource.MustParse("5Gi")
 	sr := srWith(SudoRequestSpec{Volumes: rawList(
 		corev1.Volume{Name: "scratch", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
@@ -593,8 +596,8 @@ func TestEmptyDirSizeLimitDefaultAndOverride(t *testing.T) {
 	}
 	job := buildExecutorJob(sr, ControllerNamespace, "sudo-exec-test", extras)
 	vols := job.Spec.Template.Spec.Volumes
-	if vols[0].EmptyDir.SizeLimit == nil || !vols[0].EmptyDir.SizeLimit.Equal(DefaultEmptyDirSizeLimit) {
-		t.Errorf("unbounded emptyDir not defaulted: %v", vols[0].EmptyDir.SizeLimit)
+	if vols[0].EmptyDir.SizeLimit != nil {
+		t.Errorf("emptyDir received unexpected default limit: %v", vols[0].EmptyDir.SizeLimit)
 	}
 	if vols[1].EmptyDir.SizeLimit == nil || !vols[1].EmptyDir.SizeLimit.Equal(custom) {
 		t.Errorf("requester sizeLimit not preserved: %v", vols[1].EmptyDir.SizeLimit)

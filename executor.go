@@ -34,7 +34,7 @@ const stdinVolumeName = "sudo-service-stdin"
 // ReadOnlyRootFilesystem). Without them, the common case — a tool that writes a
 // temp file under /tmp or a dotfile/cache under $HOME — fails with EROFS on the
 // default setup, which is a footgun every requester would otherwise re-discover.
-// They are plain bounded emptyDirs spliced into every executor and init
+// They are plain emptyDirs spliced into every executor and init
 // container, visible in the ground-truth pod spec on the approve page. A
 // requester opts out of a default by taking the area themselves — mounting at /tmp
 // (or below it), mounting at homeMountDir, or setting HOME via env/envFrom — and
@@ -308,13 +308,12 @@ func buildExecutorJob(sr *SudoRequest, ns, name string, extras *podExtras) batch
 		// Copy so the stdin-mount append below never mutates the spec's slice.
 		VolumeMounts:    append([]corev1.VolumeMount(nil), extras.VolumeMounts...),
 		SecurityContext: hardenedContainerSecurityContext(),
-		Resources:       standardResources(),
+		Resources:       executorResources(),
 	}
 
 	volumes := make([]corev1.Volume, len(extras.Volumes))
 	for i := range extras.Volumes {
 		extras.Volumes[i].DeepCopyInto(&volumes[i])
-		boundEmptyDirSize(&volumes[i])
 	}
 	if sr.Spec.Stdin != "" {
 		executor.VolumeMounts = append(executor.VolumeMounts, corev1.VolumeMount{
@@ -334,16 +333,15 @@ func buildExecutorJob(sr *SudoRequest, ns, name string, extras *podExtras) batch
 		})
 	}
 
-	// Stamp the controller-owned hardened securityContext and resource bounds onto
+	// Stamp the controller-owned hardened securityContext and scheduling requests onto
 	// requester init containers (validateSpecExtras forbids them setting their own
-	// securityContext), so they inherit the same locked-down, bounded profile as
-	// the executor container — an init container can't run unbounded in a
-	// namespace without a LimitRange.
+	// securityContext), so they inherit the same locked-down profile as the
+	// executor container without the old CPU and memory ceilings.
 	initContainers := make([]corev1.Container, len(extras.InitContainers))
 	for i := range extras.InitContainers {
 		extras.InitContainers[i].DeepCopyInto(&initContainers[i])
 		initContainers[i].SecurityContext = hardenedContainerSecurityContext()
-		initContainers[i].Resources = standardResources()
+		initContainers[i].Resources = executorResources()
 	}
 
 	// Splice writable /tmp and HOME scratch into every container that hasn't
@@ -429,30 +427,13 @@ func executorCommand(sr *SudoRequest) []string {
 	return []string{"/bin/sh", "-c", sr.Spec.Command}
 }
 
-// DefaultEmptyDirSizeLimit caps emptyDir scratch space when the requester didn't
-// set their own sizeLimit, so a command can't fill node disk in a namespace
-// without an ephemeral-storage quota. A requester may override it with a larger
-// (or smaller) sizeLimit, which is rendered on the approve page for the human.
-var DefaultEmptyDirSizeLimit = resource.MustParse("1Gi")
-
-// boundEmptyDirSize stamps the default sizeLimit onto an emptyDir volume that
-// doesn't already declare one. No-op for non-emptyDir volumes and for emptyDir
-// volumes the requester already bounded.
-func boundEmptyDirSize(v *corev1.Volume) {
-	if v.EmptyDir == nil || v.EmptyDir.SizeLimit != nil {
-		return
-	}
-	size := DefaultEmptyDirSizeLimit.DeepCopy()
-	v.EmptyDir.SizeLimit = &size
-}
-
-// scratchVolume builds a controller-owned writable emptyDir, bounded by the same
-// default sizeLimit as any other unbounded scratch so it can't fill node disk.
+// scratchVolume builds a controller-owned writable emptyDir. Resource use is
+// intentionally governed by the cluster's normal scheduling and eviction
+// controls rather than a sudo-service-specific hard ceiling.
 func scratchVolume(name string) corev1.Volume {
-	size := DefaultEmptyDirSizeLimit.DeepCopy()
 	return corev1.Volume{
 		Name:         name,
-		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: &size}},
+		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
 	}
 }
 
@@ -533,18 +514,15 @@ func mountsAtOrUnder(mounts []corev1.VolumeMount, dir string) bool {
 	return false
 }
 
-// standardResources is the fixed request/limit profile applied to the executor
-// container and every requester init container, so requester-supplied (or
-// omitted) resources can't run unbounded.
-func standardResources() corev1.ResourceRequirements {
+// executorResources supplies modest scheduler hints to the executor and every
+// requester init container. It deliberately sets no limits: the human approval
+// is the sudo-service boundary, while aggregate resource protection belongs to
+// ordinary namespace/cluster scheduling, quota and eviction policy.
+func executorResources() corev1.ResourceRequirements {
 	return corev1.ResourceRequirements{
 		Requests: corev1.ResourceList{
 			corev1.ResourceCPU:    resource.MustParse("50m"),
 			corev1.ResourceMemory: resource.MustParse("64Mi"),
-		},
-		Limits: corev1.ResourceList{
-			corev1.ResourceCPU:    resource.MustParse("500m"),
-			corev1.ResourceMemory: resource.MustParse("256Mi"),
 		},
 	}
 }

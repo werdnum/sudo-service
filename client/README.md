@@ -87,6 +87,12 @@ volumes:
 This workaround uses only the existing reviewed pod fields and preserves the
 non-root user, read-only root filesystem, and dropped capabilities.
 
+By default the CLI waits up to 12 hours for approval and completion. This is
+only a local client deadline: it does not stop the server-side executor. Use
+`--timeout 0` to wait indefinitely, or `--detach` to print the submitted request
+UID on stdout and return immediately without polling. Detach works for any
+request; retain the UID to query its status later.
+
 For requests that need environment variables, mounts, volumes, init containers,
 or other structured fields, put the complete HTTP request body in YAML or JSON:
 
@@ -127,6 +133,7 @@ Configuration (flags override env, which override in-cluster defaults):
 |---|---|---|
 | `--url` | `SUDO_SERVICE_URL`, `K8S_AGENT_SUDO_SERVICE_URL` | `http://sudo-service.sudo-service.svc.cluster.local` |
 | `--token-file` | `SUDO_SERVICE_TOKEN_FILE` | `/var/run/secrets/sudo-service/token` |
+| `--timeout` | — | `43200` seconds (12 hours; `0` means unlimited) |
 
 Run the tests:
 
