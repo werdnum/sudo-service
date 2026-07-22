@@ -319,11 +319,12 @@ volumes:
 
 The executor container still runs as a non-root user with a read-only root
 filesystem and all capabilities dropped. You get a writable `/tmp` and `$HOME`
-(`/home/sudo-service`) for free — the controller mounts a bounded `emptyDir` at
-each so the usual temp files and dotfile caches just work — but anything else on
-the root filesystem is read-only, so write durable output to a mounted `emptyDir`
-(e.g. `/work`), not to `/`. Mounting your own volume at `/tmp`, or setting `HOME`
-yourself, opts out of the corresponding default.
+(`/home/sudo-service`) for free — the controller mounts an `emptyDir` with no
+sudo-service-specific size limit at each so the usual temp files and dotfile
+caches just work — but anything else on the root filesystem is read-only, so
+write durable output to a mounted `emptyDir` (e.g. `/work`), not to `/`. Mounting
+your own volume at `/tmp`, or setting `HOME` yourself, opts out of the
+corresponding default.
 
 ## Gotchas
 
