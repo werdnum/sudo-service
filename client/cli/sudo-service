@@ -55,6 +55,14 @@ class SudoServiceError(RuntimeError):
     pass
 
 
+class SudoServiceHTTPError(SudoServiceError):
+    def __init__(self, method: str, url: str, status: int, payload: bytes) -> None:
+        self.status = status
+        self.payload = payload
+        detail = payload.decode("utf-8", errors="replace").strip()
+        super().__init__(f"{method} {url}: HTTP {status}: {detail}")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Create a sudo-service request, wait for approval/execution, and print its output.",
@@ -416,7 +424,6 @@ def http_json(
     *,
     method: str = "GET",
     body: dict[str, Any] | None = None,
-    acceptable_statuses: frozenset[int] = frozenset(),
 ) -> dict[str, Any]:
     token = read_token(token_file)
     data = None
@@ -430,9 +437,7 @@ def http_json(
             payload = response.read()
     except urllib.error.HTTPError as exc:
         payload = exc.read()
-        if exc.code not in acceptable_statuses:
-            detail = payload.decode("utf-8", errors="replace").strip()
-            raise SudoServiceError(f"{method} {url}: HTTP {exc.code}: {detail}") from exc
+        raise SudoServiceHTTPError(method, url, exc.code, payload) from exc
     except urllib.error.URLError as exc:
         raise SudoServiceError(f"{method} {url}: {exc.reason}") from exc
     try:
@@ -462,16 +467,27 @@ def create_request(base_url: str, token_file: str, body: dict[str, Any]) -> dict
         raise SudoServiceError(f"create response did not include uid: {response}")
     return response
 def retry_request(base_url: str, token_file: str, uid: str) -> dict[str, Any]:
-    response = http_json(
-        f"{base_url.rstrip('/')}/requests/{uid}/retry", token_file,
-        method="POST", body={}, acceptable_statuses=frozenset({409}),
-    )
+    try:
+        response = http_json(
+            f"{base_url.rstrip('/')}/requests/{uid}/retry", token_file,
+            method="POST", body={},
+        )
+    except SudoServiceHTTPError as exc:
+        if exc.status != 409:
+            raise
+        try:
+            response = json.loads(exc.payload)
+        except json.JSONDecodeError:
+            raise exc
+        if (
+            not isinstance(response, dict)
+            or response.get("error") != "equivalent request is already pending"
+            or not response.get("uid")
+        ):
+            raise exc
+        response["duplicate"] = True
     if not response.get("uid"):
         raise SudoServiceError(f"retry response did not include uid: {response}")
-    # A 409 with a UID means the server found an equivalent in-flight request.
-    # Reuse it exactly like the normal create endpoint's duplicate response.
-    if response.get("error"):
-        response["duplicate"] = True
     return response
 
 

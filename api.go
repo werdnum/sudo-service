@@ -887,10 +887,15 @@ func (a *APIServer) globalEventsHandler(w http.ResponseWriter, r *http.Request) 
 }
 
 // findByUID lists SudoRequests in the controller namespace and returns the matching one.
-// Cached by the manager, so this is a hashmap lookup after the first reconcile.
+// Use the direct reader when configured so a UID returned by uncached duplicate
+// detection is immediately available to status and output endpoints as well.
 func (a *APIServer) findByUID(ctx context.Context, uid types.UID) (*SudoRequest, error) {
 	var list SudoRequestList
-	if err := a.Client.List(ctx, &list, client.InNamespace(ControllerNamespace)); err != nil {
+	reader := a.APIReader
+	if reader == nil {
+		reader = a.Client
+	}
+	if err := reader.List(ctx, &list, client.InNamespace(ControllerNamespace)); err != nil {
 		return nil, err
 	}
 	for i := range list.Items {

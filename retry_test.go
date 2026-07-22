@@ -144,6 +144,24 @@ func TestDuplicateDetectionUsesUncachedReader(t *testing.T) {
 	}
 }
 
+func TestFindByUIDUsesUncachedReader(t *testing.T) {
+	want := &SudoRequest{
+		ObjectMeta: metav1.ObjectMeta{Name: "pending", Namespace: ControllerNamespace, UID: "direct-uid"},
+		Spec:       SudoRequestSpec{Requester: "alice", Command: "kubectl get pods"},
+	}
+	staleCache := ctrlfake.NewClientBuilder().WithScheme(scheme).Build()
+	directReader := ctrlfake.NewClientBuilder().WithScheme(scheme).WithObjects(want).Build()
+	got, err := (&APIServer{Client: staleCache, APIReader: directReader}).findByUID(
+		context.Background(), want.UID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.UID != want.UID {
+		t.Fatalf("findByUID returned %s, want %s", got.UID, want.UID)
+	}
+}
+
 func retryTestClient(t *testing.T, source *SudoRequest, failFirstLink *atomic.Bool) client.Client {
 	t.Helper()
 	return ctrlfake.NewClientBuilder().WithScheme(scheme).

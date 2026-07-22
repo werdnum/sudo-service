@@ -322,6 +322,14 @@ class SudoServiceCLITest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("equivalent request already exists", result.stderr)
 
+    def test_retry_nonduplicate_conflict_preserves_server_error(self) -> None:
+        FakeSudoServiceHandler.create_status = HTTPStatus.CONFLICT
+        FakeSudoServiceHandler.create_response = "request phase Executed is not eligible for requester resubmission"
+        result = self.run_cli("--retry", "expired-uid", "--quiet")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("request phase Executed is not eligible", result.stderr)
+        self.assertNotIn("invalid JSON response", result.stderr)
+
     def test_duplicate_response_reuses_uid_and_warns_even_when_quiet(self) -> None:
         FakeSudoServiceHandler.create_response = {
             "uid": "uid-1", "name": "existing", "duplicate": True,
