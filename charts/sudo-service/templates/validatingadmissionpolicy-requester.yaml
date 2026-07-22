@@ -29,3 +29,16 @@ spec:
       message: >-
         spec.requester must match the authenticated user, unless the request is
         submitted by the sudo-service controller SA via the HTTP API.
+    - expression: >-
+        !has(object.spec.submittedBy) ||
+        object.spec.submittedBy == request.userInfo.username ||
+        request.userInfo.username == "{{ include "sudo-service.controllerUsername" . }}"
+      message: >-
+        spec.submittedBy must match the authenticated user, unless the request is
+        submitted by the sudo-service controller after verified HTTP/OIDC authentication.
+    - expression: >-
+        !has(object.spec.retryOfUID) ||
+        request.userInfo.username == "{{ include "sudo-service.controllerUsername" . }}"
+      message: >-
+        spec.retryOfUID is controller-owned and may only be set by the sudo-service
+        controller after authenticated requester or administrator resubmission.

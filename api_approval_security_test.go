@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"html/template"
 	"net/http"
 	"net/http/httptest"
@@ -186,5 +187,89 @@ func TestDenyPostAcceptsMatchingStrictCookieToken(t *testing.T) {
 	_ = cl.Get(req.Context(), client.ObjectKeyFromObject(sr), &got)
 	if got.Status.Phase != PhaseDenied {
 		t.Fatalf("phase=%s, want Denied", got.Status.Phase)
+	}
+}
+
+func TestAdminResubmitRequiresCSRFAndRecordsVerifiedActor(t *testing.T) {
+	sr := pendingApprovalRequest()
+	sr.Status.Phase = PhaseDenied
+	a, cl, claims := approvalTestServer(t, sr)
+	form := url.Values{"id": {string(sr.UID)}}
+	request := func(withCSRF bool) *httptest.ResponseRecorder {
+		values := form
+		if withCSRF {
+			values = url.Values{"id": {string(sr.UID)}, "csrf_token": {"csrf-value"}}
+		}
+		req := httptest.NewRequest(http.MethodPost, "/resubmit", strings.NewReader(values.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		if withCSRF {
+			req.AddCookie(&http.Cookie{Name: csrfCookieName, Value: "csrf-value"})
+		}
+		rw := httptest.NewRecorder()
+		a.resubmitHandlerWithClaims(rw, req, claims)
+		return rw
+	}
+	if rw := request(false); rw.Code != http.StatusForbidden {
+		t.Fatalf("missing CSRF status=%d body=%s", rw.Code, rw.Body.String())
+	}
+	if rw := request(true); rw.Code != http.StatusOK {
+		t.Fatalf("valid resubmit status=%d body=%s", rw.Code, rw.Body.String())
+	}
+	var successor SudoRequest
+	if err := cl.Get(context.Background(), client.ObjectKey{Namespace: ControllerNamespace, Name: retryChildName(sr.UID)}, &successor); err != nil {
+		t.Fatal(err)
+	}
+	if successor.Spec.Requester != sr.Spec.Requester || successor.Spec.SubmittedBy != claims.PreferredUsername {
+		t.Fatalf("attribution = %#v", successor.Spec)
+	}
+}
+
+func TestAdminResubmitRejectsVerifiedNonAdminClaims(t *testing.T) {
+	sr := pendingApprovalRequest()
+	sr.Status.Phase = PhaseExpired
+	a, _, _ := approvalTestServer(t, sr)
+	form := url.Values{"id": {string(sr.UID)}, "csrf_token": {"csrf-value"}}
+	req := httptest.NewRequest(http.MethodPost, "/resubmit", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(&http.Cookie{Name: csrfCookieName, Value: "csrf-value"})
+	rw := httptest.NewRecorder()
+	a.resubmitHandlerWithClaims(rw, req, &HumanClaims{PreferredUsername: "viewer", Groups: []string{"viewers"}})
+	if rw.Code != http.StatusForbidden {
+		t.Fatalf("non-admin status=%d body=%s", rw.Code, rw.Body.String())
+	}
+}
+
+func TestAdminResubmitDuplicateLinksActiveRequest(t *testing.T) {
+	source := pendingApprovalRequest()
+	source.Status.Phase = PhaseDenied
+	a, cl, claims := approvalTestServer(t, source)
+	pending := source.DeepCopy()
+	pending.Name = "equivalent-pending"
+	pending.UID = "equivalent-pending-uid"
+	pending.ResourceVersion = ""
+	pending.Status = SudoRequestStatus{Phase: PhasePending}
+	if err := cl.Create(context.Background(), pending); err != nil {
+		t.Fatal(err)
+	}
+
+	form := url.Values{"id": {string(source.UID)}, "csrf_token": {"csrf-value"}}
+	req := httptest.NewRequest(http.MethodPost, "/resubmit", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(&http.Cookie{Name: csrfCookieName, Value: "csrf-value"})
+	rw := httptest.NewRecorder()
+	a.resubmitHandlerWithClaims(rw, req, claims)
+	if rw.Code != http.StatusConflict {
+		t.Fatalf("duplicate resubmit status=%d body=%s", rw.Code, rw.Body.String())
+	}
+	body := rw.Body.String()
+	if !strings.Contains(body, string(pending.UID)) || !strings.Contains(body, "/approve?id="+string(pending.UID)) {
+		t.Fatalf("duplicate response does not link active UID: %s", body)
+	}
+	var current SudoRequest
+	if err := cl.Get(context.Background(), client.ObjectKeyFromObject(source), &current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Status.SupersededByUID != "" {
+		t.Fatalf("unrelated pending request became lineage successor: %s", current.Status.SupersededByUID)
 	}
 }

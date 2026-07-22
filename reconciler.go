@@ -157,6 +157,7 @@ func (r *SudoRequestReconciler) handleNew(ctx context.Context, sr *SudoRequest) 
 			Reason:       sr.Spec.Reason,
 			Command:      sr.Spec.Command,
 			CreatedAt:    sr.CreationTimestamp.Format("2006-01-02 15:04:05 UTC"),
+			RetryOfUID:   sr.Spec.RetryOfUID,
 		})
 		return ctrl.Result{}, nil
 	}
@@ -184,6 +185,7 @@ func (r *SudoRequestReconciler) handleNew(ctx context.Context, sr *SudoRequest) 
 			Reason:       sr.Spec.Reason,
 			Command:      sr.Spec.Command,
 			CreatedAt:    sr.CreationTimestamp.Format("2006-01-02 15:04:05 UTC"),
+			RetryOfUID:   sr.Spec.RetryOfUID,
 		})
 		return ctrl.Result{}, nil
 	}
@@ -208,6 +210,7 @@ func (r *SudoRequestReconciler) handleNew(ctx context.Context, sr *SudoRequest) 
 			Reason:     sr.Spec.Reason,
 			Command:    sr.Spec.Command,
 			CreatedAt:  sr.CreationTimestamp.Format("2006-01-02 15:04:05 UTC"),
+			RetryOfUID: sr.Spec.RetryOfUID,
 		})
 		return ctrl.Result{}, nil
 	}
@@ -261,12 +264,13 @@ func (r *SudoRequestReconciler) handleNew(ctx context.Context, sr *SudoRequest) 
 
 	r.Recorder.Eventf(sr, corev1.EventTypeNormal, "Pending", "Awaiting human approval; notification queued")
 	r.Broadcaster.Publish(string(sr.UID), Event{
-		Type:      "phase",
-		Phase:     PhasePending,
-		Requester: sr.Spec.Requester,
-		Reason:    sr.Spec.Reason,
-		Command:   sr.Spec.Command,
-		CreatedAt: sr.CreationTimestamp.Format("2006-01-02 15:04:05 UTC"),
+		Type:       "phase",
+		Phase:      PhasePending,
+		Requester:  sr.Spec.Requester,
+		Reason:     sr.Spec.Reason,
+		Command:    sr.Spec.Command,
+		CreatedAt:  sr.CreationTimestamp.Format("2006-01-02 15:04:05 UTC"),
+		RetryOfUID: sr.Spec.RetryOfUID,
 	})
 
 	// A separate reconcile delivers the notification. At this point both the
@@ -290,12 +294,13 @@ func (r *SudoRequestReconciler) handlePending(ctx context.Context, sr *SudoReque
 		r.deleteApprovalTokenSecret(ctx, sr.Namespace, tokenSecretName)
 		r.Recorder.Eventf(sr, corev1.EventTypeWarning, "Expired", "Request expired without approval after %s", age)
 		r.Broadcaster.Publish(string(sr.UID), Event{
-			Type:      "phase",
-			Phase:     PhaseExpired,
-			Requester: sr.Spec.Requester,
-			Reason:    sr.Spec.Reason,
-			Command:   sr.Spec.Command,
-			CreatedAt: sr.CreationTimestamp.Format("2006-01-02 15:04:05 UTC"),
+			Type:       "phase",
+			Phase:      PhaseExpired,
+			Requester:  sr.Spec.Requester,
+			Reason:     sr.Spec.Reason,
+			Command:    sr.Spec.Command,
+			CreatedAt:  sr.CreationTimestamp.Format("2006-01-02 15:04:05 UTC"),
+			RetryOfUID: sr.Spec.RetryOfUID,
 		})
 		return ctrl.Result{}, nil
 	}
@@ -397,6 +402,12 @@ func (r *SudoRequestReconciler) deliverApprovalNotification(ctx context.Context,
 	for _, warning := range sr.Status.PreflightWarnings {
 		body += "\npreflight warning: " + warning
 	}
+	if sr.Spec.RetryOfUID != "" {
+		body += "\nretry of: " + sr.Spec.RetryOfUID
+	}
+	if actor := submittedByFor(sr); actor != sr.Spec.Requester {
+		body += "\nresubmitted by: " + actor
+	}
 	if extras := specExtrasText(sr, true); extras != "" {
 		body += "\n" + extras
 	}
@@ -490,6 +501,7 @@ func (r *SudoRequestReconciler) markFailed(ctx context.Context, sr *SudoRequest,
 		Reason:        sr.Spec.Reason,
 		Command:       sr.Spec.Command,
 		CreatedAt:     sr.CreationTimestamp.Format("2006-01-02 15:04:05 UTC"),
+		RetryOfUID:    sr.Spec.RetryOfUID,
 	})
 	return ctrl.Result{}, nil
 }
@@ -812,6 +824,7 @@ func (r *SudoRequestReconciler) finalizeFromRecordedResult(ctx context.Context, 
 		Reason:              sr.Spec.Reason,
 		Command:             sr.Spec.Command,
 		CreatedAt:           sr.CreationTimestamp.Format("2006-01-02 15:04:05 UTC"),
+		RetryOfUID:          sr.Spec.RetryOfUID,
 	})
 	return ctrl.Result{}, nil
 }
@@ -848,6 +861,7 @@ func (r *SudoRequestReconciler) Approve(ctx context.Context, uid types.UID, appr
 		Reason:     sr.Spec.Reason,
 		Command:    sr.Spec.Command,
 		CreatedAt:  sr.CreationTimestamp.Format("2006-01-02 15:04:05 UTC"),
+		RetryOfUID: sr.Spec.RetryOfUID,
 	})
 	return nil
 }
@@ -884,6 +898,7 @@ func (r *SudoRequestReconciler) Deny(ctx context.Context, uid types.UID, deniedB
 		Reason:       sr.Spec.Reason,
 		Command:      sr.Spec.Command,
 		CreatedAt:    sr.CreationTimestamp.Format("2006-01-02 15:04:05 UTC"),
+		RetryOfUID:   sr.Spec.RetryOfUID,
 	})
 	return nil
 }

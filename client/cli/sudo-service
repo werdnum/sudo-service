@@ -55,6 +55,14 @@ class SudoServiceError(RuntimeError):
     pass
 
 
+class SudoServiceHTTPError(SudoServiceError):
+    def __init__(self, method: str, url: str, status: int, payload: bytes) -> None:
+        self.status = status
+        self.payload = payload
+        detail = payload.decode("utf-8", errors="replace").strip()
+        super().__init__(f"{method} {url}: HTTP {status}: {detail}")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Create a sudo-service request, wait for approval/execution, and print its output.",
@@ -93,6 +101,14 @@ def parse_args() -> argparse.Namespace:
             "Top-level Nix package attribute to include in an arm64 Nixery image; "
             "repeatable. Client-side shorthand for --image; incompatible with "
             "--image, --profile, and --request-file."
+        ),
+    )
+    parser.add_argument(
+        "--retry",
+        metavar="UID",
+        help=(
+            "Explicitly clone an Expired or Failed request owned by this requester. "
+            "The new request receives fresh approval and records immutable lineage."
         ),
     )
     parser.add_argument(
@@ -201,7 +217,23 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if args.argv and args.argv[0] == "--":
         args.argv = args.argv[1:]
-    if args.request_file:
+    if args.retry:
+        conflicting = []
+        for option, value in (
+            ("--reason", args.reason), ("--command", args.command),
+            ("command arguments after '--'", args.argv), ("--image", args.image),
+            ("--profile", args.profile),
+            ("--tool", args.tools),
+            ("--namespace", args.namespace), ("--request-file", args.request_file),
+            ("--stdin-file", args.stdin_file), ("--no-cluster-admin", args.no_cluster_admin),
+            ("--image-pull-secret", args.image_pull_secrets),
+            ("--ttl-seconds-after-approval", args.ttl_seconds_after_approval),
+        ):
+            if value is not None and value is not False and value != []:
+                conflicting.append(option)
+        if conflicting:
+            parser.error("--retry cannot be combined with " + ", ".join(conflicting))
+    elif args.request_file:
         conflicting = []
         for option, value in (
             ("--reason", args.reason),
@@ -241,7 +273,7 @@ def parse_args() -> argparse.Namespace:
             parser.error(
                 f"generated Nixery image name exceeds Docker's {DOCKER_NAME_MAX}-character limit"
             )
-    if not args.request_file and not args.reason:
+    if not args.retry and not args.request_file and not args.reason:
         parser.error("--reason is required unless it is provided by --request-file")
     if args.poll_interval <= 0:
         parser.error("--poll-interval must be positive")
@@ -386,7 +418,13 @@ def read_token(path: str) -> str:
     return token
 
 
-def http_json(url: str, token_file: str, *, method: str = "GET", body: dict[str, Any] | None = None) -> dict[str, Any]:
+def http_json(
+    url: str,
+    token_file: str,
+    *,
+    method: str = "GET",
+    body: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     token = read_token(token_file)
     data = None
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
@@ -398,8 +436,8 @@ def http_json(url: str, token_file: str, *, method: str = "GET", body: dict[str,
         with urllib.request.urlopen(request, timeout=15) as response:
             payload = response.read()
     except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace").strip()
-        raise SudoServiceError(f"{method} {url}: HTTP {exc.code}: {detail}") from exc
+        payload = exc.read()
+        raise SudoServiceHTTPError(method, url, exc.code, payload) from exc
     except urllib.error.URLError as exc:
         raise SudoServiceError(f"{method} {url}: {exc.reason}") from exc
     try:
@@ -427,6 +465,29 @@ def create_request(base_url: str, token_file: str, body: dict[str, Any]) -> dict
     uid = str(response.get("uid") or "")
     if not uid:
         raise SudoServiceError(f"create response did not include uid: {response}")
+    return response
+def retry_request(base_url: str, token_file: str, uid: str) -> dict[str, Any]:
+    try:
+        response = http_json(
+            f"{base_url.rstrip('/')}/requests/{uid}/retry", token_file,
+            method="POST", body={},
+        )
+    except SudoServiceHTTPError as exc:
+        if exc.status != 409:
+            raise
+        try:
+            response = json.loads(exc.payload)
+        except json.JSONDecodeError:
+            raise exc
+        if (
+            not isinstance(response, dict)
+            or response.get("error") != "equivalent request is already pending"
+            or not response.get("uid")
+        ):
+            raise exc
+        response["duplicate"] = True
+    if not response.get("uid"):
+        raise SudoServiceError(f"retry response did not include uid: {response}")
     return response
 
 
@@ -476,7 +537,9 @@ def main() -> int:
     args = parse_args()
     base_url = args.url.rstrip("/")
 
-    if args.request_file:
+    if args.retry:
+        body = {"retryOfUID": args.retry}
+    elif args.request_file:
         if args.request_file == "-" and args.stdin_file == "-":
             raise SudoServiceError("--request-file - and --stdin-file - cannot both read standard input")
         body = load_request_file(args.request_file)
@@ -498,7 +561,7 @@ def main() -> int:
             body["imagePullSecrets"] = [{"name": name} for name in args.image_pull_secrets]
 
     stdin_payload: str | None = None
-    if args.stdin_file is not None:
+    if not args.retry and args.stdin_file is not None:
         if "stdin" in body:
             raise SudoServiceError("--stdin-file cannot be combined with a request file that sets stdin")
         if args.stdin_file == "-":
@@ -510,11 +573,12 @@ def main() -> int:
                 raise SudoServiceError(f"read stdin file {args.stdin_file}: {exc}") from exc
         body["stdin"] = stdin_payload
 
-    validate_request_body(body)
-    if body.get("image") and body.get("profile"):
-        raise SudoServiceError("request fields 'image' and 'profile' are mutually exclusive")
+    if not args.retry:
+        validate_request_body(body)
+        if body.get("image") and body.get("profile"):
+            raise SudoServiceError("request fields 'image' and 'profile' are mutually exclusive")
 
-    if not args.no_validate:
+    if not args.retry and not args.no_validate:
         syntax_error = validate_command_syntax(body["command"])
         if syntax_error is not None:
             raise SudoServiceError(
@@ -526,17 +590,19 @@ def main() -> int:
     if args.preview:
         print(json.dumps(body, indent=2, sort_keys=True), file=sys.stderr)
 
-    create_response = create_request(base_url, args.token_file, body)
-    uid = str(create_response["uid"])
+    response = retry_request(base_url, args.token_file, args.retry) if args.retry else create_request(base_url, args.token_file, body)
+    uid = str(response["uid"])
     if not args.quiet:
         print(f"sudo-service request uid={uid}", file=sys.stderr)
-        resolved = str(create_response.get("image") or "")
-        profile = str(create_response.get("profile") or "")
+        resolved = str(response.get("image") or "")
+        profile = str(response.get("profile") or "")
         if resolved:
             prefix = f"profile={profile} " if profile else "raw image "
             print(f"executor {prefix}resolved-image={resolved}", file=sys.stderr)
-    for warning in create_response.get("warnings") or []:
+    for warning in response.get("warnings") or []:
         print(f"sudo-service preflight warning: {warning}", file=sys.stderr)
+    if response.get("duplicate"):
+        print("sudo-service: equivalent request already exists; using its uid", file=sys.stderr)
     if args.detach:
         print(uid)
         return 0

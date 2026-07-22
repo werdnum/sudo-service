@@ -117,6 +117,19 @@ reviewed request has one unambiguous source. `--stdin-file` is the exception: it
 may supply a separate literal payload when the request file does not itself set
 `stdin`.
 
+To explicitly resubmit an `Expired` or `Failed` request without rebuilding its
+payload, use its UID:
+
+```sh
+client/cli/sudo-service --retry "$REQUEST_UID" --preview
+```
+
+The successor requires a fresh approval and records immutable lineage. Retry cannot
+be combined with payload-building flags. The service may return an existing UID when
+the same requester already has an equivalent active request; the CLI reports that
+deduplication even under `--quiet`. It never reveals another requester's match and
+never automatically retries a denial.
+
 ```sh
 client/cli/sudo-service \
   --request-file request.yaml \

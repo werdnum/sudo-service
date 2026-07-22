@@ -13,6 +13,7 @@ type Event struct {
 	Reason              string `json:"reason,omitempty"`
 	Command             string `json:"command,omitempty"`
 	CreatedAt           string `json:"createdAt,omitempty"`
+	RetryOfUID          string `json:"retryOfUID,omitempty"`
 	ApprovedBy          string `json:"approvedBy,omitempty"`
 	DeniedBy            string `json:"deniedBy,omitempty"`
 	DenialReason        string `json:"denialReason,omitempty"`

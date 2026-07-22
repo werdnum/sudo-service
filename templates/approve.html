@@ -9,6 +9,9 @@
     {{else}}
         <dl>
             <dt>Requester</dt><dd>{{.Requester}}</dd>
+			{{if ne .SubmittedBy .Requester}}<dt>Resubmitted by</dt><dd><strong>{{.SubmittedBy}}</strong></dd>{{end}}
+			{{if .RetryOfUID}}<dt>Retry of</dt><dd><a href="/approve?id={{.RetryOfUID}}"><code>{{.RetryOfUID}}</code></a></dd>{{end}}
+			{{if .SupersededByUID}}<dt>Superseded by</dt><dd><a href="/approve?id={{.SupersededByUID}}"><code>{{.SupersededByUID}}</code></a></dd>{{end}}
             <dt>Reason</dt><dd>{{.Reason}}</dd>
             <dt>Namespace</dt><dd>{{.Extras.Namespace}}</dd>
             <dt>Privileges</dt><dd>{{if .Extras.ClusterAdmin}}<strong>cluster-admin</strong>{{else}}none (namespace default ServiceAccount){{end}}</dd>
@@ -67,6 +70,14 @@
         </div>
 
         <div style="display: flex; gap: 1rem; margin-top: 2rem; flex-wrap: wrap;">
+			{{if .CanResubmit}}
+			<form method="POST" action="/resubmit">
+				<input type="hidden" name="id" value="{{.UID}}">
+				<input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+				<button type="submit" class="btn btn-primary">Resubmit for review</button>
+			</form>
+			{{end}}
+			{{if eq .Phase "Pending"}}
             <form method="POST" action="/approve">
                 <input type="hidden" name="id" value="{{.UID}}">
                 <input type="hidden" name="t" value="{{.Token}}">
@@ -75,8 +86,10 @@
             </form>
 
             <button type="button" class="btn btn-error" onclick="document.getElementById('deny-form').style.display='block'; this.style.display='none'">Deny...</button>
+			{{end}}
         </div>
 
+		{{if eq .Phase "Pending"}}
         <form method="POST" action="/deny" id="deny-form" style="display: none; margin-top: 2rem; border-top: 1px solid var(--border-color); padding-top: 1.5rem;">
             <input type="hidden" name="id" value="{{.UID}}">
             <input type="hidden" name="t" value="{{.Token}}">
@@ -87,6 +100,7 @@
             </div>
             <button type="submit" class="btn btn-error">Confirm Denial</button>
         </form>
+		{{end}}
     {{end}}
 </div>
 {{template "footer" .}}

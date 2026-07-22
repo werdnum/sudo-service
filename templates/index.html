@@ -7,6 +7,7 @@
         <div class="request-item" id="request-{{.UID}}">
             <div class="request-info">
                 <div style="font-weight: 600;">{{.Spec.Requester}}</div>
+				{{if .Spec.RetryOfUID}}<div style="font-size: 0.75rem; color: var(--text-muted);">retry of <a href="/approve?id={{.Spec.RetryOfUID}}"><code>{{.Spec.RetryOfUID}}</code></a></div>{{end}}
                 <div style="font-size: 0.875rem; color: var(--text-muted);">{{.Spec.Reason}}</div>
                 <code style="font-size: 0.75rem; background: #f1f5f9; padding: 0.125rem 0.25rem; border-radius: 0.25rem;">{{.Spec.Command}}</code>
                 <div class="timestamp">{{.CreationTimestamp.Format "2006-01-02 15:04:05 UTC"}}</div>
@@ -30,6 +31,7 @@
         <div class="request-item" id="request-{{.UID}}">
             <div class="request-info">
                 <div style="font-weight: 600;">{{.Spec.Requester}}</div>
+				{{if .Status.SupersededByUID}}<div style="font-size: 0.75rem; color: var(--text-muted);">superseded by <a href="/approve?id={{.Status.SupersededByUID}}"><code>{{.Status.SupersededByUID}}</code></a></div>{{else if .Spec.RetryOfUID}}<div style="font-size: 0.75rem; color: var(--text-muted);">retry of <a href="/approve?id={{.Spec.RetryOfUID}}"><code>{{.Spec.RetryOfUID}}</code></a></div>{{end}}
                 <div style="font-size: 0.875rem; color: var(--text-muted);">{{.Spec.Reason}}</div>
                 <div class="timestamp">{{.CreationTimestamp.Format "2006-01-02 15:04:05 UTC"}}</div>
             </div>
@@ -58,6 +60,7 @@
         div.innerHTML = `
             <div class="request-info">
                 <div style="font-weight: 600;">${escapeHTML(ev.requester)}</div>
+                ${lineageHTML(ev)}
                 <div style="font-size: 0.875rem; color: var(--text-muted);">${escapeHTML(ev.reason)}</div>
                 ${isPending ? `<code style="font-size: 0.75rem; background: #f1f5f9; padding: 0.125rem 0.25rem; border-radius: 0.25rem;">${escapeHTML(ev.command)}</code>` : ''}
                 <div class="timestamp">${ev.createdAt}</div>
@@ -70,6 +73,12 @@
             </div>
         `;
         return div;
+    }
+
+    function lineageHTML(ev) {
+        const uid = ev.retryOfUID;
+        if (!uid) return '';
+        return `<div style="font-size: 0.75rem; color: var(--text-muted);">retry of <a href="/approve?id=${encodeURIComponent(uid)}"><code>${escapeHTML(uid)}</code></a></div>`;
     }
 
     function escapeHTML(str) {

@@ -128,6 +128,26 @@ The requester CLI waits for 12 hours by default. `--timeout 0` waits
 indefinitely; `--detach` submits any request, prints its UID, and returns without
 polling. Neither client option changes server execution.
 
+### Explicit retries and duplicate requests
+
+`POST /requests/{uid}/retry` lets the authenticated original requester clone an
+`Expired` or `Failed` request for a fresh approval. The successor records immutable
+`spec.retryOfUID`; the predecessor records `status.supersededByUID`. A deterministic
+successor name makes repeated and concurrent calls idempotent, including recovery
+when creation succeeds but updating the predecessor link temporarily fails. Nothing
+automatically retries, and requester-side retry rejects human denials.
+
+Verified administrators may explicitly resubmit a terminal request in the web UI.
+The original requester remains the output owner, while `spec.submittedBy` records the
+verified OIDC administrator rather than impersonating the requester. Direct CRD
+submissions have the same attribution checked at admission.
+
+New submissions are compared with active requests using a canonical hash of every
+execution-affecting field. Stdin and environment values affect the hash but are never
+returned in duplicate warnings. An equivalent request owned by the same requester
+returns its existing UID; matches owned by other requesters are ignored so their
+existence and payload cannot be inferred.
+
 ### Authorizing HTTP requesters
 
 The requester HTTP API has two distinct Kubernetes checks. `TokenReview`

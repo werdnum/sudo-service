@@ -167,6 +167,7 @@ func main() {
 
 	api := &APIServer{
 		Client:        mgr.GetClient(),
+		APIReader:     mgr.GetAPIReader(),
 		Verifier:      verifier,
 		TokenReviewer: tokenReviewer,
 		Authorizer:    requesterAuthorizer,

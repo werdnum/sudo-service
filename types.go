@@ -95,6 +95,16 @@ type SudoRequestSpec struct {
 	// Enforced server-side by ValidatingAdmissionPolicy against request.userInfo.username.
 	Requester string `json:"requester"`
 
+	// SubmittedBy is the authenticated actor who created this request. It equals
+	// Requester for ordinary HTTP/direct submissions, and names the verified
+	// administrator for an admin-initiated resubmission. It is never inferred
+	// from an untrusted header.
+	SubmittedBy string `json:"submittedBy,omitempty"`
+
+	// RetryOfUID points to the immutable predecessor cloned by an explicit
+	// resubmission. Empty means this is the first request in its chain.
+	RetryOfUID string `json:"retryOfUID,omitempty"`
+
 	// Reason is free-text shown to the human reviewer on the Pushbullet push and approve page.
 	Reason string `json:"reason"`
 
@@ -201,6 +211,10 @@ type SudoRequestStatus struct {
 	ResolvedProfile   string   `json:"resolvedProfile,omitempty"`
 	ResolvedImage     string   `json:"resolvedImage,omitempty"`
 	PreflightWarnings []string `json:"preflightWarnings,omitempty"`
+
+	// SupersededByUID is the controller-owned forward link to the explicit
+	// successor. The successor's spec.retryOfUID is the immutable source of truth.
+	SupersededByUID string `json:"supersededByUID,omitempty"`
 
 	ExitCode        *int32 `json:"exitCode,omitempty"`
 	OutputSecretRef string `json:"outputSecretRef,omitempty"`
