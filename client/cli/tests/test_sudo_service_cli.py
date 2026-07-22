@@ -228,6 +228,49 @@ class SudoServiceCLITest(unittest.TestCase):
         self.assertIn("--image and --profile are mutually exclusive", result.stderr)
         self.assertEqual(FakeSudoServiceHandler.request_bodies, [])
 
+    def test_tools_build_canonical_raw_nixery_image(self) -> None:
+        result = self.run_cli(
+            "--reason", "check remote cluster",
+            "--tool", "opentofu", "--tool", "openssh", "--tool", "ansible",
+            "--tool", "kubectl", "--tool", "ansible", "--preview",
+            "--", "ssh", "host.example", "true",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        body = FakeSudoServiceHandler.request_bodies[0]
+        self.assertEqual(
+            body["image"],
+            "nixery.dev/arm64/shell/ansible/kubectl/openssh/opentofu",
+        )
+        self.assertNotIn("profile", body)
+        self.assertIn(
+            '"image": "nixery.dev/arm64/shell/ansible/kubectl/openssh/opentofu"',
+            result.stderr,
+        )
+
+    def test_tools_reject_server_selection_and_non_docker_paths(self) -> None:
+        with_profile = self.run_cli(
+            "--reason", "invalid", "--profile", "kubectl", "--tool", "openssh",
+            "--", "true",
+        )
+        self.assertNotEqual(with_profile.returncode, 0)
+        self.assertIn("--tool cannot be combined with --image or --profile", with_profile.stderr)
+
+        for invalid_tool in ("../openssh", "R", "gcc+toolchain"):
+            with self.subTest(tool=invalid_tool):
+                unsafe = self.run_cli(
+                    "--reason", "invalid", "--tool", invalid_tool, "--", "true",
+                )
+                self.assertNotEqual(unsafe.returncode, 0)
+                self.assertIn("must be lowercase Docker path components", unsafe.stderr)
+
+        too_long = self.run_cli(
+            "--reason", "invalid", "--tool", "a" * 240, "--", "true",
+        )
+        self.assertNotEqual(too_long.returncode, 0)
+        self.assertIn("exceeds Docker's 255-character limit", too_long.stderr)
+        self.assertEqual(FakeSudoServiceHandler.request_bodies, [])
+
     def test_json_request_file_submits_every_supported_structured_field(self) -> None:
         body = {
             "reason": "recover one file",

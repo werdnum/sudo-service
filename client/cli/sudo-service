@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -17,6 +18,12 @@ from typing import Any
 DEFAULT_URL = "http://sudo-service.sudo-service.svc.cluster.local"
 DEFAULT_TOKEN_FILE = "/var/run/secrets/sudo-service/token"
 TERMINAL_PHASES = {"Executed", "Failed", "Denied", "Expired"}
+NIXERY_IMAGE_PREFIX = "nixery.dev/arm64/shell"
+DOCKER_NAME_MAX = 255
+# Nixery package attributes become repository path components in an OCI image
+# reference. Keep them within Docker's lowercase path-component grammar so an
+# invalid image name cannot survive until the approved executor Job is created.
+NIXERY_TOOL_RE = re.compile(r"^[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*$")
 REQUEST_FIELDS = {
     "reason",
     "command",
@@ -73,6 +80,18 @@ def parse_args() -> argparse.Namespace:
             "Friendly server-resolved executor profile (for example kubectl or "
             "network-tools). Mutually exclusive with --image. The resolved digest "
             "is returned by the server and shown to the reviewer."
+        ),
+    )
+    parser.add_argument(
+        "--tool",
+        action="append",
+        default=[],
+        dest="tools",
+        metavar="NIX_ATTR",
+        help=(
+            "Top-level Nix package attribute to include in an arm64 Nixery image; "
+            "repeatable. Client-side shorthand for --image; incompatible with "
+            "--image, --profile, and --request-file."
         ),
     )
     parser.add_argument(
@@ -181,6 +200,7 @@ def parse_args() -> argparse.Namespace:
             ("command arguments after '--'", args.argv),
             ("--image", args.image),
             ("--profile", args.profile),
+            ("--tool", args.tools),
             ("--namespace", args.namespace),
             ("--no-cluster-admin", args.no_cluster_admin),
             ("--image-pull-secret", args.image_pull_secrets),
@@ -196,6 +216,22 @@ def parse_args() -> argparse.Namespace:
         parser.error("provide --command or command arguments after '--'")
     if args.image and args.profile:
         parser.error("--image and --profile are mutually exclusive")
+    if args.tools and (args.image or args.profile):
+        parser.error("--tool cannot be combined with --image or --profile")
+    if args.tools:
+        invalid = sorted({
+            tool for tool in args.tools
+            if not NIXERY_TOOL_RE.fullmatch(tool)
+        })
+        if invalid:
+            parser.error(
+                "Nixery tool attribute(s) must be lowercase Docker path components: "
+                + ", ".join(invalid)
+            )
+        if len(nixery_image(args.tools)) > DOCKER_NAME_MAX:
+            parser.error(
+                f"generated Nixery image name exceeds Docker's {DOCKER_NAME_MAX}-character limit"
+            )
     if not args.request_file and not args.reason:
         parser.error("--reason is required unless it is provided by --request-file")
     if args.poll_interval <= 0:
@@ -213,6 +249,11 @@ def command_from_args(args: argparse.Namespace) -> str:
     if len(args.argv) == 1:
         return args.argv[0]
     return shlex.join(args.argv)
+
+
+def nixery_image(tools: list[str]) -> str:
+    """Turn repeated --tool values into the ordinary raw image API field."""
+    return NIXERY_IMAGE_PREFIX + "/" + "/".join(sorted(set(tools)))
 
 
 def load_request_file(path: str) -> dict[str, Any]:
@@ -434,6 +475,8 @@ def main() -> int:
         body = {"reason": args.reason, "command": command_from_args(args)}
         if args.image:
             body["image"] = args.image
+        elif args.tools:
+            body["image"] = nixery_image(args.tools)
         if args.profile:
             body["profile"] = args.profile
         if args.ttl_seconds_after_approval is not None:

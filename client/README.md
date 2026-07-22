@@ -43,6 +43,50 @@ The create response prints the friendly profile and exact resolved digest. Use
 exclusive. Static preflight warnings are printed even with `--quiet` because they
 describe review-relevant footguns, not progress chatter.
 
+When a task needs an uncommon combination of tools, the CLI can construct an
+ordinary [Nixery](https://nixery.dev/) image. Repeat `--tool`; the client sorts
+and deduplicates the top-level Nix package attributes and submits the generated
+URL through the existing raw `image` field:
+
+```sh
+client/cli/sudo-service \
+  --reason "Run infrastructure diagnostics over SSH" \
+  --tool openssh --tool ansible --tool kubectl --tool opentofu \
+  -- ssh host.example true
+```
+
+This produces
+`nixery.dev/arm64/shell/ansible/kubectl/openssh/opentofu`, which is shown in full
+on the existing approval page. `--tool` is only an arm64 client convenience; it
+adds no profile, CRD, controller, status, or approval semantics. Use `--image`
+directly for another architecture, registry, or hand-written Nixery path. New
+Nixery combinations can have a substantial cold-pull cost.
+
+Nixery images do not necessarily contain a passwd entry for sudo-service's
+numeric UID. Most tools do not care, but OpenSSH exits with
+`No user exists for uid 1000`. If SSH is needed, use a structured request file
+to mount a small passwd file prepared by a non-root init container:
+
+```yaml
+reason: Run infrastructure diagnostics over SSH
+image: nixery.dev/arm64/shell/ansible/kubectl/openssh/opentofu
+command: ssh host.example true
+initContainers:
+  - name: write-passwd
+    image: nixery.dev/arm64/shell
+    command: [/bin/sh, -c]
+    args:
+      - "printf '%s\\n' 'sudo-service:x:1000:1000:sudo-service:/home/sudo-service:/bin/sh' > /identity/passwd"
+    volumeMounts: [{name: identity, mountPath: /identity}]
+volumeMounts:
+  - {name: identity, mountPath: /etc/passwd, subPath: passwd, readOnly: true}
+volumes:
+  - {name: identity, emptyDir: {sizeLimit: 1Mi}}
+```
+
+This workaround uses only the existing reviewed pod fields and preserves the
+non-root user, read-only root filesystem, and dropped capabilities.
+
 For requests that need environment variables, mounts, volumes, init containers,
 or other structured fields, put the complete HTTP request body in YAML or JSON:
 
