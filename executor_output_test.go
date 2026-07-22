@@ -25,12 +25,12 @@ import (
 func completedJobAndPod() (*batchv1.Job, *corev1.Pod) {
 	controller := true
 	job := &batchv1.Job{
-		ObjectMeta: metav1.ObjectMeta{Name: "sudo-exec-test", Namespace: ControllerNamespace, UID: "job-uid"},
+		ObjectMeta: metav1.ObjectMeta{Name: "sudo-exec-test", Namespace: DefaultControllerNamespace, UID: "job-uid"},
 		Status:     batchv1.JobStatus{Succeeded: 1},
 	}
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "sudo-exec-test-pod", Namespace: ControllerNamespace,
+			Name: "sudo-exec-test-pod", Namespace: DefaultControllerNamespace,
 			Labels: map[string]string{"job-name": job.Name},
 			OwnerReferences: []metav1.OwnerReference{{
 				APIVersion: "batch/v1", Kind: "Job", Name: job.Name, UID: job.UID, Controller: &controller,
@@ -46,7 +46,7 @@ func completedJobAndPod() (*batchv1.Job, *corev1.Pod) {
 func TestCaptureJobOutputBoundsLargeOutput(t *testing.T) {
 	ctx := context.Background()
 	job, pod := completedJobAndPod()
-	sr := &SudoRequest{ObjectMeta: metav1.ObjectMeta{Name: "request", Namespace: ControllerNamespace, UID: "request-uid"}}
+	sr := &SudoRequest{ObjectMeta: metav1.ObjectMeta{Name: "request", Namespace: DefaultControllerNamespace, UID: "request-uid"}}
 	large := strings.Repeat("x", 1024*1024+12345)
 	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(pod).Build()
 	r := &SudoRequestReconciler{
@@ -74,7 +74,7 @@ func TestCaptureJobOutputBoundsLargeOutput(t *testing.T) {
 		t.Fatalf("digest does not cover complete output")
 	}
 	var secret corev1.Secret
-	if err := cl.Get(ctx, client.ObjectKey{Namespace: ControllerNamespace, Name: result.SecretRef}, &secret); err != nil {
+	if err := cl.Get(ctx, client.ObjectKey{Namespace: DefaultControllerNamespace, Name: result.SecretRef}, &secret); err != nil {
 		t.Fatalf("get output Secret: %v", err)
 	}
 	if got := len(secret.Data["output"]); got != MaxOutputBytes {
@@ -86,7 +86,7 @@ func TestCaptureFailurePreservesExitZero(t *testing.T) {
 	ctx := context.Background()
 	job, pod := completedJobAndPod()
 	sr := &SudoRequest{
-		ObjectMeta: metav1.ObjectMeta{Name: "request", Namespace: ControllerNamespace, UID: "request-uid"},
+		ObjectMeta: metav1.ObjectMeta{Name: "request", Namespace: DefaultControllerNamespace, UID: "request-uid"},
 		Status:     SudoRequestStatus{Phase: PhaseApproved},
 	}
 	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).WithStatusSubresource(&SudoRequest{}).WithObjects(sr, pod).Build()
@@ -124,7 +124,7 @@ func TestOutputSecretCreationFailureIsDeliveryFailure(t *testing.T) {
 	ctx := context.Background()
 	job, pod := completedJobAndPod()
 	sr := &SudoRequest{
-		ObjectMeta: metav1.ObjectMeta{Name: "request", Namespace: ControllerNamespace, UID: "request-uid"},
+		ObjectMeta: metav1.ObjectMeta{Name: "request", Namespace: DefaultControllerNamespace, UID: "request-uid"},
 		Status:     SudoRequestStatus{Phase: PhaseApproved},
 	}
 	base := fake.NewClientBuilder().WithScheme(testScheme(t)).WithStatusSubresource(&SudoRequest{}).WithObjects(sr, pod).Build()
@@ -169,7 +169,7 @@ func TestOutputSecretCreationFailureIsDeliveryFailure(t *testing.T) {
 func TestSidecarHeldJobRetriesTransientCaptureFailure(t *testing.T) {
 	job, pod := completedJobAndPod()
 	job.Status.Succeeded = 0 // executor is terminated, but a sidecar keeps the Job open
-	sr := &SudoRequest{ObjectMeta: metav1.ObjectMeta{Name: "request", Namespace: ControllerNamespace, UID: "request-uid"}}
+	sr := &SudoRequest{ObjectMeta: metav1.ObjectMeta{Name: "request", Namespace: DefaultControllerNamespace, UID: "request-uid"}}
 	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(pod).Build()
 	r := &SudoRequestReconciler{
 		Client: cl, APIReader: cl,

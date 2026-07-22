@@ -31,15 +31,15 @@ func TestExecutionFingerprintIsSemanticAndSecretSafe(t *testing.T) {
 	}
 	ttl := int32(DefaultPostApproval)
 	b.Profile = DefaultExecutorProfile
-	b.Namespace = ControllerNamespace
+	b.Namespace = DefaultControllerNamespace
 	b.TTLSecondsAfterApproval = &ttl
 	clusterAdmin := true
 	b.Privileges.ClusterAdmin = &clusterAdmin
-	fa, err := executionFingerprint(&SudoRequest{Spec: a})
+	fa, err := executionFingerprint(&SudoRequest{Spec: a}, DefaultControllerNamespace)
 	if err != nil {
 		t.Fatal(err)
 	}
-	fb, err := executionFingerprint(&SudoRequest{Spec: b})
+	fb, err := executionFingerprint(&SudoRequest{Spec: b}, DefaultControllerNamespace)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +50,7 @@ func TestExecutionFingerprintIsSemanticAndSecretSafe(t *testing.T) {
 		t.Fatalf("fingerprint exposed a value: %q", fa)
 	}
 	b.Stdin = "different-secret"
-	fc, _ := executionFingerprint(&SudoRequest{Spec: b})
+	fc, _ := executionFingerprint(&SudoRequest{Spec: b}, DefaultControllerNamespace)
 	if fc == fa {
 		t.Fatal("changing stdin did not change fingerprint")
 	}
@@ -59,11 +59,11 @@ func TestExecutionFingerprintIsSemanticAndSecretSafe(t *testing.T) {
 func TestExecutionFingerprintNormalizesDefaultProfileAndPinsResolvedImage(t *testing.T) {
 	implicit := &SudoRequest{Spec: SudoRequestSpec{Command: "kubectl get pods"}}
 	explicit := &SudoRequest{Spec: SudoRequestSpec{Command: "kubectl get pods", Profile: DefaultExecutorProfile}}
-	implicitFingerprint, err := executionFingerprint(implicit)
+	implicitFingerprint, err := executionFingerprint(implicit, DefaultControllerNamespace)
 	if err != nil {
 		t.Fatal(err)
 	}
-	explicitFingerprint, err := executionFingerprint(explicit)
+	explicitFingerprint, err := executionFingerprint(explicit, DefaultControllerNamespace)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +73,7 @@ func TestExecutionFingerprintNormalizesDefaultProfileAndPinsResolvedImage(t *tes
 
 	reviewed := explicit.DeepCopy()
 	reviewed.Status.ResolvedImage = "registry.example/executor@sha256:previously-reviewed"
-	reviewedFingerprint, err := executionFingerprint(reviewed)
+	reviewedFingerprint, err := executionFingerprint(reviewed, DefaultControllerNamespace)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,8 +85,8 @@ func TestExecutionFingerprintNormalizesDefaultProfileAndPinsResolvedImage(t *tes
 func TestPendingDuplicateIsRequesterScoped(t *testing.T) {
 	base := SudoRequestSpec{Requester: "alice", Reason: "one", Command: "kubectl get pods", Stdin: "secret"}
 	objects := ctrlfake.NewClientBuilder().WithScheme(scheme).WithObjects(
-		&SudoRequest{ObjectMeta: metav1.ObjectMeta{Name: "alice-pending", Namespace: ControllerNamespace, UID: "alice-uid"}, Spec: base, Status: SudoRequestStatus{Phase: PhasePending}},
-		&SudoRequest{ObjectMeta: metav1.ObjectMeta{Name: "bob-pending", Namespace: ControllerNamespace, UID: "bob-uid"}, Spec: SudoRequestSpec{Requester: "bob", Command: base.Command, Stdin: base.Stdin}, Status: SudoRequestStatus{Phase: PhasePending}},
+		&SudoRequest{ObjectMeta: metav1.ObjectMeta{Name: "alice-pending", Namespace: DefaultControllerNamespace, UID: "alice-uid"}, Spec: base, Status: SudoRequestStatus{Phase: PhasePending}},
+		&SudoRequest{ObjectMeta: metav1.ObjectMeta{Name: "bob-pending", Namespace: DefaultControllerNamespace, UID: "bob-uid"}, Spec: SudoRequestSpec{Requester: "bob", Command: base.Command, Stdin: base.Stdin}, Status: SudoRequestStatus{Phase: PhasePending}},
 	).Build()
 	api := &APIServer{Client: objects}
 	candidate := &SudoRequest{Spec: base}
@@ -108,7 +108,7 @@ func TestPendingDuplicateIsRequesterScoped(t *testing.T) {
 func TestDuplicateDetectionIncludesApprovedRequests(t *testing.T) {
 	spec := SudoRequestSpec{Requester: "alice", Command: "kubectl get pods"}
 	approved := &SudoRequest{
-		ObjectMeta: metav1.ObjectMeta{Name: "approved", Namespace: ControllerNamespace, UID: "approved-uid"},
+		ObjectMeta: metav1.ObjectMeta{Name: "approved", Namespace: DefaultControllerNamespace, UID: "approved-uid"},
 		Spec:       spec,
 		Status:     SudoRequestStatus{Phase: PhaseApproved, ResolvedImage: DefaultExecutorImage},
 	}
@@ -127,7 +127,7 @@ func TestDuplicateDetectionIncludesApprovedRequests(t *testing.T) {
 func TestDuplicateDetectionUsesUncachedReader(t *testing.T) {
 	spec := SudoRequestSpec{Requester: "alice", Command: "kubectl get pods"}
 	pending := &SudoRequest{
-		ObjectMeta: metav1.ObjectMeta{Name: "pending", Namespace: ControllerNamespace, UID: "pending-uid"},
+		ObjectMeta: metav1.ObjectMeta{Name: "pending", Namespace: DefaultControllerNamespace, UID: "pending-uid"},
 		Spec:       spec,
 		Status:     SudoRequestStatus{Phase: PhasePending, ResolvedImage: DefaultExecutorImage},
 	}
@@ -146,7 +146,7 @@ func TestDuplicateDetectionUsesUncachedReader(t *testing.T) {
 
 func TestFindByUIDUsesUncachedReader(t *testing.T) {
 	want := &SudoRequest{
-		ObjectMeta: metav1.ObjectMeta{Name: "pending", Namespace: ControllerNamespace, UID: "direct-uid"},
+		ObjectMeta: metav1.ObjectMeta{Name: "pending", Namespace: DefaultControllerNamespace, UID: "direct-uid"},
 		Spec:       SudoRequestSpec{Requester: "alice", Command: "kubectl get pods"},
 	}
 	staleCache := ctrlfake.NewClientBuilder().WithScheme(scheme).Build()
@@ -184,9 +184,42 @@ func retryTestClient(t *testing.T, source *SudoRequest, failFirstLink *atomic.Bo
 
 func expiredSource() *SudoRequest {
 	return &SudoRequest{
-		ObjectMeta: metav1.ObjectMeta{Name: "source", Namespace: ControllerNamespace, UID: "source-uid"},
+		ObjectMeta: metav1.ObjectMeta{Name: "source", Namespace: DefaultControllerNamespace, UID: "source-uid"},
 		Spec:       SudoRequestSpec{Requester: "alice", SubmittedBy: "alice", Reason: "try it", Command: "kubectl get pods", Stdin: "secret"},
 		Status:     SudoRequestStatus{Phase: PhaseExpired},
+	}
+}
+
+func TestRetryUsesConfiguredControllerNamespace(t *testing.T) {
+	const controllerNamespace = "sudo-service-alt"
+	source := expiredSource()
+	source.Namespace = controllerNamespace
+	cl := retryTestClient(t, source, nil)
+	api := &APIServer{Client: cl, ControllerNamespace: controllerNamespace}
+
+	successor, created, err := api.retryRequest(context.Background(), source, "alice", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !created || successor.Namespace != controllerNamespace {
+		t.Fatalf("created=%v successor namespace=%q, want %q", created, successor.Namespace, controllerNamespace)
+	}
+
+	implicit := &SudoRequest{Spec: SudoRequestSpec{Command: "kubectl get pods"}}
+	explicit := implicit.DeepCopy()
+	explicit.Spec.Namespace = controllerNamespace
+	clusterAdmin := true
+	explicit.Spec.Privileges.ClusterAdmin = &clusterAdmin
+	want, err := executionFingerprint(implicit, controllerNamespace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := executionFingerprint(explicit, controllerNamespace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatal("runtime controller namespace was not normalized as the implicit executor namespace")
 	}
 }
 
@@ -204,7 +237,7 @@ func TestRetryIsConcurrentAndRepeatedIdempotent(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			var source SudoRequest
-			if err := cl.Get(context.Background(), client.ObjectKey{Namespace: ControllerNamespace, Name: "source"}, &source); err != nil {
+			if err := cl.Get(context.Background(), client.ObjectKey{Namespace: DefaultControllerNamespace, Name: "source"}, &source); err != nil {
 				t.Error(err)
 				return
 			}
@@ -242,7 +275,7 @@ func TestRetryIsConcurrentAndRepeatedIdempotent(t *testing.T) {
 		t.Fatalf("request count = %d, want source + one successor", len(list.Items))
 	}
 	var source SudoRequest
-	_ = cl.Get(context.Background(), client.ObjectKey{Namespace: ControllerNamespace, Name: "source"}, &source)
+	_ = cl.Get(context.Background(), client.ObjectKey{Namespace: DefaultControllerNamespace, Name: "source"}, &source)
 	if source.Status.SupersededByUID != string(want) {
 		t.Fatalf("supersededByUID = %q, want %q", source.Status.SupersededByUID, want)
 	}
@@ -252,7 +285,7 @@ func TestRetryAdoptsDeterministicChildFoundByPendingDedupe(t *testing.T) {
 	source := expiredSource()
 	successor := &SudoRequest{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: retryChildName(source.UID), Namespace: ControllerNamespace, UID: "successor-uid",
+			Name: retryChildName(source.UID), Namespace: DefaultControllerNamespace, UID: "successor-uid",
 		},
 		Spec: source.Spec,
 	}
@@ -295,7 +328,7 @@ func TestRetrySuccessorValidationAllowsCurrentProfileResolution(t *testing.T) {
 	}
 	successor.Spec.RetryOfUID = string(source.UID)
 	successor.Status.ResolvedImage = DefaultExecutorImage
-	if err := validateRetrySuccessor(source, successor); err != nil {
+	if err := validateRetrySuccessor(source, successor, DefaultControllerNamespace); err != nil {
 		t.Fatalf("current profile resolution rejected: %v", err)
 	}
 }
@@ -323,7 +356,7 @@ func TestRetryRejectsDeterministicNameOccupants(t *testing.T) {
 			cl := retryTestClient(t, source, nil)
 			occupant := &SudoRequest{
 				ObjectMeta: metav1.ObjectMeta{
-					Name: retryChildName(source.UID), Namespace: ControllerNamespace, UID: "occupant-uid",
+					Name: retryChildName(source.UID), Namespace: DefaultControllerNamespace, UID: "occupant-uid",
 				},
 				Spec: source.Spec,
 			}
@@ -351,7 +384,7 @@ func TestRetryPreservesConflictForUnrelatedEquivalentPendingRequest(t *testing.T
 	source := expiredSource()
 	cl := retryTestClient(t, source, nil)
 	pending := &SudoRequest{
-		ObjectMeta: metav1.ObjectMeta{Name: "other-pending", Namespace: ControllerNamespace, UID: "pending-uid"},
+		ObjectMeta: metav1.ObjectMeta{Name: "other-pending", Namespace: DefaultControllerNamespace, UID: "pending-uid"},
 		Spec:       source.Spec,
 		Status:     SudoRequestStatus{Phase: PhasePending},
 	}
@@ -390,11 +423,11 @@ func TestRetryRecoversPredecessorLinkAfterPostCreateFailure(t *testing.T) {
 	cl := retryTestClient(t, expiredSource(), fail)
 	api := &APIServer{Client: cl}
 	var source SudoRequest
-	_ = cl.Get(context.Background(), client.ObjectKey{Namespace: ControllerNamespace, Name: "source"}, &source)
+	_ = cl.Get(context.Background(), client.ObjectKey{Namespace: DefaultControllerNamespace, Name: "source"}, &source)
 	if _, _, err := api.retryRequest(context.Background(), &source, "alice", false); err == nil {
 		t.Fatal("first retry succeeded despite injected link failure")
 	}
-	_ = cl.Get(context.Background(), client.ObjectKey{Namespace: ControllerNamespace, Name: "source"}, &source)
+	_ = cl.Get(context.Background(), client.ObjectKey{Namespace: DefaultControllerNamespace, Name: "source"}, &source)
 	successor, created, err := api.retryRequest(context.Background(), &source, "alice", false)
 	if err != nil {
 		t.Fatal(err)
@@ -402,7 +435,7 @@ func TestRetryRecoversPredecessorLinkAfterPostCreateFailure(t *testing.T) {
 	if created {
 		t.Fatal("recovery created a second successor")
 	}
-	_ = cl.Get(context.Background(), client.ObjectKey{Namespace: ControllerNamespace, Name: "source"}, &source)
+	_ = cl.Get(context.Background(), client.ObjectKey{Namespace: DefaultControllerNamespace, Name: "source"}, &source)
 	if source.Status.SupersededByUID != string(successor.UID) {
 		t.Fatalf("link not repaired: %q != %q", source.Status.SupersededByUID, successor.UID)
 	}

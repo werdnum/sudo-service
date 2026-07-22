@@ -124,10 +124,11 @@ func (t *TokenReviewer) Review(ctx context.Context, token, audience string) (aut
 // subresource used only for authorization; direct CR creation remains governed
 // independently by `create` on `sudorequests`.
 type RequesterAuthorizer struct {
-	cs kubernetes.Interface
+	cs                  kubernetes.Interface
+	ControllerNamespace string
 }
 
-func NewRequesterAuthorizer() (*RequesterAuthorizer, error) {
+func NewRequesterAuthorizer(controllerNamespace string) (*RequesterAuthorizer, error) {
 	cfg, err := ctrl.GetConfig()
 	if err != nil {
 		return nil, err
@@ -136,7 +137,11 @@ func NewRequesterAuthorizer() (*RequesterAuthorizer, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &RequesterAuthorizer{cs: cs}, nil
+	return &RequesterAuthorizer{cs: cs, ControllerNamespace: controllerNamespace}, nil
+}
+
+func (a *RequesterAuthorizer) controllerNamespace() string {
+	return configuredControllerNamespace(a.ControllerNamespace)
 }
 
 // AuthorizeSubmit asks the apiserver whether identity may submit a request via
@@ -155,7 +160,7 @@ func (a *RequesterAuthorizer) AuthorizeSubmit(ctx context.Context, identity auth
 			Groups: append([]string(nil), identity.Groups...),
 			Extra:  extra,
 			ResourceAttributes: &authorizationv1.ResourceAttributes{
-				Namespace:   ControllerNamespace,
+				Namespace:   a.controllerNamespace(),
 				Verb:        "create",
 				Group:       GroupName,
 				Version:     GroupVersion,

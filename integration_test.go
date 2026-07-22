@@ -170,14 +170,14 @@ func TestIntegrationExecutorPodAdmission(t *testing.T) {
 		t.Skipf("no cluster available (set KUBECONFIG): %v", err)
 	}
 
-	kubectl(t, "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: "+ControllerNamespace+"\n",
+	kubectl(t, "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: "+DefaultControllerNamespace+"\n",
 		"apply", "-f", "-")
 
 	policy, err := os.ReadFile("charts/sudo-service/templates/validatingadmissionpolicy-executor-pod.yaml")
 	if err != nil {
 		t.Fatalf("read Pod admission policy: %v", err)
 	}
-	renderedPolicy := strings.ReplaceAll(string(policy), "{{ .Values.namespace }}", ControllerNamespace)
+	renderedPolicy := strings.ReplaceAll(string(policy), "{{ .Values.namespace }}", DefaultControllerNamespace)
 	if strings.Contains(renderedPolicy, "{{") {
 		t.Fatal("Pod admission policy contains an unrendered Helm expression")
 	}
@@ -239,9 +239,9 @@ subjects:
 	kubectl(t, setup, "apply", "-f", "-")
 	t.Cleanup(func() {
 		_, _ = runKubectl("", "delete", "rolebinding", "executor-pod-admission-test-writer",
-			"-n", ControllerNamespace, "--ignore-not-found")
+			"-n", DefaultControllerNamespace, "--ignore-not-found")
 		_, _ = runKubectl("", "delete", "role", "executor-pod-admission-test-writer",
-			"-n", ControllerNamespace, "--ignore-not-found")
+			"-n", DefaultControllerNamespace, "--ignore-not-found")
 	})
 
 	// The ownerReference and labels are intentionally perfect forgeries. Admission
@@ -326,23 +326,23 @@ spec:
         - name: executor
           image: busybox:1.36
           command: ["sh", "-c", "sleep 30"]
-`, ControllerNamespace)
+`, DefaultControllerNamespace)
 	kubectl(t, job, "apply", "-f", "-")
 	t.Cleanup(func() {
 		_, _ = runKubectl("", "delete", "job", "executor-pod-admission-test",
-			"-n", ControllerNamespace, "--ignore-not-found", "--wait=false")
+			"-n", DefaultControllerNamespace, "--ignore-not-found", "--wait=false")
 	})
 
 	deadline = time.Now().Add(30 * time.Second)
 	for {
-		out, getErr := runKubectl("", "get", "pods", "-n", ControllerNamespace,
+		out, getErr := runKubectl("", "get", "pods", "-n", DefaultControllerNamespace,
 			"-l", "job-name=executor-pod-admission-test", "-o", "name")
 		if getErr == nil && strings.TrimSpace(out) != "" {
 			break
 		}
 		if time.Now().After(deadline) {
 			describe, _ := runKubectl("", "describe", "job", "executor-pod-admission-test",
-				"-n", ControllerNamespace)
+				"-n", DefaultControllerNamespace)
 			t.Fatalf("Job controller could not create admitted executor Pod: %v\n%s", getErr, describe)
 		}
 		time.Sleep(500 * time.Millisecond)
@@ -355,6 +355,7 @@ spec:
 // human-approval / Pushover path is bypassed — this exercises the post-approval
 // reconcile that issue #20 broke.
 func TestIntegrationApprovedRequestExecutes(t *testing.T) {
+	const integrationControllerNamespace = "sudo-service-it"
 	cfg, err := ctrl.GetConfig()
 	if err != nil {
 		t.Skipf("no cluster available (set KUBECONFIG): %v", err)
@@ -364,7 +365,7 @@ func TestIntegrationApprovedRequestExecutes(t *testing.T) {
 	kubectl(t, "", "apply", "-f", "charts/sudo-service/templates/crd-sudorequest.yaml")
 	kubectl(t, "", "wait", "--for=condition=Established",
 		"crd/sudorequests.sudo.andrewgarrett.dev", "--timeout=60s")
-	kubectl(t, "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: "+ControllerNamespace+"\n",
+	kubectl(t, "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: "+integrationControllerNamespace+"\n",
 		"apply", "-f", "-")
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -379,7 +380,7 @@ func TestIntegrationApprovedRequestExecutes(t *testing.T) {
 	const marker = "hello-from-integration-test"
 	noClusterAdmin := false
 	sr := &SudoRequest{
-		ObjectMeta: metav1.ObjectMeta{GenerateName: "it-", Namespace: ControllerNamespace},
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "it-", Namespace: integrationControllerNamespace},
 		Spec: SudoRequestSpec{
 			Requester: "integration",
 			Reason:    "integration test",
@@ -408,7 +409,7 @@ func TestIntegrationApprovedRequestExecutes(t *testing.T) {
 	// Build the manager exactly like main.go (namespace-scoped cache, metrics off).
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme:         scheme,
-		Cache:          cache.Options{DefaultNamespaces: map[string]cache.Config{ControllerNamespace: {}}},
+		Cache:          cache.Options{DefaultNamespaces: map[string]cache.Config{integrationControllerNamespace: {}}},
 		Metrics:        metricsserver.Options{BindAddress: "0"},
 		LeaderElection: false,
 	})
@@ -416,9 +417,10 @@ func TestIntegrationApprovedRequestExecutes(t *testing.T) {
 		t.Fatalf("manager: %v", err)
 	}
 	reconciler := &SudoRequestReconciler{
-		Client:    mgr.GetClient(),
-		APIReader: mgr.GetAPIReader(),
-		Scheme:    mgr.GetScheme(),
+		ControllerNamespace: integrationControllerNamespace,
+		Client:              mgr.GetClient(),
+		APIReader:           mgr.GetAPIReader(),
+		Scheme:              mgr.GetScheme(),
 		// Never called on the Approved path; non-nil for safety.
 		Pushover:    NewPushoverClient("", ""),
 		Broadcaster: NewBroadcaster(),
@@ -448,7 +450,7 @@ func TestIntegrationApprovedRequestExecutes(t *testing.T) {
 
 	if final.Status.Phase != PhaseExecuted {
 		// Surface diagnostics for a failed run.
-		dumpDiagnostics(t, c, &final)
+		dumpDiagnostics(t, c, &final, integrationControllerNamespace)
 		t.Fatalf("phase=%q (want Executed), failureReason=%q", final.Status.Phase, final.Status.FailureReason)
 	}
 	if final.Status.ExitCode == nil || *final.Status.ExitCode != 0 {
@@ -463,7 +465,7 @@ func TestIntegrationApprovedRequestExecutes(t *testing.T) {
 	}
 
 	var sec corev1.Secret
-	if err := c.Get(ctx, types.NamespacedName{Namespace: ControllerNamespace, Name: final.Status.OutputSecretRef}, &sec); err != nil {
+	if err := c.Get(ctx, types.NamespacedName{Namespace: integrationControllerNamespace, Name: final.Status.OutputSecretRef}, &sec); err != nil {
 		t.Fatalf("get output secret: %v", err)
 	}
 	if got := string(sec.Data["output"]); !strings.Contains(got, marker) {
@@ -471,12 +473,12 @@ func TestIntegrationApprovedRequestExecutes(t *testing.T) {
 	}
 }
 
-func dumpDiagnostics(t *testing.T, c client.Client, sr *SudoRequest) {
+func dumpDiagnostics(t *testing.T, c client.Client, sr *SudoRequest, controllerNamespace string) {
 	t.Helper()
 	ctx := context.Background()
 	if sr.Status.ExecutorJobName != "" {
 		var pods corev1.PodList
-		_ = c.List(ctx, &pods, client.InNamespace(executorNamespace(sr)),
+		_ = c.List(ctx, &pods, client.InNamespace(executorNamespace(sr, controllerNamespace)),
 			client.MatchingLabels{"job-name": sr.Status.ExecutorJobName})
 		for i := range pods.Items {
 			p := &pods.Items[i]

@@ -51,11 +51,11 @@ const (
 // executorNamespace is the namespace the executor Job runs in: the requested
 // one, or the controller namespace by default. Targeting another namespace is
 // what lets the command mount that namespace's Secrets/PVCs as files.
-func executorNamespace(sr *SudoRequest) string {
+func executorNamespace(sr *SudoRequest, controllerNamespace string) string {
 	if sr.Spec.Namespace != "" {
 		return sr.Spec.Namespace
 	}
-	return ControllerNamespace
+	return controllerNamespace
 }
 
 // clusterAdminEnabled reports whether the executor should run under the
@@ -65,8 +65,8 @@ func executorNamespace(sr *SudoRequest) string {
 // namespace it defaults to true (historical behaviour) unless explicitly
 // disabled. validateSpecExtras has already rejected clusterAdmin=true paired
 // with a non-controller namespace, so this never returns true off-namespace.
-func clusterAdminEnabled(sr *SudoRequest) bool {
-	if executorNamespace(sr) != ControllerNamespace {
+func clusterAdminEnabled(sr *SudoRequest, controllerNamespace string) bool {
+	if executorNamespace(sr, controllerNamespace) != controllerNamespace {
 		return false
 	}
 	if sr.Spec.Privileges.ClusterAdmin != nil {
@@ -79,8 +79,8 @@ func clusterAdminEnabled(sr *SudoRequest) bool {
 // executor pod. cluster-admin requests ride the dedicated executor SA; everything
 // else rides the namespace default SA with its token automount disabled, since
 // those jobs only ever touch mounted files, never the API.
-func executorServiceAccount(sr *SudoRequest) (name string, automount *bool) {
-	if clusterAdminEnabled(sr) {
+func executorServiceAccount(sr *SudoRequest, controllerNamespace string) (name string, automount *bool) {
+	if clusterAdminEnabled(sr, controllerNamespace) {
 		return ExecutorSAName, nil
 	}
 	no := false
@@ -122,7 +122,7 @@ func hasSpecExtras(sr *SudoRequest) bool {
 func (r *SudoRequestReconciler) getExecutorJob(ctx context.Context, sr *SudoRequest) (*batchv1.Job, error) {
 	var job batchv1.Job
 	// Uncached: the Job may be in spec.namespace, which the cache doesn't watch.
-	err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: executorNamespace(sr), Name: sr.Status.ExecutorJobName}, &job)
+	err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: executorNamespace(sr, r.controllerNamespace()), Name: sr.Status.ExecutorJobName}, &job)
 	if apierrors.IsNotFound(err) {
 		return nil, nil
 	}
@@ -214,7 +214,8 @@ func (r *SudoRequestReconciler) rejectServiceAccountTokenSecrets(ctx context.Con
 // controller SA can create executor Jobs. Cross-namespace, a pre-existing Job is
 // failed closed.
 func (r *SudoRequestReconciler) findOrCreateJob(ctx context.Context, sr *SudoRequest) (*batchv1.Job, error) {
-	ns := executorNamespace(sr)
+	controllerNamespace := r.controllerNamespace()
+	ns := executorNamespace(sr, controllerNamespace)
 	name := sr.Status.ExecutorJobName
 	var job batchv1.Job
 	// Uncached: the Job may be in spec.namespace, which the cache doesn't watch.
@@ -228,7 +229,7 @@ func (r *SudoRequestReconciler) findOrCreateJob(ctx context.Context, sr *SudoReq
 			// that would permanently fail a legitimate request mid-rollback.)
 			return nil, fmt.Errorf("executor Job %s is terminating; waiting for deletion", job.Name)
 		}
-		if ns != ControllerNamespace {
+		if ns != controllerNamespace {
 			return nil, errForeignChildObject
 		}
 		// Controller namespace: the executor VAP guarantees this Job is ours.
@@ -248,7 +249,7 @@ func (r *SudoRequestReconciler) findOrCreateJob(ctx context.Context, sr *SudoReq
 		// is unexpected; surface it rather than build a malformed pod.
 		return nil, fmt.Errorf("decode pod extras: %w", err)
 	}
-	if !clusterAdminEnabled(sr) {
+	if !clusterAdminEnabled(sr, controllerNamespace) {
 		// A non-cluster-admin executor (any cross-namespace Job, or an in-namespace
 		// clusterAdmin:false one) is supposed to have no API privileges; a referenced
 		// SA-token Secret would smuggle some in (validation can't see Secret types).
@@ -258,7 +259,7 @@ func (r *SudoRequestReconciler) findOrCreateJob(ctx context.Context, sr *SudoReq
 			return nil, err
 		}
 	}
-	job = buildExecutorJob(sr, ns, name, extras)
+	job = buildExecutorJob(sr, ns, name, extras, controllerNamespace)
 	if err := r.Create(ctx, &job); err != nil {
 		return nil, fmt.Errorf("create job: %w", err)
 	}
@@ -286,7 +287,7 @@ func (r *SudoRequestReconciler) findOrCreateJob(ctx context.Context, sr *SudoReq
 // defaults. validateSpecExtras has already vetted everything spliced in here.
 // Pure (no API access), so the approve page reuses it to show the ground-truth
 // pod spec.
-func buildExecutorJob(sr *SudoRequest, ns, name string, extras *podExtras) batchv1.Job {
+func buildExecutorJob(sr *SudoRequest, ns, name string, extras *podExtras, controllerNamespace string) batchv1.Job {
 	one := int32(0)
 	// Output retention is the requester's ttlSecondsAfterApproval, but the Job
 	// itself must outlive its completion long enough for the reconciler to capture
@@ -297,7 +298,7 @@ func buildExecutorJob(sr *SudoRequest, ns, name string, extras *podExtras) batch
 	}
 	runAsNonRoot := true
 	runAsUser := int64(1000)
-	saName, automount := executorServiceAccount(sr)
+	saName, automount := executorServiceAccount(sr, controllerNamespace)
 
 	executor := corev1.Container{
 		Name:    "executor",
@@ -406,7 +407,7 @@ func buildExecutorJob(sr *SudoRequest, ns, name string, extras *podExtras) batch
 	// executor VAP only requires the ownerRef for same-namespace cluster-admin
 	// Jobs). So only set it in the controller namespace; cross-namespace Jobs are
 	// reclaimed by TTLSecondsAfterFinished instead.
-	if ns == ControllerNamespace {
+	if ns == controllerNamespace {
 		job.OwnerReferences = []metav1.OwnerReference{ownerRef(sr)}
 	}
 	return job
@@ -872,7 +873,7 @@ func (r *SudoRequestReconciler) captureJobOutput(ctx context.Context, sr *SudoRe
 	sec := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      secretName,
-			Namespace: ControllerNamespace,
+			Namespace: r.controllerNamespace(),
 			Labels: map[string]string{
 				"app":  "sudo-service",
 				"role": "output",

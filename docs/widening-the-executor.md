@@ -20,7 +20,8 @@ shell/YAML quoting — exactly the escaping that kept going wrong.
 block, so the request **is** the pod that runs instead of a `kubectl` that
 creates one:
 
-- `namespace` — the namespace the executor Job runs in (default `sudo-service`).
+- `namespace` — the namespace the executor Job runs in (defaults to the
+  controller's runtime namespace; the chart default is `sudo-service`).
 - `stdin` — payload fed to the command's stdin (see below).
 - `env`, `envFrom`, `volumes`, `volumeMounts`, `initContainers` — the upstream
   Kubernetes shapes, narrowed to a reviewable allowlist in Go.

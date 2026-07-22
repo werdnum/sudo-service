@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
+	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -34,6 +35,7 @@ func init() {
 
 // Config bundles env-derived runtime settings.
 type Config struct {
+	ControllerNamespace   string // POD_NAMESPACE; namespace watched and managed by this controller
 	BindAddress           string // e.g. "0.0.0.0:8080" or "127.0.0.1:8080"
 	PublicBaseURL         string // e.g. "https://sudo.andrewgarrett.dev"
 	PushoverToken         string // Pushover application token
@@ -53,6 +55,7 @@ type Config struct {
 
 func loadConfig() (*Config, error) {
 	cfg := &Config{
+		ControllerNamespace:   configuredControllerNamespace(os.Getenv("POD_NAMESPACE")),
 		BindAddress:           getenv("BIND_ADDRESS", "127.0.0.1:8080"),
 		PublicBaseURL:         getenv("PUBLIC_BASE_URL", "https://sudo.andrewgarrett.dev"),
 		PushoverToken:         os.Getenv("PUSHOVER_TOKEN"),
@@ -69,6 +72,9 @@ func loadConfig() (*Config, error) {
 	}
 	if cfg.PushoverToken == "" || cfg.PushoverUserKey == "" {
 		return nil, fmt.Errorf("PUSHOVER_TOKEN and PUSHOVER_USER_KEY are required")
+	}
+	if problems := k8svalidation.IsDNS1123Label(cfg.ControllerNamespace); len(problems) > 0 {
+		return nil, fmt.Errorf("POD_NAMESPACE %q is not a valid Kubernetes namespace: %s", cfg.ControllerNamespace, strings.Join(problems, "; "))
 	}
 	return cfg, nil
 }
@@ -99,7 +105,7 @@ func main() {
 		Cache: cache.Options{
 			// Watching only our own namespace keeps RBAC scoped and avoids needing
 			// cluster-wide list/watch on the resources we manage.
-			DefaultNamespaces: map[string]cache.Config{ControllerNamespace: {}},
+			DefaultNamespaces: map[string]cache.Config{cfg.ControllerNamespace: {}},
 		},
 		// Disable the manager's separate metrics listener — the default is :8080,
 		// which collides with our main HTTP server. We mount /metrics onto the
@@ -123,7 +129,7 @@ func main() {
 		logger.Error(err, "init TokenReviewer")
 		os.Exit(1)
 	}
-	requesterAuthorizer, err := NewRequesterAuthorizer()
+	requesterAuthorizer, err := NewRequesterAuthorizer(cfg.ControllerNamespace)
 	if err != nil {
 		logger.Error(err, "init requester authorizer")
 		os.Exit(1)
@@ -140,14 +146,15 @@ func main() {
 	broadcaster := NewBroadcaster()
 
 	reconciler := &SudoRequestReconciler{
-		Client:        mgr.GetClient(),
-		APIReader:     mgr.GetAPIReader(),
-		Scheme:        mgr.GetScheme(),
-		Pushover:      po,
-		Summarizer:    summarizer,
-		Broadcaster:   broadcaster,
-		PublicBaseURL: cfg.PublicBaseURL,
-		Recorder:      mgr.GetEventRecorderFor("sudo-service"),
+		ControllerNamespace: cfg.ControllerNamespace,
+		Client:              mgr.GetClient(),
+		APIReader:           mgr.GetAPIReader(),
+		Scheme:              mgr.GetScheme(),
+		Pushover:            po,
+		Summarizer:          summarizer,
+		Broadcaster:         broadcaster,
+		PublicBaseURL:       cfg.PublicBaseURL,
+		Recorder:            mgr.GetEventRecorderFor("sudo-service"),
 	}
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		logger.Error(err, "setup reconciler")
@@ -155,7 +162,7 @@ func main() {
 	}
 
 	// Background GC for output Secrets and finished Jobs.
-	gc := &GarbageCollector{Client: mgr.GetClient(), Broadcaster: broadcaster}
+	gc := &GarbageCollector{Client: mgr.GetClient(), Broadcaster: broadcaster, ControllerNamespace: cfg.ControllerNamespace}
 	if err := mgr.Add(gc); err != nil {
 		logger.Error(err, "add GC")
 		os.Exit(1)
@@ -166,15 +173,16 @@ func main() {
 	}).ParseFS(templatesFS, "templates/*.html"))
 
 	api := &APIServer{
-		Client:        mgr.GetClient(),
-		APIReader:     mgr.GetAPIReader(),
-		Verifier:      verifier,
-		TokenReviewer: tokenReviewer,
-		Authorizer:    requesterAuthorizer,
-		Broadcaster:   broadcaster,
-		Reconciler:    reconciler,
-		Config:        cfg,
-		Templates:     tmpls,
+		ControllerNamespace: cfg.ControllerNamespace,
+		Client:              mgr.GetClient(),
+		APIReader:           mgr.GetAPIReader(),
+		Verifier:            verifier,
+		TokenReviewer:       tokenReviewer,
+		Authorizer:          requesterAuthorizer,
+		Broadcaster:         broadcaster,
+		Reconciler:          reconciler,
+		Config:              cfg,
+		Templates:           tmpls,
 	}
 
 	mux := http.NewServeMux()

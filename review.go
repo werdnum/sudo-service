@@ -14,7 +14,7 @@ import (
 // curation gap is possible. Names minted at approval time (the Job, the stdin
 // Secret) aren't known yet, so placeholders stand in. With redactEnv set, literal
 // env values are masked (for the off-cluster AI aid; the human page passes false).
-func displayPodTemplate(sr *SudoRequest, redactEnv bool) (string, error) {
+func displayPodTemplate(sr *SudoRequest, redactEnv bool, controllerNamespace string) (string, error) {
 	extras, err := decodePodExtras(sr)
 	if err != nil {
 		return "", err
@@ -23,7 +23,7 @@ func displayPodTemplate(sr *SudoRequest, redactEnv bool) (string, error) {
 	if d.Spec.Stdin != "" && d.Status.StdinSecretName == "" {
 		d.Status.StdinSecretName = "<minted-at-approval>"
 	}
-	job := buildExecutorJob(d, executorNamespace(d), "<minted-at-approval>", extras)
+	job := buildExecutorJob(d, executorNamespace(d, controllerNamespace), "<minted-at-approval>", extras, controllerNamespace)
 	pod := job.Spec.Template.Spec
 	if redactEnv {
 		redactPodEnv(&pod)
@@ -82,10 +82,10 @@ type initContainerView struct {
 // literal env values (NAME=<redacted>) for contexts that leave the cluster — the
 // AI summarizer — while the human-facing approve page and push pass false so the
 // reviewer still sees exactly what value is being approved.
-func newSpecExtrasView(sr *SudoRequest, redactEnv bool) specExtrasView {
+func newSpecExtrasView(sr *SudoRequest, redactEnv bool, controllerNamespace string) specExtrasView {
 	v := specExtrasView{
-		Namespace:    executorNamespace(sr),
-		ClusterAdmin: clusterAdminEnabled(sr),
+		Namespace:    executorNamespace(sr, controllerNamespace),
+		ClusterAdmin: clusterAdminEnabled(sr, controllerNamespace),
 		Stdin:        sr.Spec.Stdin != "",
 	}
 	// Best-effort decode: by the time the approve page or push renders, the spec
@@ -261,11 +261,11 @@ func describeVolumeSource(v corev1.Volume) (desc string, allowed bool) {
 // the Pushover approval push and handed to the AI summarizer for context. Empty
 // when the request is a plain command (hasSpecExtras, the same predicate that
 // excludes it from auto-approve and routes it to a human).
-func specExtrasText(sr *SudoRequest, redactEnv bool) string {
+func specExtrasText(sr *SudoRequest, redactEnv bool, controllerNamespace string) string {
 	if !hasSpecExtras(sr) {
 		return ""
 	}
-	v := newSpecExtrasView(sr, redactEnv)
+	v := newSpecExtrasView(sr, redactEnv, controllerNamespace)
 	var b strings.Builder
 	fmt.Fprintf(&b, "namespace: %s\n", v.Namespace)
 	if v.ClusterAdmin {

@@ -145,7 +145,7 @@ func driveApproved(t *testing.T, sr *SudoRequest, extra ...client.Object) {
 	}
 
 	var jobs batchv1.JobList
-	if err := apiserver.List(ctx, &jobs, client.InNamespace(executorNamespace(sr))); err != nil {
+	if err := apiserver.List(ctx, &jobs, client.InNamespace(executorNamespaceForTest(sr))); err != nil {
 		t.Fatalf("list jobs: %v", err)
 	}
 	if len(jobs.Items) != 1 {
@@ -166,7 +166,7 @@ func TestApprovedPlainCommandSurvivesCacheLag(t *testing.T) {
 	sr := &SudoRequest{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            "http-plain",
-			Namespace:       ControllerNamespace,
+			Namespace:       DefaultControllerNamespace,
 			UID:             "uid-plain",
 			ResourceVersion: "100",
 		},
@@ -193,7 +193,7 @@ func TestApprovedWidenedCrossNamespaceJobSurvivesCacheLag(t *testing.T) {
 	sr := &SudoRequest{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            "http-ansible",
-			Namespace:       ControllerNamespace,
+			Namespace:       DefaultControllerNamespace,
 			UID:             "uid-ansible",
 			ResourceVersion: "100",
 		},

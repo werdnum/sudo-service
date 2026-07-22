@@ -15,7 +15,8 @@ from pathlib import Path
 from typing import Any
 
 
-DEFAULT_URL = "http://sudo-service.sudo-service.svc.cluster.local"
+DEFAULT_CONTROLLER_NAMESPACE = os.environ.get("SUDO_SERVICE_NAMESPACE") or "sudo-service"
+DEFAULT_URL = f"http://sudo-service.{DEFAULT_CONTROLLER_NAMESPACE}.svc.cluster.local"
 DEFAULT_TOKEN_FILE = "/var/run/secrets/sudo-service/token"
 TERMINAL_PHASES = {"Executed", "Failed", "Denied", "Expired"}
 NIXERY_IMAGE_PREFIX = "nixery.dev/arm64/shell"
@@ -114,7 +115,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--namespace",
         help=(
-            "Namespace the executor Job runs in (default: sudo-service). Targeting "
+            "Namespace the executor Job runs in (default: controller namespace). Targeting "
             "another namespace lets the command mount that namespace's Secrets/PVCs "
             "as files, but the Job runs under that namespace's default ServiceAccount "
             "with no cluster-admin."
@@ -147,7 +148,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help=(
             "Run without the cluster-admin executor ServiceAccount. Only meaningful "
-            "in the default namespace; cross-namespace jobs never get cluster-admin."
+            "in the controller namespace; cross-namespace jobs never get cluster-admin."
         ),
     )
     parser.add_argument(

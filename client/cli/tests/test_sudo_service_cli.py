@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -159,6 +160,24 @@ class SudoServiceCLITest(unittest.TestCase):
         path = Path(self.tmp.name) / f"request{suffix}"
         path.write_text(contents)
         return str(path)
+
+    def test_controller_namespace_changes_default_service_url(self) -> None:
+        env = dict(os.environ)
+        env.pop("SUDO_SERVICE_URL", None)
+        env.pop("K8S_AGENT_SUDO_SERVICE_URL", None)
+        env["SUDO_SERVICE_NAMESPACE"] = "sudo-service-alt"
+        result = subprocess.run(
+            [str(CLI), "--help"],
+            check=False,
+            text=True,
+            capture_output=True,
+            env=env,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            "service.sudo-service-alt.svc.cluster.local",
+            result.stdout,
+        )
 
     def test_creates_request_waits_and_prints_output(self) -> None:
         FakeSudoServiceHandler.phases = ["Pending", "Executed"]

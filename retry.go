@@ -26,7 +26,8 @@ import (
 // makes an omitted default profile equivalent to an explicit default, while a
 // catalog image update does not collapse a new request into an older request
 // whose reviewer saw a different executor image.
-func executionFingerprint(sr *SudoRequest) (string, error) {
+func executionFingerprint(sr *SudoRequest, controllerNamespace string) (string, error) {
+	controllerNamespace = configuredControllerNamespace(controllerNamespace)
 	var effective SudoRequestSpec
 	sr.Spec.DeepCopyInto(&effective)
 	effective.Requester = ""
@@ -37,14 +38,14 @@ func executionFingerprint(sr *SudoRequest) (string, error) {
 		effective.Profile = DefaultExecutorProfile
 	}
 	if effective.Namespace == "" {
-		effective.Namespace = ControllerNamespace
+		effective.Namespace = controllerNamespace
 	}
 	if effective.TTLSecondsAfterApproval == nil {
 		value := int32(DefaultPostApproval)
 		effective.TTLSecondsAfterApproval = &value
 	}
 	if effective.Privileges.ClusterAdmin == nil {
-		value := effective.Namespace == ControllerNamespace
+		value := effective.Namespace == controllerNamespace
 		effective.Privileges.ClusterAdmin = &value
 	}
 	resolvedImage := sr.Status.ResolvedImage
@@ -78,7 +79,8 @@ func executionFingerprint(sr *SudoRequest) (string, error) {
 }
 
 func (a *APIServer) findPendingDuplicate(ctx context.Context, candidate *SudoRequest) (*SudoRequest, error) {
-	want, err := executionFingerprint(candidate)
+	controllerNamespace := a.controllerNamespace()
+	want, err := executionFingerprint(candidate, controllerNamespace)
 	if err != nil {
 		return nil, err
 	}
@@ -87,7 +89,7 @@ func (a *APIServer) findPendingDuplicate(ctx context.Context, candidate *SudoReq
 	if reader == nil {
 		reader = a.Client
 	}
-	if err := reader.List(ctx, &list, client.InNamespace(ControllerNamespace)); err != nil {
+	if err := reader.List(ctx, &list, client.InNamespace(controllerNamespace)); err != nil {
 		return nil, err
 	}
 	for i := range list.Items {
@@ -97,7 +99,7 @@ func (a *APIServer) findPendingDuplicate(ctx context.Context, candidate *SudoReq
 		if (phase != "" && phase != PhasePending && phase != PhaseApproved) || current.Spec.Requester != candidate.Spec.Requester {
 			continue
 		}
-		got, err := executionFingerprint(current)
+		got, err := executionFingerprint(current, controllerNamespace)
 		if err != nil { // one malformed legacy/direct object must not block submissions
 			continue
 		}
@@ -126,7 +128,7 @@ func adminRetryable(phase string) bool { return isTerminalPhase(phase) }
 // requester checks prevent an unrelated request from being linked, while the
 // execution fingerprint prevents a same-requester object with forged lineage
 // but different execution fields from winning a create race.
-func validateRetrySuccessor(source, successor *SudoRequest) error {
+func validateRetrySuccessor(source, successor *SudoRequest, controllerNamespace string) error {
 	if successor.Spec.RetryOfUID != string(source.UID) || successor.Spec.Requester != source.Spec.Requester {
 		return errors.New("deterministic retry name is occupied by an unrelated request")
 	}
@@ -140,11 +142,11 @@ func validateRetrySuccessor(source, successor *SudoRequest) error {
 	sourceCurrent.Status.ResolvedImage = ""
 	successorCurrent := successor.DeepCopy()
 	successorCurrent.Status.ResolvedImage = ""
-	want, err := executionFingerprint(sourceCurrent)
+	want, err := executionFingerprint(sourceCurrent, controllerNamespace)
 	if err != nil {
 		return fmt.Errorf("fingerprint retry source: %w", err)
 	}
-	got, err := executionFingerprint(successorCurrent)
+	got, err := executionFingerprint(successorCurrent, controllerNamespace)
 	if err != nil {
 		return fmt.Errorf("fingerprint retry successor: %w", err)
 	}
@@ -155,7 +157,7 @@ func validateRetrySuccessor(source, successor *SudoRequest) error {
 }
 
 func (a *APIServer) adoptRetrySuccessor(ctx context.Context, source, successor *SudoRequest) (*SudoRequest, bool, error) {
-	if err := validateRetrySuccessor(source, successor); err != nil {
+	if err := validateRetrySuccessor(source, successor, a.controllerNamespace()); err != nil {
 		return nil, false, err
 	}
 	if err := a.ensureSupersededLink(ctx, source.Name, source.UID, successor.UID); err != nil {
@@ -168,6 +170,7 @@ func (a *APIServer) adoptRetrySuccessor(ctx context.Context, source, successor *
 // name is the cross-replica idempotency key. If linking the predecessor status
 // fails after creation, a repeated call finds the same child and repairs the link.
 func (a *APIServer) retryRequest(ctx context.Context, source *SudoRequest, submittedBy string, admin bool) (*SudoRequest, bool, error) {
+	controllerNamespace := a.controllerNamespace()
 	if source.UID == "" {
 		return nil, false, errors.New("source request has no UID")
 	}
@@ -177,7 +180,7 @@ func (a *APIServer) retryRequest(ctx context.Context, source *SudoRequest, submi
 
 	name := retryChildName(source.UID)
 	var existing SudoRequest
-	if err := a.Client.Get(ctx, client.ObjectKey{Namespace: ControllerNamespace, Name: name}, &existing); err == nil {
+	if err := a.Client.Get(ctx, client.ObjectKey{Namespace: controllerNamespace, Name: name}, &existing); err == nil {
 		return a.adoptRetrySuccessor(ctx, source, &existing)
 	} else if !apierrors.IsNotFound(err) {
 		return nil, false, err
@@ -191,7 +194,7 @@ func (a *APIServer) retryRequest(ctx context.Context, source *SudoRequest, submi
 	spec.RetryOfUID = string(source.UID)
 	spec.SubmittedBy = submittedBy
 	successor := &SudoRequest{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ControllerNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: controllerNamespace},
 		Spec:       spec,
 	}
 
@@ -216,7 +219,7 @@ func (a *APIServer) retryRequest(ctx context.Context, source *SudoRequest, submi
 	if err := validateCommandSyntax(successor.Spec.Command); err != nil {
 		return nil, false, err
 	}
-	if err := validateSpecExtras(successor); err != nil {
+	if err := validateSpecExtras(successor, controllerNamespace); err != nil {
 		return nil, false, err
 	}
 	created := true
@@ -225,10 +228,10 @@ func (a *APIServer) retryRequest(ctx context.Context, source *SudoRequest, submi
 			return nil, false, err
 		}
 		created = false
-		if err := a.Client.Get(ctx, client.ObjectKey{Namespace: ControllerNamespace, Name: name}, successor); err != nil {
+		if err := a.Client.Get(ctx, client.ObjectKey{Namespace: controllerNamespace, Name: name}, successor); err != nil {
 			return nil, false, err
 		}
-		if err := validateRetrySuccessor(source, successor); err != nil {
+		if err := validateRetrySuccessor(source, successor, controllerNamespace); err != nil {
 			return nil, false, err
 		}
 	}
@@ -243,9 +246,10 @@ type pendingDuplicateError struct{ UID types.UID }
 func (e *pendingDuplicateError) Error() string { return "equivalent request is already pending" }
 
 func (a *APIServer) ensureSupersededLink(ctx context.Context, name string, sourceUID, successorUID types.UID) error {
+	controllerNamespace := a.controllerNamespace()
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		var current SudoRequest
-		if err := a.Client.Get(ctx, client.ObjectKey{Namespace: ControllerNamespace, Name: name}, &current); err != nil {
+		if err := a.Client.Get(ctx, client.ObjectKey{Namespace: controllerNamespace, Name: name}, &current); err != nil {
 			return err
 		}
 		if current.UID != sourceUID {

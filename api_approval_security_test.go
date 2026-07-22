@@ -31,7 +31,7 @@ func approvalTestServer(t *testing.T, sr *SudoRequest) (*APIServer, client.Clien
 
 func pendingApprovalRequest() *SudoRequest {
 	return &SudoRequest{
-		ObjectMeta: metav1.ObjectMeta{Name: "approval", Namespace: ControllerNamespace, UID: "uid-approval", CreationTimestamp: metav1.Now()},
+		ObjectMeta: metav1.ObjectMeta{Name: "approval", Namespace: DefaultControllerNamespace, UID: "uid-approval", CreationTimestamp: metav1.Now()},
 		Spec:       SudoRequestSpec{Requester: "alice", Reason: "inspect", Command: "kubectl get pods"},
 		Status:     SudoRequestStatus{Phase: PhasePending},
 	}
@@ -216,7 +216,7 @@ func TestAdminResubmitRequiresCSRFAndRecordsVerifiedActor(t *testing.T) {
 		t.Fatalf("valid resubmit status=%d body=%s", rw.Code, rw.Body.String())
 	}
 	var successor SudoRequest
-	if err := cl.Get(context.Background(), client.ObjectKey{Namespace: ControllerNamespace, Name: retryChildName(sr.UID)}, &successor); err != nil {
+	if err := cl.Get(context.Background(), client.ObjectKey{Namespace: DefaultControllerNamespace, Name: retryChildName(sr.UID)}, &successor); err != nil {
 		t.Fatal(err)
 	}
 	if successor.Spec.Requester != sr.Spec.Requester || successor.Spec.SubmittedBy != claims.PreferredUsername {

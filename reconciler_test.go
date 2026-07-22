@@ -41,7 +41,7 @@ func TestUpdateStatusRetriesOnConflict(t *testing.T) {
 	ctx := context.Background()
 	scheme := testScheme(t)
 	sr := &SudoRequest{
-		ObjectMeta: metav1.ObjectMeta{Name: "req1", Namespace: ControllerNamespace, UID: "uid-1"},
+		ObjectMeta: metav1.ObjectMeta{Name: "req1", Namespace: DefaultControllerNamespace, UID: "uid-1"},
 		Status:     SudoRequestStatus{Phase: PhaseApproved},
 	}
 	base := fake.NewClientBuilder().
@@ -95,7 +95,7 @@ func TestHandleApprovedMintSurvivesStatusConflict(t *testing.T) {
 	ctx := context.Background()
 	scheme := testScheme(t)
 	sr := &SudoRequest{
-		ObjectMeta: metav1.ObjectMeta{Name: "req2", Namespace: ControllerNamespace, UID: "uid-2"},
+		ObjectMeta: metav1.ObjectMeta{Name: "req2", Namespace: DefaultControllerNamespace, UID: "uid-2"},
 		Spec:       SudoRequestSpec{Requester: "alice", Command: "echo hi"},
 		Status:     SudoRequestStatus{Phase: PhaseApproved, ApprovedBy: "andrew"},
 	}
@@ -151,7 +151,7 @@ func TestMarkFailedSetsFailureReason(t *testing.T) {
 	ctx := context.Background()
 	scheme := testScheme(t)
 	sr := &SudoRequest{
-		ObjectMeta: metav1.ObjectMeta{Name: "req3", Namespace: ControllerNamespace, UID: "uid-3"},
+		ObjectMeta: metav1.ObjectMeta{Name: "req3", Namespace: DefaultControllerNamespace, UID: "uid-3"},
 		Spec:       SudoRequestSpec{Requester: "alice", Command: "echo hi"},
 		Status:     SudoRequestStatus{Phase: PhaseApproved},
 	}

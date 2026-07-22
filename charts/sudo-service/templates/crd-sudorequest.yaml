@@ -105,7 +105,7 @@ spec:
                   type: string
                   description: >-
                     Namespace the executor Job runs in. Defaults to the controller
-                    namespace (sudo-service). Targeting another namespace lets the
+                    namespace. Targeting another namespace lets the
                     command mount that namespace's Secrets/PVCs as files, but the Job
                     then runs under that namespace's unprivileged default
                     ServiceAccount — cluster-admin is only available in the
@@ -208,7 +208,7 @@ spec:
                 outputSecretRef:
                   type: string
                   description: >-
-                    Name of the short-TTL Secret in sudo-service namespace holding
+                    Name of the short-TTL Secret in the controller namespace holding
                     stdout/stderr. Reads go through the controller HTTP API, not
                     direct RBAC.
                 outputCaptureState:

@@ -55,15 +55,15 @@ func validateCommandSyntax(command string) error {
 // It deliberately does NOT try to judge whether the command is sensible; the
 // human reviewer remains the trust boundary. It only blocks fields that would
 // escalate privilege past what the request has explicitly, visibly asked for.
-func validateSpecExtras(sr *SudoRequest) error {
+func validateSpecExtras(sr *SudoRequest, controllerNamespace string) error {
 	// cluster-admin lives only in the controller namespace (that is where the
 	// cluster-admin-bound executor SA exists). A cross-namespace Job runs under
 	// the target namespace's default SA, so asking for both at once is incoherent
 	// rather than merely unsupported — reject it with a clear message.
-	if sr.Spec.Namespace != "" && sr.Spec.Namespace != ControllerNamespace {
+	if sr.Spec.Namespace != "" && sr.Spec.Namespace != controllerNamespace {
 		if sr.Spec.Privileges.ClusterAdmin != nil && *sr.Spec.Privileges.ClusterAdmin {
 			return fmt.Errorf("privileges.clusterAdmin is only available when the executor runs in the %q namespace; it cannot be combined with spec.namespace=%q",
-				ControllerNamespace, sr.Spec.Namespace)
+				controllerNamespace, sr.Spec.Namespace)
 		}
 	}
 
