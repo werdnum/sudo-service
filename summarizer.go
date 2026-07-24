@@ -22,7 +22,7 @@ const (
 	DefaultOpenAIModel   = "gpt-5.4-mini"
 
 	PermissionAssessmentSchemaVersion = "v1"
-	PermissionAssessmentPromptVersion = "2026-07-21"
+	PermissionAssessmentPromptVersion = "2026-07-24"
 	maxPermissionRequestWords         = 30
 )
 
@@ -31,7 +31,7 @@ const (
 // neither is knowable from a SudoRequest.
 const permissionSystemPrompt = `You write a short, factual permission request for a human reviewing a privileged infrastructure command.
 
-Answer only: what does pressing Approve permit? Write "request" as one plain-English imperative sentence that naturally completes "Do you mind if I ...". Use at most 30 words. State exact targets and counts or broad scope, namespace/node/host/external destination, the actual read/create/change/restart/delete/export action, Secret or credential access, and cleanup only when present. Describe outcomes, not shell mechanics.
+Answer only: what does pressing Approve permit? Picture yourself asking the reviewer "Hey, do you mind if I ...?" and write only the words that would complete that question — one plain-English imperative phrase. Do not actually write "Do you mind if I" or any similar lead-in; that framing only sets the tone. Start directly with the action verb, e.g. "list Pods in the sudo-service namespace." or "delete the failed Job build-123 in namespace ci.". Use at most 30 words. State exact targets and counts or broad scope, namespace/node/host/external destination, the actual read/create/change/restart/delete/export action, Secret or credential access, and cleanup only when present. Describe outcomes, not shell mechanics.
 
 Select every applicable factual effect from the supplied enum. READ_ONLY means the overall operation makes no persistent change and is mutually exclusive with mutation effects.
 
@@ -83,7 +83,7 @@ var permissionResponseSchema = map[string]any{
 	"properties": map[string]any{
 		"request": map[string]any{
 			"type":        "string",
-			"description": "One imperative sentence of at most 30 words completing 'Do you mind if I ...'.",
+			"description": "One imperative phrase of at most 30 words that completes the question 'Do you mind if I ...?'. Output only the completion, starting with the action verb; do not include the 'Do you mind if I' lead-in itself.",
 		},
 		"effects": map[string]any{
 			"type": "array",
