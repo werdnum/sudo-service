@@ -19,7 +19,7 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: sudo-service
 permissions:
-  contents: write
+  contents: read
   packages: write
 jobs:
   prepare:
@@ -112,9 +112,20 @@ jobs:
             type=registry,ref=${{ needs.prepare.outputs.image-path }}:buildcache
           cache-to: ${{ needs.prepare.outputs.cache-to }}
 
+      - name: Generate image updater token
+        if: needs.prepare.outputs.should-push == 'true'
+        id: app-token
+        uses: actions/create-github-app-token@29824e69f54612133e76f7eaac726eef6c875baf # v2
+        with:
+          app-id: ${{ secrets.IMAGE_UPDATER_APP_ID }}
+          private-key: ${{ secrets.IMAGE_UPDATER_PRIVATE_KEY }}
+          owner: werdnum
+          repositories: sudo-service
+
       - name: Update chart image digest
         if: needs.prepare.outputs.should-push == 'true'
         env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
           IMAGE_TAG: ${{ needs.prepare.outputs.tag }}
         run: |
@@ -125,6 +136,7 @@ jobs:
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
 
           # ubuntu-latest ships mikefarah yq, but fall back to a user-writable
           # install if it's ever missing.
