@@ -241,7 +241,7 @@ func (r *SudoRequestReconciler) prepareAutoApprovedPlaybook(ctx context.Context,
 }
 
 func (r *SudoRequestReconciler) executeAutoApprovedPlaybook(ctx context.Context, sr *SudoRequest) (bool, ctrl.Result, error) {
-	if sr.Spec.Playbook == nil || sr.Status.ApprovedBy != "auto-approve" {
+	if sr.Spec.Playbook == nil || !sr.Status.PlaybookAutoApproved {
 		return false, ctrl.Result{}, nil
 	}
 	namespace, name, err := terminalJobCleanupParameters(sr)

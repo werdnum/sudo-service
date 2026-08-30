@@ -239,9 +239,13 @@ type SudoRequestStatus struct {
 	ResolvedImage     string   `json:"resolvedImage,omitempty"`
 	PreflightWarnings []string `json:"preflightWarnings,omitempty"`
 
-	// PlaybookTargetUID pins an auto-approved playbook to the exact object that
-	// passed its live preconditions. PlaybookTargetAbsent records a checked
-	// no-op, so an object created under that name after approval is not deleted.
+	// PlaybookAutoApproved is controller-owned state distinguishing the typed
+	// execution path from a human approver whose username happens to match the
+	// controller's audit label. PlaybookTargetUID pins that automatic approval
+	// to the exact object that passed its live preconditions.
+	PlaybookAutoApproved bool `json:"playbookAutoApproved,omitempty"`
+	// PlaybookTargetAbsent records a checked no-op, so an object created under
+	// that name after approval is not deleted.
 	PlaybookTargetUID    string `json:"playbookTargetUID,omitempty"`
 	PlaybookTargetAbsent bool   `json:"playbookTargetAbsent,omitempty"`
 

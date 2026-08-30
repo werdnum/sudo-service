@@ -204,6 +204,7 @@ func (r *SudoRequestReconciler) handleNew(ctx context.Context, sr *SudoRequest) 
 			current.Status.Phase = PhaseApproved
 			current.Status.ApprovedBy = "auto-approve"
 			current.Status.ApprovedAt = &now
+			current.Status.PlaybookAutoApproved = true
 			current.Status.PlaybookTargetUID = string(prepared.targetUID)
 			current.Status.PlaybookTargetAbsent = prepared.targetAbsent
 		}); err != nil {
@@ -877,6 +878,11 @@ func (r *SudoRequestReconciler) Approve(ctx context.Context, uid types.UID, appr
 	sr.Status.Phase = PhaseApproved
 	sr.Status.ApprovedBy = approvedBy
 	sr.Status.ApprovedAt = &now
+	// The typed automatic path is controller-owned and must never be selected
+	// from a human-controlled identity string such as preferred_username.
+	sr.Status.PlaybookAutoApproved = false
+	sr.Status.PlaybookTargetUID = ""
+	sr.Status.PlaybookTargetAbsent = false
 	// Burn the approval token.
 	sr.Status.ApprovalTokenHash = ""
 	sr.Status.ApprovalTokenExpiresAt = nil

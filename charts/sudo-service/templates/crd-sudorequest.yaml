@@ -222,6 +222,7 @@ spec:
                   description: >-
                     Conservative static warnings recorded before approval. Advisory
                     only; they do not claim runtime certainty.
+                playbookAutoApproved: {type: boolean}
                 playbookTargetUID: {type: string}
                 playbookTargetAbsent: {type: boolean}
                 supersededByUID:

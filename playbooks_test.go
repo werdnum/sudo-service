@@ -147,7 +147,7 @@ func TestAutoApprovedTerminalJobCleanupDeletesPinnedUIDWithoutExecutor(t *testin
 	if err := cl.Get(ctx, client.ObjectKeyFromObject(sr), &approved); err != nil {
 		t.Fatal(err)
 	}
-	if approved.Status.Phase != PhaseApproved || approved.Status.ApprovedBy != "auto-approve" || approved.Status.PlaybookTargetUID != "job-uid" {
+	if approved.Status.Phase != PhaseApproved || approved.Status.ApprovedBy != "auto-approve" || !approved.Status.PlaybookAutoApproved || approved.Status.PlaybookTargetUID != "job-uid" {
 		t.Fatalf("approved status = %#v", approved.Status)
 	}
 	if _, err := r.handleApproved(ctx, &approved); err != nil {
@@ -169,7 +169,7 @@ func TestAutoApprovedCleanupRefusesReplacementJob(t *testing.T) {
 	ctx := context.Background()
 	scheme := playbookTestScheme(t)
 	sr := cleanupRequest()
-	sr.Status = SudoRequestStatus{Phase: PhaseApproved, ApprovedBy: "auto-approve", PlaybookTargetUID: "original-uid"}
+	sr.Status = SudoRequestStatus{Phase: PhaseApproved, ApprovedBy: "auto-approve", PlaybookAutoApproved: true, PlaybookTargetUID: "original-uid"}
 	replacement := terminalCronJobChild()
 	replacement.UID = types.UID("replacement-uid")
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&SudoRequest{}).WithObjects(sr, replacement).Build()
@@ -187,5 +187,28 @@ func TestAutoApprovedCleanupRefusesReplacementJob(t *testing.T) {
 	}
 	if final.Status.Phase != PhaseFailed || !strings.Contains(final.Status.FailureReason, "replaced") {
 		t.Fatalf("final status = %#v", final.Status)
+	}
+}
+
+func TestHumanNamedAutoApproveDoesNotEnterTypedExecution(t *testing.T) {
+	ctx := context.Background()
+	scheme := playbookTestScheme(t)
+	sr := cleanupRequest()
+	// approvedBy is an audit identity and can equal the controller's display
+	// label. It must not select the controller-owned automatic execution path.
+	sr.Status = SudoRequestStatus{Phase: PhaseApproved, ApprovedBy: "auto-approve"}
+	job := terminalCronJobChild()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&SudoRequest{}).WithObjects(sr, job).Build()
+	r := &SudoRequestReconciler{Client: cl, APIReader: cl, Recorder: record.NewFakeRecorder(10), Broadcaster: NewBroadcaster()}
+
+	handled, _, err := r.executeAutoApprovedPlaybook(ctx, sr)
+	if err != nil {
+		t.Fatalf("executeAutoApprovedPlaybook: %v", err)
+	}
+	if handled {
+		t.Fatal("human approval was treated as controller-owned automatic approval")
+	}
+	if err := cl.Get(ctx, client.ObjectKeyFromObject(job), &batchv1.Job{}); err != nil {
+		t.Fatalf("target Job changed during human-approved path check: %v", err)
 	}
 }
