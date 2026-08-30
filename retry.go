@@ -222,6 +222,9 @@ func (a *APIServer) retryRequest(ctx context.Context, source *SudoRequest, submi
 	if err := validateSpecExtras(successor, controllerNamespace); err != nil {
 		return nil, false, err
 	}
+	if err := validatePlaybookSpec(successor); err != nil {
+		return nil, false, err
+	}
 	created := true
 	if err := a.Client.Create(ctx, successor); err != nil {
 		if !apierrors.IsAlreadyExists(err) {

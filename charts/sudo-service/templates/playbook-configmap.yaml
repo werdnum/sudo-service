@@ -1,0 +1,11 @@
+{{- if .Values.playbooks.terminalJobCleanup }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sudo-service-playbooks
+  namespace: {{ .Values.namespace }}
+data:
+  playbooks.yaml: |
+    terminalJobCleanup:
+{{ toYaml .Values.playbooks.terminalJobCleanup | indent 6 }}
+{{- end }}

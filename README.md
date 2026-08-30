@@ -226,6 +226,40 @@ unprivileged `default` ServiceAccount. See
 [`docs/widening-the-executor.md`](docs/widening-the-executor.md) for the full
 design and the security rationale.
 
+### Typed auto-approved playbooks
+
+Typed playbooks are closed, versioned operations with controller-validated
+parameters and live preconditions. They are separate from the legacy exact/prefix
+command allowlist: an arbitrary suffix, selector, image, or pod field cannot enter
+the execution path. The first playbook is `job.cleanup-terminal/v1`.
+
+```sh
+sudo-service \
+  --reason "Clear a retained failed Job alert" \
+  --playbook job.cleanup-terminal/v1 \
+  --parameter namespace=ansible \
+  --parameter name=ansible-drift-metrics-12345
+```
+
+It is deny-by-default. Configure exact requester/namespace rules in chart values:
+
+```yaml
+playbooks:
+  terminalJobCleanup:
+    - requester: system:serviceaccount:k8s-agent:k8s-agent-sa
+      namespace: ansible
+      cronJobs: [ansible-drift-metrics]
+      standaloneNamePrefixes: [ansible-drift-metrics-manual-]
+```
+
+Before automatic approval the controller requires the canonical command, verifies
+the live Job is `Complete` or `Failed`, verifies its CronJob owner or configured
+ownerless-name prefix, and records its UID. Execution is a direct Kubernetes
+delete with a UID precondition; it never launches a shell or executor pod. A
+missing target is recorded as a checked no-op, so a later Job with the same name
+cannot be deleted. A request outside the configured boundary follows the normal
+human approval path and carries a preflight warning explaining why.
+
 ### Render locally
 
 ```sh

@@ -28,6 +28,21 @@ client/cli/sudo-service \
   -- kubectl delete pod foo -n bar
 ```
 
+For a configured, typed terminal-Job cleanup, use the versioned playbook instead
+of reconstructing a `kubectl delete` command:
+
+```sh
+client/cli/sudo-service \
+  --reason "Clear a retained failed Job alert" \
+  --playbook job.cleanup-terminal/v1 \
+  --parameter namespace=ansible \
+  --parameter name=ansible-drift-metrics-12345
+```
+
+The server—not the client—decides whether the exact requester, namespace, Job
+family, current terminal state, and target UID qualify for automatic approval.
+Otherwise the request goes through ordinary human review.
+
 The default `kubectl` executor is a server-resolved, digest-pinned profile. Select
 another curated profile explicitly when appropriate:
 

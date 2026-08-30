@@ -46,6 +46,7 @@ type Config struct {
 	CookieSigningKey      string // for DIY OIDC sessions; optional in oauth2-proxy mode
 	OAuth2ProxyMode       bool   // true: trust forwarded ID token after JWKS check
 	AutoApproveConfigPath string // path to auto-approve YAML
+	PlaybookConfigPath    string // path to typed playbook auto-approval YAML
 
 	// Optional AI permission-assessment feature. Enabled only when OpenAIAPIKey is set.
 	OpenAIAPIKey  string // OPENAI_API_KEY; empty disables the feature
@@ -66,6 +67,7 @@ func loadConfig() (*Config, error) {
 		CookieSigningKey:      os.Getenv("COOKIE_SIGNING_KEY"),
 		OAuth2ProxyMode:       strings.EqualFold(os.Getenv("OAUTH2_PROXY_MODE"), "true"),
 		AutoApproveConfigPath: os.Getenv("AUTO_APPROVE_CONFIG"),
+		PlaybookConfigPath:    os.Getenv("PLAYBOOK_CONFIG"),
 		OpenAIAPIKey:          os.Getenv("OPENAI_API_KEY"),
 		OpenAIBaseURL:         getenv("OPENAI_BASE_URL", DefaultOpenAIBaseURL),
 		OpenAIModel:           getenv("OPENAI_MODEL", DefaultOpenAIModel),
@@ -97,6 +99,11 @@ func main() {
 
 	if err := LoadAutoApproveConfig(cfg.AutoApproveConfigPath); err != nil {
 		logger.Error(err, "failed to load auto-approve config")
+		os.Exit(1)
+	}
+	playbooks, err := LoadPlaybookConfig(cfg.PlaybookConfigPath)
+	if err != nil {
+		logger.Error(err, "failed to load playbook config")
 		os.Exit(1)
 	}
 
@@ -149,6 +156,7 @@ func main() {
 		ControllerNamespace: cfg.ControllerNamespace,
 		Client:              mgr.GetClient(),
 		APIReader:           mgr.GetAPIReader(),
+		Playbooks:           playbooks,
 		Scheme:              mgr.GetScheme(),
 		Pushover:            po,
 		Summarizer:          summarizer,

@@ -75,6 +75,23 @@ sudo-service \
   -- kubectl get nodes
 ```
 
+For exact-name cleanup of a retained `Complete` or `Failed` Job, prefer the typed
+playbook. It is automatically approved only when the server's requester,
+namespace, ownership/name-family, terminal-state, and UID checks all pass;
+otherwise it follows normal human review:
+
+```bash
+sudo-service \
+  --reason "Clear retained failed Job after verifying the later run succeeded" \
+  --playbook job.cleanup-terminal/v1 \
+  --parameter namespace=ansible \
+  --parameter name=ansible-drift-metrics-29783777
+```
+
+Do not use the playbook for an active Job, broad cleanup, or a Job whose retained
+logs are still needed for diagnosis. The controller deletes directly with a UID
+precondition; it does not launch a shell for an auto-approved request.
+
 For anything richer than a command, use `--request-file` with a complete YAML
 or JSON HTTP request body. Do not put a manifest, heredoc, encoded script, or
 nested Job/Pod definition in `command`. Use `--stdin-file` for a separate

@@ -14,6 +14,10 @@ spec:
     metadata:
       labels:
         app: sudo-service
+      {{- if .Values.playbooks.terminalJobCleanup }}
+      annotations:
+        checksum/playbooks: {{ toJson .Values.playbooks | sha256sum }}
+      {{- end }}
     spec:
       serviceAccountName: sudo-service-controller-sa
       {{- with .Values.imagePullSecrets }}
@@ -58,6 +62,10 @@ spec:
               value: {{ .Values.adminGroup | quote }}
             - name: OAUTH2_PROXY_MODE
               value: "true"
+            {{- if .Values.playbooks.terminalJobCleanup }}
+            - name: PLAYBOOK_CONFIG
+              value: /etc/sudo-service-playbooks/playbooks.yaml
+            {{- end }}
             # Pushover credentials — same convention as the alertmanager
             # pushover-credentials Secret in kubernetes/jsonnet/monitoring/
             # (keys `token` + `user_key`).
@@ -104,6 +112,12 @@ spec:
               port: 8080
             initialDelaySeconds: 5
             periodSeconds: 10
+          {{- if .Values.playbooks.terminalJobCleanup }}
+          volumeMounts:
+            - name: playbook-config
+              mountPath: /etc/sudo-service-playbooks
+              readOnly: true
+          {{- end }}
         - name: oauth2-proxy
           image: {{ .Values.oauth2Proxy.image }}
           imagePullPolicy: IfNotPresent
@@ -170,6 +184,11 @@ spec:
               mountPath: /etc/oauth2-proxy/secrets
               readOnly: true
       volumes:
+        {{- if .Values.playbooks.terminalJobCleanup }}
+        - name: playbook-config
+          configMap:
+            name: sudo-service-playbooks
+        {{- end }}
         - name: oauth2-proxy-config
           configMap:
             name: sudo-service-oauth2-proxy

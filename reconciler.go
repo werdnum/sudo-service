@@ -47,6 +47,7 @@ type SudoRequestReconciler struct {
 	// reads of executor Jobs/Pods that may live in another namespace
 	// (spec.namespace) must go through this reader, not the cache.
 	APIReader     client.Reader
+	Playbooks     *PlaybookConfig
 	Scheme        *runtime.Scheme
 	Pushover      *PushoverClient
 	Summarizer    *Summarizer // optional; nil when AI assessments are disabled
@@ -171,7 +172,7 @@ func (r *SudoRequestReconciler) handleNew(ctx context.Context, sr *SudoRequest) 
 	// (a hostPath volume, an init container setting its own securityContext, ...).
 	// As with the syntax check, the HTTP API rejects these at submission; a
 	// CRD-created one only reaches us here, so deny it before the approval push.
-	if err := firstError(profileErr, validateSpecExtras(sr, r.controllerNamespace())); err != nil {
+	if err := firstError(profileErr, validateSpecExtras(sr, r.controllerNamespace()), validatePlaybookSpec(sr)); err != nil {
 		now := metav1.NewTime(time.Now())
 		sr.Status.Phase = PhaseDenied
 		sr.Status.DeniedBy = "spec-validation"
@@ -193,6 +194,30 @@ func (r *SudoRequestReconciler) handleNew(ctx context.Context, sr *SudoRequest) 
 			RetryOfUID:   sr.Spec.RetryOfUID,
 		})
 		return ctrl.Result{}, nil
+	}
+
+	if prepared, fallbackReason, err := r.prepareAutoApprovedPlaybook(ctx, sr); err != nil {
+		return ctrl.Result{}, err
+	} else if prepared != nil {
+		now := metav1.NewTime(time.Now())
+		if err := r.updateStatus(ctx, sr, func(current *SudoRequest) {
+			current.Status.Phase = PhaseApproved
+			current.Status.ApprovedBy = "auto-approve"
+			current.Status.ApprovedAt = &now
+			current.Status.PlaybookTargetUID = string(prepared.targetUID)
+			current.Status.PlaybookTargetAbsent = prepared.targetAbsent
+		}); err != nil {
+			return ctrl.Result{}, fmt.Errorf("status update Approved for playbook auto-approve: %w", err)
+		}
+		r.Recorder.Eventf(sr, corev1.EventTypeNormal, "Approved", "Playbook %s approved by auto-approve", playbookName(sr))
+		r.Broadcaster.Publish(string(sr.UID), Event{
+			Type: "phase", Phase: PhaseApproved, ApprovedBy: "auto-approve",
+			Requester: sr.Spec.Requester, Reason: sr.Spec.Reason, Command: sr.Spec.Command,
+			CreatedAt: sr.CreationTimestamp.Format("2006-01-02 15:04:05 UTC"), RetryOfUID: sr.Spec.RetryOfUID,
+		})
+		return ctrl.Result{Requeue: true}, nil
+	} else if sr.Spec.Playbook != nil && fallbackReason != "" {
+		sr.Status.PreflightWarnings = append(sr.Status.PreflightWarnings, "playbook requires human approval: "+fallbackReason)
 	}
 
 	// Auto-approve only reasons about command+image, so requests that use the
@@ -559,6 +584,9 @@ func (r *SudoRequestReconciler) handleApproved(ctx context.Context, sr *SudoRequ
 		// Lost a race with another writer (or a manual edit) since the cached read
 		// that routed us here; re-reconcile from the now-current phase.
 		return ctrl.Result{Requeue: true}, nil
+	}
+	if handled, result, err := r.executeAutoApprovedPlaybook(ctx, sr); handled {
+		return result, err
 	}
 
 	// A cross-namespace executor Job carries no ownerRef, so it won't cascade when

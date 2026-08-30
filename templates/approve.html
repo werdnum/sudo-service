@@ -13,6 +13,7 @@
 			{{if .RetryOfUID}}<dt>Retry of</dt><dd><a href="/approve?id={{.RetryOfUID}}"><code>{{.RetryOfUID}}</code></a></dd>{{end}}
 			{{if .SupersededByUID}}<dt>Superseded by</dt><dd><a href="/approve?id={{.SupersededByUID}}"><code>{{.SupersededByUID}}</code></a></dd>{{end}}
             <dt>Reason</dt><dd>{{.Reason}}</dd>
+            {{if .Playbook}}<dt>Typed playbook</dt><dd><strong>{{.Playbook.Name}}</strong><br><code>{{.Playbook.Parameters}}</code></dd>{{end}}
             <dt>Namespace</dt><dd>{{.Extras.Namespace}}</dd>
             <dt>Privileges</dt><dd>{{if .Extras.ClusterAdmin}}<strong>cluster-admin</strong>{{else}}none (namespace default ServiceAccount){{end}}</dd>
             {{if .Profile}}<dt>Executor profile</dt><dd><strong>{{.Profile}}</strong></dd>{{end}}

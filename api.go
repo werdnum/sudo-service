@@ -68,11 +68,12 @@ func (a *APIServer) healthHandler(w http.ResponseWriter, _ *http.Request) {
 // ---- HTTP API (requester side) ----
 
 type createRequestBody struct {
-	Reason                  string `json:"reason"`
-	Command                 string `json:"command"`
-	Image                   string `json:"image,omitempty"`
-	Profile                 string `json:"profile,omitempty"`
-	TTLSecondsAfterApproval *int32 `json:"ttlSecondsAfterApproval,omitempty"`
+	Reason                  string               `json:"reason"`
+	Command                 string               `json:"command"`
+	Image                   string               `json:"image,omitempty"`
+	Profile                 string               `json:"profile,omitempty"`
+	Playbook                *SudoRequestPlaybook `json:"playbook,omitempty"`
+	TTLSecondsAfterApproval *int32               `json:"ttlSecondsAfterApproval,omitempty"`
 
 	// Widened pod fields — same shape as the CRD spec, carried as raw JSON so a
 	// malformed item is rejected by validateSpecExtras (400) rather than failing
@@ -97,6 +98,7 @@ type requestStatusResponse struct {
 	RetryOfUID                string                `json:"retryOfUID,omitempty"`
 	SupersededByUID           string                `json:"supersededByUID,omitempty"`
 	Command                   string                `json:"command"`
+	Playbook                  *SudoRequestPlaybook  `json:"playbook,omitempty"`
 	Image                     string                `json:"image"`
 	Profile                   string                `json:"profile,omitempty"`
 	PreflightWarnings         []string              `json:"preflightWarnings,omitempty"`
@@ -171,6 +173,7 @@ func (a *APIServer) createRequestHandler(w http.ResponseWriter, r *http.Request)
 			Command:                 body.Command,
 			Image:                   body.Image,
 			Profile:                 body.Profile,
+			Playbook:                body.Playbook,
 			TTLSecondsAfterApproval: body.TTLSecondsAfterApproval,
 			Namespace:               body.Namespace,
 			Stdin:                   body.Stdin,
@@ -188,6 +191,10 @@ func (a *APIServer) createRequestHandler(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if err := validateSpecExtras(sr, a.controllerNamespace()); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := validatePlaybookSpec(sr); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -310,6 +317,7 @@ func (a *APIServer) serveStatus(w http.ResponseWriter, sr *SudoRequest) {
 		RetryOfUID:                sr.Spec.RetryOfUID,
 		SupersededByUID:           sr.Status.SupersededByUID,
 		Command:                   sr.Spec.Command,
+		Playbook:                  sr.Spec.Playbook,
 		Image:                     imageFor(sr),
 		Profile:                   profileFor(sr),
 		PreflightWarnings:         sr.Status.PreflightWarnings,
@@ -493,6 +501,7 @@ type approveView struct {
 	CanResubmit             bool
 	Reason                  string
 	Command                 string
+	Playbook                *SudoRequestPlaybook
 	Image                   string
 	Profile                 string
 	PreflightWarnings       []string
@@ -592,6 +601,7 @@ func (a *APIServer) renderApprovePage(w http.ResponseWriter, r *http.Request, cl
 		view.CanResubmit = adminRetryable(sr.Status.Phase) && sr.Status.SupersededByUID == ""
 		view.Reason = sr.Spec.Reason
 		view.Command = sr.Spec.Command
+		view.Playbook = sr.Spec.Playbook
 		view.Image = imageFor(sr)
 		view.Profile = profileFor(sr)
 		view.PreflightWarnings = sr.Status.PreflightWarnings

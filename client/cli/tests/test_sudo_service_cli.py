@@ -236,6 +236,49 @@ class SudoServiceCLITest(unittest.TestCase):
             "ansible-playbook drift.yaml",
         )
 
+    def test_terminal_job_cleanup_playbook_builds_canonical_typed_request(self) -> None:
+        result = self.run_cli(
+            "--reason", "clear retained failed Job alert",
+            "--playbook", "job.cleanup-terminal/v1",
+            "--parameter", "namespace=ansible",
+            "--parameter", "name=ansible-drift-metrics-12345",
+            "--preview", "--quiet", "--poll-interval", "0.01",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        body = FakeSudoServiceHandler.request_bodies[0]
+        self.assertEqual(
+            body,
+            {
+                "reason": "clear retained failed Job alert",
+                "command": (
+                    "kubectl delete job ansible-drift-metrics-12345 -n ansible "
+                    "--ignore-not-found=true --wait=false"
+                ),
+                "playbook": {
+                    "name": "job.cleanup-terminal/v1",
+                    "parameters": {
+                        "namespace": "ansible",
+                        "name": "ansible-drift-metrics-12345",
+                    },
+                },
+            },
+        )
+        self.assertEqual(json.loads(result.stderr), body)
+
+    def test_playbook_rejects_missing_duplicate_or_untyped_parameters(self) -> None:
+        cases = (
+            (("--playbook", "job.cleanup-terminal/v1", "--parameter", "namespace=ansible"), "requires exactly"),
+            (("--playbook", "job.cleanup-terminal/v1", "--parameter", "namespace=ansible", "--parameter", "namespace=other"), "duplicate"),
+            (("--parameter", "namespace=ansible", "--", "true"), "requires --playbook"),
+        )
+        for flags, message in cases:
+            with self.subTest(flags=flags):
+                result = self.run_cli("--reason", "invalid", *flags)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stderr)
+        self.assertEqual(FakeSudoServiceHandler.request_bodies, [])
+
     def test_timeout_zero_waits_without_a_local_deadline(self) -> None:
         FakeSudoServiceHandler.phases = ["Pending", "Executed"]
 
