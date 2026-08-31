@@ -57,6 +57,10 @@ spec:
                     has(self.retryOfUID) == has(oldSelf.retryOfUID) &&
                     (!has(self.retryOfUID) || self.retryOfUID == oldSelf.retryOfUID)
                   message: retryOfUID is immutable
+                - rule: >-
+                    has(self.playbook) == has(oldSelf.playbook) &&
+                    (!has(self.playbook) || self.playbook == oldSelf.playbook)
+                  message: playbook is immutable
               properties:
                 requester:
                   type: string
@@ -79,6 +83,23 @@ spec:
                 command:
                   type: string
                   description: Exact argv (single string) executed under cluster-admin.
+                playbook:
+                  type: object
+                  required: [name, parameters]
+                  description: >-
+                    Versioned typed operation. The controller validates its parameters
+                    and requires command to equal the canonical human-readable rendering
+                    before it can bypass human approval.
+                  properties:
+                    name:
+                      type: string
+                      enum: [job.cleanup-terminal/v1]
+                    parameters:
+                      type: object
+                      minProperties: 2
+                      maxProperties: 2
+                      additionalProperties:
+                        type: string
                 image:
                   type: string
                   description: >-
@@ -201,6 +222,9 @@ spec:
                   description: >-
                     Conservative static warnings recorded before approval. Advisory
                     only; they do not claim runtime certainty.
+                playbookAutoApproved: {type: boolean}
+                playbookTargetUID: {type: string}
+                playbookTargetAbsent: {type: boolean}
                 supersededByUID:
                   type: string
                   description: Controller-owned UID of the explicit successor request.

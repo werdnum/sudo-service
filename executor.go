@@ -104,15 +104,7 @@ func autoApproveTokens(sr *SudoRequest) ([]string, bool) {
 // or privilege toggles. Such requests always need a human: they are excluded
 // from the auto-approve allowlist, which only reasons about command+image.
 func hasSpecExtras(sr *SudoRequest) bool {
-	return sr.Spec.Namespace != "" ||
-		sr.Spec.Stdin != "" ||
-		len(sr.Spec.Env) > 0 ||
-		len(sr.Spec.EnvFrom) > 0 ||
-		len(sr.Spec.Volumes) > 0 ||
-		len(sr.Spec.VolumeMounts) > 0 ||
-		len(sr.Spec.InitContainers) > 0 ||
-		len(sr.Spec.ImagePullSecrets) > 0 ||
-		sr.Spec.Privileges.ClusterAdmin != nil
+	return sr.Spec.Playbook != nil || hasPodSpecExtras(sr)
 }
 
 // getExecutorJob returns the executor Job named in status.executorJobName, or

@@ -123,6 +123,12 @@ type SudoRequestSpec struct {
 	// Command is the exact argv to run, e.g. "kubectl rollout restart deployment/foo -n bar".
 	Command string `json:"command"`
 
+	// Playbook identifies a versioned, controller-understood operation. The
+	// command remains required and is the human-readable rendering of the action;
+	// the controller requires it to match the canonical rendering before a
+	// playbook can be auto-approved. Unknown or malformed playbooks are rejected.
+	Playbook *SudoRequestPlaybook `json:"playbook,omitempty"`
+
 	// Image is the container image the executor Job runs. Defaults to DefaultExecutorImage.
 	// The human reviewer is the trust boundary: the approve page shows the image
 	// prominently so the human notices suspicious image+command pairings.
@@ -189,6 +195,15 @@ type SudoRequestSpec struct {
 	Privileges SudoRequestPrivileges `json:"privileges,omitempty"`
 }
 
+// SudoRequestPlaybook is a typed operation whose parameters are validated by
+// the controller. Keeping the parameter map string-only makes the stored audit
+// record compact and prevents arbitrary nested pod/shell structures from being
+// smuggled through the playbook surface.
+type SudoRequestPlaybook struct {
+	Name       string            `json:"name"`
+	Parameters map[string]string `json:"parameters"`
+}
+
 // SudoRequestPrivileges is the set of explicit capability toggles a request may
 // flip. They default to a safe value and are rendered individually on the
 // approve page so the reviewer can see exactly what power is being handed over.
@@ -223,6 +238,16 @@ type SudoRequestStatus struct {
 	ResolvedProfile   string   `json:"resolvedProfile,omitempty"`
 	ResolvedImage     string   `json:"resolvedImage,omitempty"`
 	PreflightWarnings []string `json:"preflightWarnings,omitempty"`
+
+	// PlaybookAutoApproved is controller-owned state distinguishing the typed
+	// execution path from a human approver whose username happens to match the
+	// controller's audit label. PlaybookTargetUID pins that automatic approval
+	// to the exact object that passed its live preconditions.
+	PlaybookAutoApproved bool `json:"playbookAutoApproved,omitempty"`
+	// PlaybookTargetAbsent records a checked no-op, so an object created under
+	// that name after approval is not deleted.
+	PlaybookTargetUID    string `json:"playbookTargetUID,omitempty"`
+	PlaybookTargetAbsent bool   `json:"playbookTargetAbsent,omitempty"`
 
 	// SupersededByUID is the controller-owned forward link to the explicit
 	// successor. The successor's spec.retryOfUID is the immutable source of truth.
@@ -402,6 +427,16 @@ func (in *SudoRequestList) DeepCopyObject() runtime.Object {
 
 func (in *SudoRequestSpec) DeepCopyInto(out *SudoRequestSpec) {
 	*out = *in
+	if in.Playbook != nil {
+		out.Playbook = new(SudoRequestPlaybook)
+		*out.Playbook = *in.Playbook
+		if in.Playbook.Parameters != nil {
+			out.Playbook.Parameters = make(map[string]string, len(in.Playbook.Parameters))
+			for k, v := range in.Playbook.Parameters {
+				out.Playbook.Parameters[k] = v
+			}
+		}
+	}
 	if in.TTLSecondsAfterApproval != nil {
 		v := *in.TTLSecondsAfterApproval
 		out.TTLSecondsAfterApproval = &v

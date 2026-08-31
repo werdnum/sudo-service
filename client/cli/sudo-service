@@ -31,6 +31,7 @@ REQUEST_FIELDS = {
     "command",
     "image",
     "profile",
+    "playbook",
     "ttlSecondsAfterApproval",
     "namespace",
     "stdin",
@@ -42,6 +43,7 @@ REQUEST_FIELDS = {
     "imagePullSecrets",
     "privileges",
 }
+TERMINAL_JOB_CLEANUP_PLAYBOOK = "job.cleanup-terminal/v1"
 LIST_REQUEST_FIELDS = {
     "env",
     "envFrom",
@@ -91,6 +93,19 @@ def parse_args() -> argparse.Namespace:
             "network-tools). Mutually exclusive with --image. The resolved digest "
             "is returned by the server and shown to the reviewer."
         ),
+    )
+    parser.add_argument(
+        "--playbook",
+        choices=[TERMINAL_JOB_CLEANUP_PLAYBOOK],
+        help="Submit a versioned typed playbook instead of an arbitrary command.",
+    )
+    parser.add_argument(
+        "--parameter",
+        action="append",
+        default=[],
+        dest="parameters",
+        metavar="KEY=VALUE",
+        help="Typed playbook parameter; repeat once per required parameter.",
     )
     parser.add_argument(
         "--tool",
@@ -224,6 +239,7 @@ def parse_args() -> argparse.Namespace:
             ("--reason", args.reason), ("--command", args.command),
             ("command arguments after '--'", args.argv), ("--image", args.image),
             ("--profile", args.profile),
+            ("--playbook", args.playbook), ("--parameter", args.parameters),
             ("--tool", args.tools),
             ("--namespace", args.namespace), ("--request-file", args.request_file),
             ("--stdin-file", args.stdin_file), ("--no-cluster-admin", args.no_cluster_admin),
@@ -242,6 +258,7 @@ def parse_args() -> argparse.Namespace:
             ("command arguments after '--'", args.argv),
             ("--image", args.image),
             ("--profile", args.profile),
+            ("--playbook", args.playbook), ("--parameter", args.parameters),
             ("--tool", args.tools),
             ("--namespace", args.namespace),
             ("--no-cluster-admin", args.no_cluster_admin),
@@ -252,6 +269,24 @@ def parse_args() -> argparse.Namespace:
                 conflicting.append(option)
         if conflicting:
             parser.error("--request-file cannot be combined with " + ", ".join(conflicting))
+    elif args.playbook:
+        conflicting = []
+        for option, value in (
+            ("--command", args.command), ("command arguments after '--'", args.argv),
+            ("--image", args.image), ("--profile", args.profile), ("--tool", args.tools),
+            ("--namespace", args.namespace), ("--stdin-file", args.stdin_file),
+            ("--no-cluster-admin", args.no_cluster_admin),
+            ("--image-pull-secret", args.image_pull_secrets),
+            ("--ttl-seconds-after-approval", args.ttl_seconds_after_approval),
+        ):
+            if value is not None and value is not False and value != []:
+                conflicting.append(option)
+        if conflicting:
+            parser.error("--playbook cannot be combined with " + ", ".join(conflicting))
+        if not args.parameters:
+            parser.error("--playbook requires --parameter namespace=... and --parameter name=...")
+    elif args.parameters:
+        parser.error("--parameter requires --playbook")
     elif args.command and args.argv:
         parser.error("use either --command or arguments after '--', not both")
     elif not args.command and not args.argv:
@@ -296,6 +331,37 @@ def command_from_args(args: argparse.Namespace) -> str:
 def nixery_image(tools: list[str]) -> str:
     """Turn repeated --tool values into the ordinary raw image API field."""
     return NIXERY_IMAGE_PREFIX + "/" + "/".join(sorted(set(tools)))
+
+
+def playbook_request(name: str, raw_parameters: list[str], reason: str) -> dict[str, Any]:
+    parameters: dict[str, str] = {}
+    for raw in raw_parameters:
+        key, separator, value = raw.partition("=")
+        if not separator or not key or not value:
+            raise SudoServiceError("playbook parameters must use non-empty KEY=VALUE syntax")
+        if key in parameters:
+            raise SudoServiceError(f"duplicate playbook parameter: {key}")
+        parameters[key] = value
+    if name != TERMINAL_JOB_CLEANUP_PLAYBOOK:
+        raise SudoServiceError(f"unsupported playbook: {name}")
+    if set(parameters) != {"namespace", "name"}:
+        raise SudoServiceError(
+            f"{TERMINAL_JOB_CLEANUP_PLAYBOOK} requires exactly namespace and name parameters"
+        )
+    namespace = parameters["namespace"]
+    job_name = parameters["name"]
+    # The server performs Kubernetes DNS validation and requires this exact
+    # canonical rendering. shlex.quote keeps the preview unambiguous even when
+    # the server will subsequently reject a non-DNS value.
+    command = (
+        f"kubectl delete job {shlex.quote(job_name)} -n {shlex.quote(namespace)} "
+        "--ignore-not-found=true --wait=false"
+    )
+    return {
+        "reason": reason,
+        "command": command,
+        "playbook": {"name": name, "parameters": parameters},
+    }
 
 
 def load_request_file(path: str) -> dict[str, Any]:
@@ -378,6 +444,17 @@ def validate_request_body(body: dict[str, Any]) -> None:
             )
         if "clusterAdmin" in privileges and not isinstance(privileges["clusterAdmin"], bool):
             raise SudoServiceError("request field 'privileges.clusterAdmin' must be a boolean")
+    if "playbook" in body:
+        playbook = body["playbook"]
+        if not isinstance(playbook, dict) or set(playbook) != {"name", "parameters"}:
+            raise SudoServiceError("request field 'playbook' must contain exactly name and parameters")
+        if not isinstance(playbook["name"], str) or not playbook["name"]:
+            raise SudoServiceError("request field 'playbook.name' must be a non-empty string")
+        if not isinstance(playbook["parameters"], dict) or not all(
+            isinstance(key, str) and isinstance(value, str)
+            for key, value in playbook["parameters"].items()
+        ):
+            raise SudoServiceError("request field 'playbook.parameters' must be an object of strings")
     try:
         json.dumps(body)
     except (TypeError, ValueError) as exc:
@@ -544,6 +621,8 @@ def main() -> int:
         if args.request_file == "-" and args.stdin_file == "-":
             raise SudoServiceError("--request-file - and --stdin-file - cannot both read standard input")
         body = load_request_file(args.request_file)
+    elif args.playbook:
+        body = playbook_request(args.playbook, args.parameters, args.reason)
     else:
         body = {"reason": args.reason, "command": command_from_args(args)}
         if args.image:

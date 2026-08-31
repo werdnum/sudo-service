@@ -62,6 +62,16 @@ openai:
   secretName: sudo-service-openai
   # Key within secretName holding the API key.
   secretKey: api-key
+# Typed playbooks are deny-by-default. Each rule binds one exact requester and
+# namespace to terminal Jobs owned by named CronJobs, or to explicitly named
+# families of ownerless one-off Jobs. The controller still verifies terminal
+# state and pins the target UID before automatic execution.
+playbooks:
+  terminalJobCleanup: []
+  # - requester: system:serviceaccount:k8s-agent:k8s-agent-sa
+  #   namespace: ansible
+  #   cronJobs: [ansible-drift-metrics]
+  #   standaloneNamePrefixes: [ansible-drift-metrics-manual-]
 # Redis/KeyDB backing the oauth2-proxy session store.
 redis:
   connectionURL: redis://keydb.redis.svc.cluster.local/3
