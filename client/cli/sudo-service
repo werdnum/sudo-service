@@ -25,6 +25,13 @@ DOCKER_NAME_MAX = 255
 # reference. Keep them within Docker's lowercase path-component grammar so an
 # invalid image name cannot survive until the approved executor Job is created.
 NIXERY_TOOL_RE = re.compile(r"^[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*$")
+# --secret-env VAR=SECRET:KEY. The variable name is restricted to what a POSIX
+# shell can expand; the Secret name and key use the Kubernetes grammars.
+SECRET_ENV_RE = re.compile(
+    r"^(?P<var>[A-Za-z_][A-Za-z0-9_]*)="
+    r"(?P<secret>[a-z0-9](?:[-a-z0-9]*[a-z0-9])?(?:\.[a-z0-9](?:[-a-z0-9]*[a-z0-9])?)*):"
+    r"(?P<key>[-._A-Za-z0-9]+)$"
+)
 DEFAULT_WAIT_SECONDS = 12 * 60 * 60
 REQUEST_FIELDS = {
     "reason",
@@ -73,7 +80,11 @@ def parse_args() -> argparse.Namespace:
             "Examples:\n"
             "  sudo-service --reason 'restart stuck pod' -- kubectl delete pod foo -n bar\n"
             "  sudo-service --reason 'read one secret value' --command "
-            "'kubectl get secret foo -n bar -o jsonpath={.data.password}'"
+            "'kubectl get secret foo -n bar -o jsonpath={.data.password}'\n"
+            "  sudo-service --reason 'list backup bucket' --namespace backup \\\n"
+            "    --secret-env GCS_KEY=gcs-creds:backup-creds.json --no-cluster-admin \\\n"
+            "    --image gcr.io/google.com/cloudsdktool/google-cloud-cli:stable \\\n"
+            "    --command 'printf %s \"$GCS_KEY\" > /tmp/k.json && ...'"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -179,6 +190,19 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--secret-env",
+        action="append",
+        default=[],
+        metavar="VAR=SECRET:KEY",
+        dest="secret_envs",
+        help=(
+            "Expose one key of a Secret to the command as environment variable VAR. "
+            "Repeatable. The Secret must live in the executor's namespace (see "
+            "--namespace); the reviewer sees 'VAR <- secret/SECRET:KEY', never the value. "
+            "Use this instead of reading the Secret with kubectl inside the command."
+        ),
+    )
+    parser.add_argument(
         "--ttl-seconds-after-approval",
         type=int,
         help="Seconds to retain output after approval, capped by the service.",
@@ -244,6 +268,7 @@ def parse_args() -> argparse.Namespace:
             ("--namespace", args.namespace), ("--request-file", args.request_file),
             ("--stdin-file", args.stdin_file), ("--no-cluster-admin", args.no_cluster_admin),
             ("--image-pull-secret", args.image_pull_secrets),
+            ("--secret-env", args.secret_envs),
             ("--ttl-seconds-after-approval", args.ttl_seconds_after_approval),
         ):
             if value is not None and value is not False and value != []:
@@ -263,6 +288,7 @@ def parse_args() -> argparse.Namespace:
             ("--namespace", args.namespace),
             ("--no-cluster-admin", args.no_cluster_admin),
             ("--image-pull-secret", args.image_pull_secrets),
+            ("--secret-env", args.secret_envs),
             ("--ttl-seconds-after-approval", args.ttl_seconds_after_approval),
         ):
             if value is not None and value is not False and value != []:
@@ -277,6 +303,7 @@ def parse_args() -> argparse.Namespace:
             ("--namespace", args.namespace), ("--stdin-file", args.stdin_file),
             ("--no-cluster-admin", args.no_cluster_admin),
             ("--image-pull-secret", args.image_pull_secrets),
+            ("--secret-env", args.secret_envs),
             ("--ttl-seconds-after-approval", args.ttl_seconds_after_approval),
         ):
             if value is not None and value is not False and value != []:
@@ -309,6 +336,16 @@ def parse_args() -> argparse.Namespace:
             parser.error(
                 f"generated Nixery image name exceeds Docker's {DOCKER_NAME_MAX}-character limit"
             )
+    seen_vars: set[str] = set()
+    for raw in args.secret_envs:
+        match = SECRET_ENV_RE.fullmatch(raw)
+        if not match:
+            parser.error(f"--secret-env must look like VAR=SECRET:KEY, got {raw!r}")
+        if len(match["secret"]) > 253:
+            parser.error(f"--secret-env Secret name is longer than 253 characters: {raw!r}")
+        if match["var"] in seen_vars:
+            parser.error(f"--secret-env sets {match['var']} more than once")
+        seen_vars.add(match["var"])
     if not args.retry and not args.request_file and not args.reason:
         parser.error("--reason is required unless it is provided by --request-file")
     if args.poll_interval <= 0:
@@ -331,6 +368,16 @@ def command_from_args(args: argparse.Namespace) -> str:
 def nixery_image(tools: list[str]) -> str:
     """Turn repeated --tool values into the ordinary raw image API field."""
     return NIXERY_IMAGE_PREFIX + "/" + "/".join(sorted(set(tools)))
+
+
+def secret_env(raw: str) -> dict[str, Any]:
+    """Turn a validated --secret-env value into a Kubernetes EnvVar."""
+    match = SECRET_ENV_RE.fullmatch(raw)
+    assert match is not None
+    return {
+        "name": match["var"],
+        "valueFrom": {"secretKeyRef": {"name": match["secret"], "key": match["key"]}},
+    }
 
 
 def playbook_request(name: str, raw_parameters: list[str], reason: str) -> dict[str, Any]:
@@ -639,6 +686,8 @@ def main() -> int:
             body["privileges"] = {"clusterAdmin": False}
         if args.image_pull_secrets:
             body["imagePullSecrets"] = [{"name": name} for name in args.image_pull_secrets]
+        if args.secret_envs:
+            body["env"] = [secret_env(raw) for raw in args.secret_envs]
 
     stdin_payload: str | None = None
     if not args.retry and args.stdin_file is not None:

@@ -58,6 +58,30 @@ The create response prints the friendly profile and exact resolved digest. Use
 exclusive. Static preflight warnings are printed even with `--quiet` because they
 describe review-relevant footguns, not progress chatter.
 
+When the command needs a credential that lives in a Secret (a cloud key, a
+database password), pass it as an environment variable with `--secret-env
+VAR=SECRET:KEY` instead of reading the Secret inside the command. The kubelet
+injects the value, so the command needs no kubectl or API access (the image only
+needs `/bin/sh`, which runs the command), and the reviewer sees
+`VAR <- secret/SECRET:KEY` rather than a decode pipeline. The Secret must be in
+the executor's namespace, so pair it with `--namespace`. A credential-only job
+does not need cluster-admin; add `--no-cluster-admin`, because the executor still
+gets cluster-admin when that namespace is the controller's own:
+
+```sh
+client/cli/sudo-service \
+  --reason "Count backup bucket bytes per storage class with the restic GCS key" \
+  --namespace backup \
+  --secret-env GCS_KEY=gcs-creds:backup-creds.json \
+  --no-cluster-admin \
+  --image gcr.io/google.com/cloudsdktool/google-cloud-cli:stable \
+  --command 'printf %s "$GCS_KEY" > /tmp/k.json && gcloud auth activate-service-account --key-file=/tmp/k.json && gcloud storage ls gs://andrewgarrett-backup-storage'
+```
+
+Repeat the flag for several keys. For whole-Secret `envFrom` or file mounts,
+use `--request-file`.
+
+
 When a task needs an uncommon combination of tools, the CLI can construct an
 ordinary [Nixery](https://nixery.dev/) image. Repeat `--tool`; the client sorts
 and deduplicates the top-level Nix package attributes and submits the generated

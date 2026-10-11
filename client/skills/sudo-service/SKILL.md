@@ -105,8 +105,8 @@ sudo-service --request-file /tmp/apply-request.yaml --stdin-file /tmp/manifest.y
 
 `--preview` prints normalized JSON to stderr immediately before submission.
 All request fields must come from the request file: mixing it with `--reason`,
-`--command`, command arguments, image/profile, namespace, privilege, TTL, or image-pull
-Secret flags is rejected rather than applying surprising precedence.
+`--command`, command arguments, image/profile, namespace, privilege, TTL, image-pull
+Secret, or secret-env flags is rejected rather than applying surprising precedence.
 
 It creates the request through the controller HTTP API, polls
 `/requests/{uid}`, prints progress on stderr, and writes the command output
@@ -118,6 +118,29 @@ sudo-service \
   --reason "Confirming PSQL credentials for keep-backend after auth alert" \
   --command 'kubectl get secret keep-postgres-credentials -n keep -o jsonpath={.data.password}'
 ```
+
+When the command needs a credential that lives in a Secret (a cloud key, a
+database password), pass it as an environment variable with `--secret-env
+VAR=SECRET:KEY` instead of reading the Secret inside the command. The kubelet
+injects the value, so the command needs no kubectl or API access (the image only
+needs `/bin/sh`, which runs the command), and the reviewer sees
+`VAR <- secret/SECRET:KEY` rather than a decode pipeline. The Secret must be in
+the executor's namespace, so pair it with `--namespace`. A credential-only job
+does not need cluster-admin; add `--no-cluster-admin`, because the executor still
+gets cluster-admin when that namespace is the controller's own:
+
+```bash
+sudo-service \
+  --reason "Count backup bucket bytes per storage class with the restic GCS key" \
+  --namespace backup \
+  --secret-env GCS_KEY=gcs-creds:backup-creds.json \
+  --no-cluster-admin \
+  --image gcr.io/google.com/cloudsdktool/google-cloud-cli:stable \
+  --command 'printf %s "$GCS_KEY" > /tmp/k.json && gcloud auth activate-service-account --key-file=/tmp/k.json && gcloud storage ls gs://andrewgarrett-backup-storage'
+```
+
+Repeat the flag for several keys. For whole-Secret `envFrom` or file mounts,
+use `--request-file`.
 
 The CLI waits for up to 12 hours by default. That is only a client-side wait;
 it does not terminate an executor that is already running. Use `--timeout 0`
