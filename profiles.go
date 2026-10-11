@@ -120,11 +120,21 @@ func resolveAndPreflight(sr *SudoRequest) (*ExecutorProfile, string, []string, e
 
 var (
 	packageInstallRE = regexp.MustCompile(`(?m)(^|[;&|]\s*)(sudo\s+)?(apk|apt|apt-get|dnf|yum|microdnf|pip|pip3|npm)\s+(add|install)\b`)
-	base64ScriptRE   = regexp.MustCompile(`(?is)base64\s+(-d|--decode)\b.{0,160}\|\s*(/bin/)?(ba)?sh\b|\|\s*base64\s+(-d|--decode)\b`)
-	heredocRE        = regexp.MustCompile(`(?m)<<-?\s*['"]?[A-Za-z_][A-Za-z0-9_]*['"]?\s*$`)
-	pipefailRE       = regexp.MustCompile(`(?m)(^|[;&|]\s*)set(?:\s+[^;&|\s]+)*\s+-[a-zA-Z]*[oO]\s+pipefail\b`)
-	bashismRE        = regexp.MustCompile(`(^|[;&|()]\s*|\b(if|then|elif|while|until)\s+)\[\[|<\(|>\(|\bsource\s+`)
-	sleepRE          = regexp.MustCompile(`(?:^|[;&|]\s*)sleep\s+([0-9]+)([smhd]?)\b`)
+	// Decoded bytes piped straight into an interpreter, or substituted into
+	// eval / sh -c. Stays within one pipeline: no newlines or ; & separators.
+	base64ExecRE = regexp.MustCompile(`base64\s+(-d|-D|--decode)\b[^\n;&|]*\|\s*(\S*/)?(sh|bash|dash|ash|zsh|python[0-9.]*|perl|ruby|node|php)\b|\b(eval|(ba)?sh\s+-c)\s+["']?\$\([^)]*base64\s+(-d|-D|--decode)\b`)
+	// Any base64 decoding at all; only meaningful alongside an embedded literal.
+	base64DecodeRE = regexp.MustCompile(`(?i)\bbase64\b|b64decode`)
+	// Alphanumeric runs of 20+ chars; any real payload has one between its +/
+	// chars. Callers also require mixed case and a digit, so hex digests
+	// (sha256:...) and identifiers (StrictHostKeyChecking) don't qualify.
+	base64LiteralRE = regexp.MustCompile(`[A-Za-z0-9]{20,}`)
+	// Inline SSH public keys (known_hosts entries) are base64 but not opaque.
+	sshPublicKeyRE = regexp.MustCompile(`\b(sk-)?(ssh|ecdsa-sha2)-[a-z0-9@.-]+\s+[A-Za-z0-9+/]+=*`)
+	heredocRE      = regexp.MustCompile(`(?m)<<-?\s*['"]?[A-Za-z_][A-Za-z0-9_]*['"]?\s*$`)
+	pipefailRE     = regexp.MustCompile(`(?m)(^|[;&|]\s*)set(?:\s+[^;&|\s]+)*\s+-[a-zA-Z]*[oO]\s+pipefail\b`)
+	bashismRE      = regexp.MustCompile(`(^|[;&|()]\s*|\b(if|then|elif|while|until)\s+)\[\[|<\(|>\(|\bsource\s+`)
+	sleepRE        = regexp.MustCompile(`(?:^|[;&|]\s*)sleep\s+([0-9]+)([smhd]?)\b`)
 )
 
 func preflightCommand(command string, profile *ExecutorProfile) ([]string, error) {
@@ -147,8 +157,10 @@ func preflightCommand(command string, profile *ExecutorProfile) ([]string, error
 	if packageInstallRE.MatchString(command) {
 		warnings = append(warnings, "command appears to install packages at runtime; executors run non-root with a read-only root filesystem")
 	}
-	if base64ScriptRE.MatchString(command) {
-		warnings = append(warnings, "command appears to decode an opaque base64 payload into a shell; reviewers cannot inspect the decoded program directly")
+	if base64ExecRE.MatchString(command) {
+		warnings = append(warnings, "command appears to execute an opaque base64 payload; reviewers cannot inspect the decoded program directly")
+	} else if n := embeddedBase64Literal(command); n > 0 {
+		warnings = append(warnings, fmt.Sprintf("command decodes an embedded opaque base64 literal (%d chars); reviewers cannot inspect the decoded content directly — pass scripts in readable form instead", n))
 	}
 	if len(command) > 4096 && heredocRE.MatchString(command) {
 		warnings = append(warnings, "command contains a large heredoc; pass the payload with stdin/request-file to reduce quoting and review errors")
@@ -157,6 +169,26 @@ func preflightCommand(command string, profile *ExecutorProfile) ([]string, error
 		warnings = append(warnings, "command may be long-running; this is an advisory heuristic, and the CLI wait and output-retention windows are client/data-lifecycle settings, not execution deadlines")
 	}
 	return warnings, nil
+}
+
+// embeddedBase64Literal returns the length of the longest base64-looking
+// literal in a command that also decodes base64, or 0. Decoding a Secret value
+// fetched at runtime (kubectl ... | base64 -d) has no such literal and is the
+// common, reviewable case.
+func embeddedBase64Literal(command string) int {
+	if !base64DecodeRE.MatchString(command) {
+		return 0
+	}
+	longest := 0
+	for _, lit := range base64LiteralRE.FindAllString(sshPublicKeyRE.ReplaceAllString(command, " "), -1) {
+		if len(lit) > longest &&
+			strings.ContainsAny(lit, "ABCDEFGHIJKLMNOPQRSTUVWXYZ") &&
+			strings.ContainsAny(lit, "abcdefghijklmnopqrstuvwxyz") &&
+			strings.ContainsAny(lit, "0123456789") {
+			longest = len(lit)
+		}
+	}
+	return longest
 }
 
 func containsString(values []string, want string) bool {

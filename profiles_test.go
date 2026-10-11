@@ -104,6 +104,50 @@ func TestPreflightWarningsAreConservative(t *testing.T) {
 	}
 }
 
+func TestPreflightBase64Warnings(t *testing.T) {
+	// An embedded script: base64 of a short Python program.
+	blob := "aW1wb3J0IGpzb24sIHN5cwpmb3IgcCBpbiBzeXMuYXJndlsxOl06CiAgICBwcmludChwLCBqc29uLmR1bXBzKHt9KSkK"
+	for _, command := range []string{
+		"echo ZWNobyBoaQ== | base64 -d | sh",
+		"echo ZWNobyBoaQ== | base64 --decode | /bin/bash -s",
+		"printf %s ZWNobyBoaQ== | base64 -d | python3 -",
+		`eval "$(echo ZWNobyBoaQ== | base64 -d)"`,
+		`sh -c "$(echo ZWNobyBoaQ== | base64 -d)"`,
+		// Decode to a file, then run it with a non-shell interpreter.
+		"set -e; kubectl get secret creds -n backup -o jsonpath='{.data.key}' | base64 -d > /tmp/k.json; echo " + blob + " | base64 -d > /tmp/g.py; /tmp/v/bin/python /tmp/g.py a/ b/",
+		"base64 -d <<< '" + blob + "' > /tmp/x; sh /tmp/x",
+		`python3 -c "import base64; exec(base64.b64decode('` + blob + `'))"`,
+		"runner_b64='" + blob + "'; printf %s \"$runner_b64\" | base64 -d > /tmp/r.sh; sh /tmp/r.sh",
+		"cat > /tmp/s.b64 <<'B64'\n" + blob + "\nB64\nbase64 -d /tmp/s.b64 > /tmp/s.py; python3 /tmp/s.py",
+	} {
+		warnings, err := preflightCommand(command, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Join(warnings, "\n"); !strings.Contains(got, "base64") {
+			t.Errorf("preflightCommand(%q) warnings = %q, want a base64 warning", command, got)
+		}
+	}
+
+	// Decoding a Secret fetched at runtime is the common case and hides nothing.
+	for _, command := range []string{
+		"kubectl get secret foo -n bar -o jsonpath={.data.x} | base64 -d",
+		`T=$(kubectl -n ansible get secret semaphore -o jsonpath={.data.token} | base64 -d); curl -H "Authorization: Bearer $T" http://semaphore/api/projects`,
+		`bash -c 'set -e; S=$(kubectl get secret kc -n default -o jsonpath="{.data.client-secret}" | base64 -d); curl -d "secret=$S" http://kc/token'`,
+		"set -eu\nkubectl get secret gcs-creds -n backup -o jsonpath='{.data.backup-creds\\.json}' | base64 -d > /tmp/key.json\ngcloud auth activate-service-account --key-file=/tmp/key.json --quiet\nrm /tmp/key.json\nfor p in a b; do\n  gcloud storage objects list \"gs://bucket/$p/**\" | awk -F, '{ print $1 }' | sort || echo failed\ndone",
+		"kubectl get secret foo -o jsonpath={.data.x} | base64 -d > /tmp/k; kubectl set image deploy/x x=img@sha256:0eea2d071c4e0f6a8a1c3b5d7e9f0a2b4c6d8e0f1a3b5c7d9e1f3a5b7c9d1e3f",
+		`kubectl get secret k -o jsonpath={.data.key} | base64 -d > /tmp/k; echo "host ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINFeW1NJGKH0bfvjGUIjQOoFiBvXyMm+abc" > /tmp/kh; ssh -i /tmp/k -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/tmp/kh host true`,
+	} {
+		warnings, err := preflightCommand(command, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Join(warnings, "\n"); strings.Contains(got, "base64") {
+			t.Errorf("preflightCommand(%q) warnings = %q, want no base64 warning", command, got)
+		}
+	}
+}
+
 func TestPreflightWarnsUnknownRawImagePipefail(t *testing.T) {
 	warnings, err := preflightCommand("set -o pipefail; do-something | other", nil)
 	if err != nil {
