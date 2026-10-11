@@ -548,6 +548,7 @@ class SudoServiceCLITest(unittest.TestCase):
             ("--namespace", "other"),
             ("--no-cluster-admin",),
             ("--image-pull-secret", "creds"),
+            ("--secret-env", "KEY=creds:key"),
             ("--ttl-seconds-after-approval", "30"),
             ("--", "kubectl", "get", "pods"),
         )
@@ -833,6 +834,92 @@ class SudoServiceCLITest(unittest.TestCase):
                 }
             ],
         )
+
+    def test_secret_env_flag_builds_secret_key_refs(self) -> None:
+        FakeSudoServiceHandler.phases = ["Executed"]
+        FakeSudoServiceHandler.output = b"ok\n"
+
+        result = self.run_cli(
+            "--reason",
+            "list the backup bucket with its own key",
+            "--quiet",
+            "--poll-interval",
+            "0.01",
+            "--namespace",
+            "backup",
+            "--secret-env",
+            "GCS_KEY=gcs-creds:backup-creds.json",
+            "--secret-env",
+            "RESTIC_PASSWORD=restic-repo:password",
+            "--command",
+            'printf %s "$GCS_KEY" > /tmp/k.json',
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            FakeSudoServiceHandler.request_bodies,
+            [
+                {
+                    "reason": "list the backup bucket with its own key",
+                    "command": 'printf %s "$GCS_KEY" > /tmp/k.json',
+                    "namespace": "backup",
+                    "env": [
+                        {
+                            "name": "GCS_KEY",
+                            "valueFrom": {
+                                "secretKeyRef": {"name": "gcs-creds", "key": "backup-creds.json"}
+                            },
+                        },
+                        {
+                            "name": "RESTIC_PASSWORD",
+                            "valueFrom": {
+                                "secretKeyRef": {"name": "restic-repo", "key": "password"}
+                            },
+                        },
+                    ],
+                }
+            ],
+        )
+
+    def test_secret_env_rejects_malformed_and_duplicate_variables(self) -> None:
+        cases = (
+            ("GCS_KEY=gcs-creds", "VAR=SECRET:KEY"),
+            ("GCS_KEY=gcs-creds:", "VAR=SECRET:KEY"),
+            ("1KEY=gcs-creds:key", "VAR=SECRET:KEY"),
+            ("KEY=GCS_Creds:key", "VAR=SECRET:KEY"),
+            ("gcs-creds:key", "VAR=SECRET:KEY"),
+        )
+        for value, message in cases:
+            with self.subTest(value=value):
+                result = self.run_cli(
+                    "--reason", "x", "--secret-env", value, "--command", "true"
+                )
+                self.assertEqual(result.returncode, 2)
+                self.assertIn(message, result.stderr)
+        result = self.run_cli(
+            "--reason", "x",
+            "--secret-env", "KEY=a:one",
+            "--secret-env", "KEY=b:two",
+            "--command", "true",
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("sets KEY more than once", result.stderr)
+        self.assertEqual(FakeSudoServiceHandler.request_bodies, [])
+
+    def test_secret_env_is_rejected_with_retry_and_playbook(self) -> None:
+        for flags, message in (
+            (("--retry", "abc"), "--retry cannot be combined"),
+            (
+                ("--reason", "x", "--playbook", "job.cleanup-terminal/v1",
+                 "--parameter", "namespace=a", "--parameter", "name=b"),
+                "--playbook cannot be combined",
+            ),
+        ):
+            with self.subTest(flags=flags):
+                result = self.run_cli(*flags, "--secret-env", "KEY=creds:key")
+                self.assertEqual(result.returncode, 2)
+                self.assertIn(message, result.stderr)
+        self.assertEqual(FakeSudoServiceHandler.request_bodies, [])
 
 
 if __name__ == "__main__":
