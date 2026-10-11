@@ -888,6 +888,9 @@ class SudoServiceCLITest(unittest.TestCase):
             ("1KEY=gcs-creds:key", "VAR=SECRET:KEY"),
             ("KEY=GCS_Creds:key", "VAR=SECRET:KEY"),
             ("gcs-creds:key", "VAR=SECRET:KEY"),
+            ("KEY=a..b:key", "VAR=SECRET:KEY"),
+            ("KEY=a.-b:key", "VAR=SECRET:KEY"),
+            ("KEY=" + "a" * 254 + ":key", "longer than 253"),
         )
         for value, message in cases:
             with self.subTest(value=value):
