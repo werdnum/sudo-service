@@ -6,7 +6,7 @@
 # Pin the builder to the runner's native platform and cross-compile to
 # TARGETARCH (CGO is disabled), so multi-arch builds need no QEMU emulation —
 # only the final COPY-only stage is per-target.
-FROM --platform=$BUILDPLATFORM golang:1.24-bullseye AS builder
+FROM --platform=$BUILDPLATFORM golang:1.25-bookworm AS builder
 WORKDIR /app
 ENV CGO_ENABLED=0
 ARG TARGETARCH
