@@ -40,7 +40,7 @@ var executorProfiles = map[string]ExecutorProfile{
 	"kubectl": {
 		Name:        "kubectl",
 		Description: "Kubernetes administration with kubectl, Helm, and common structured-data tools",
-		Image:       "alpine/k8s:1.35.5@sha256:d870622d004031c4e3ddad80d200692792509176db03c346a8526f4f45476e96",
+		Image:       "alpine/k8s:1.37.2@sha256:dcb7185e112a453aa72f426754849a97357727ef8f40168fb208c8cf59952042",
 		Shell: ExecutorShell{
 			Path:    "/bin/sh",
 			Dialect: "busybox-ash",

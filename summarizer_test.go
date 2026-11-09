@@ -50,7 +50,7 @@ func TestSummarizeRequestAndResponse(t *testing.T) {
 	defer srv.Close()
 
 	s := NewSummarizer("sk-secret", srv.URL+"/v1", "test-model")
-	out, err := s.Summarize(context.Background(), "kubectl get pods", "alpine/k8s:1.35.5", "debugging", "")
+	out, err := s.Summarize(context.Background(), "kubectl get pods", "alpine/k8s:1.37.2", "debugging", "")
 	if err != nil {
 		t.Fatalf("Summarize() error = %v", err)
 	}
@@ -102,7 +102,7 @@ func TestSummarizeRequestAndResponse(t *testing.T) {
 	if !strings.Contains(userContent, "kubectl get pods") {
 		t.Errorf("user message missing command: %q", userContent)
 	}
-	if !strings.Contains(userContent, "alpine/k8s:1.35.5") {
+	if !strings.Contains(userContent, "alpine/k8s:1.37.2") {
 		t.Errorf("user message missing image: %q", userContent)
 	}
 }
