@@ -266,9 +266,65 @@ class SudoServiceCLITest(unittest.TestCase):
         )
         self.assertEqual(json.loads(result.stderr), body)
 
+    def test_cronjob_trigger_and_argocd_refresh_playbooks_build_canonical_requests(self) -> None:
+        trigger = self.run_cli(
+            "--reason", "re-run SimpleFIN sync",
+            "--playbook", "cronjob.trigger/v1",
+            "--parameter", "namespace=lake-system",
+            "--parameter", "cronJob=simplefin-sync",
+            "--parameter", "name=simplefin-sync-manual-20261113",
+            "--preview", "--quiet", "--poll-interval", "0.01",
+        )
+        self.assertEqual(trigger.returncode, 0, trigger.stderr)
+        expected_trigger = {
+            "reason": "re-run SimpleFIN sync",
+            "command": (
+                "kubectl create job simplefin-sync-manual-20261113 "
+                "--from=cronjob/simplefin-sync -n lake-system"
+            ),
+            "playbook": {
+                "name": "cronjob.trigger/v1",
+                "parameters": {
+                    "namespace": "lake-system",
+                    "cronJob": "simplefin-sync",
+                    "name": "simplefin-sync-manual-20261113",
+                },
+            },
+        }
+        self.assertEqual(FakeSudoServiceHandler.request_bodies[0], expected_trigger)
+        self.assertEqual(json.loads(trigger.stderr), expected_trigger)
+
+        refresh = self.run_cli(
+            "--reason", "refresh Argo CD Application after merging PR",
+            "--playbook", "argocd.refresh/v1",
+            "--parameter", "namespace=argocd",
+            "--parameter", "name=sudo-service",
+            "--preview", "--quiet", "--poll-interval", "0.01",
+        )
+        self.assertEqual(refresh.returncode, 0, refresh.stderr)
+        expected_refresh = {
+            "reason": "refresh Argo CD Application after merging PR",
+            "command": (
+                "kubectl annotate application sudo-service -n argocd "
+                "argocd.argoproj.io/refresh=hard --overwrite"
+            ),
+            "playbook": {
+                "name": "argocd.refresh/v1",
+                "parameters": {
+                    "namespace": "argocd",
+                    "name": "sudo-service",
+                },
+            },
+        }
+        self.assertEqual(FakeSudoServiceHandler.request_bodies[1], expected_refresh)
+        self.assertEqual(json.loads(refresh.stderr), expected_refresh)
+
     def test_playbook_rejects_missing_duplicate_or_untyped_parameters(self) -> None:
         cases = (
             (("--playbook", "job.cleanup-terminal/v1", "--parameter", "namespace=ansible"), "requires exactly"),
+            (("--playbook", "cronjob.trigger/v1", "--parameter", "namespace=lake-system", "--parameter", "cronJob=simplefin-sync"), "requires exactly"),
+            (("--playbook", "cronjob.trigger/v1", "--parameter", "namespace=lake-system", "--parameter", "cronJob=simplefin-sync", "--parameter", "name=wrong-prefix-1"), "must start with"),
+            (("--playbook", "argocd.refresh/v1", "--parameter", "namespace=argocd"), "requires exactly"),
             (("--playbook", "job.cleanup-terminal/v1", "--parameter", "namespace=ansible", "--parameter", "namespace=other"), "duplicate"),
             (("--parameter", "namespace=ansible", "--", "true"), "requires --playbook"),
         )

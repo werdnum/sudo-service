@@ -28,8 +28,9 @@ client/cli/sudo-service \
   -- kubectl delete pod foo -n bar
 ```
 
-For a configured, typed terminal-Job cleanup, use the versioned playbook instead
-of reconstructing a `kubectl delete` command:
+For routine operations covered by a typed playbook (`job.cleanup-terminal/v1`,
+`cronjob.trigger/v1`, `argocd.refresh/v1`), pass `--playbook` and `--parameter`
+flags instead of reconstructing a `kubectl` command:
 
 ```sh
 client/cli/sudo-service \
@@ -37,11 +38,24 @@ client/cli/sudo-service \
   --playbook job.cleanup-terminal/v1 \
   --parameter namespace=ansible \
   --parameter name=ansible-drift-metrics-12345
+
+client/cli/sudo-service \
+  --reason "Re-run SimpleFIN sync after upstream transient error" \
+  --playbook cronjob.trigger/v1 \
+  --parameter namespace=lake-system \
+  --parameter cronJob=simplefin-sync \
+  --parameter name=simplefin-sync-manual-20261113
+
+client/cli/sudo-service \
+  --reason "Refresh Argo CD Application after merging GitOps PR" \
+  --playbook argocd.refresh/v1 \
+  --parameter namespace=argocd \
+  --parameter name=sudo-service
 ```
 
-The server—not the client—decides whether the exact requester, namespace, Job
-family, current terminal state, and target UID qualify for automatic approval.
-Otherwise the request goes through ordinary human review.
+The server—not the client—decides whether the exact requester, namespace, target
+allowlist, live preconditions, and target UID qualify for automatic approval
+without an executor Pod. Otherwise the request goes through ordinary human review.
 
 The default `kubectl` executor is a server-resolved, digest-pinned profile. Select
 another curated profile explicitly when appropriate:

@@ -21,13 +21,29 @@ YAML request files are parsed with `yaml.safe_load`, not an approximate parser.
 
 ## When to use this skill
 
-- An alert points at a private Secret you need to read.
-- You want to `kubectl rollout restart` / `patch` / `delete` something to
-  remediate.
-- You want to `kubectl exec` into a Pod for a one-off diagnostic.
+- You want to run a configured typed playbook (`job.cleanup-terminal/v1`,
+  `cronjob.trigger/v1`, `argocd.refresh/v1`) that executes automatically without
+  needing a human approval tap when server allowlists and live preconditions pass.
+- An alert points at a private Secret you need to read (and no dedicated proxy
+  such as Keychute already mediates the credential).
+- You want to `kubectl rollout restart` / `cordon` / `delete` something for an
+  urgent one-off remediation.
+- You want to `kubectl exec` into a Pod or `kubectl debug node/<node>` for a
+  one-off diagnostic that isn't already available in cluster metrics or logs.
 - Any time you'd ordinarily ask the human "can you run X for me?" in chat.
 
-Don't use it for read-only operations you can already do (`kubectl get/list/watch`).
+**Do NOT use `sudo-service` for:**
+
+- **Read-only queries you can already run directly** (`kubectl get/list/describe`,
+  VictoriaMetrics queries, or VictoriaLogs queries for container, systemd journal,
+  watchdog, and Semaphore logs).
+- **Hand-patching GitOps-managed resources** (`kubectl patch` / `kubectl apply` on
+  Deployments, ConfigMaps, CronJobs, etc. to bypass Git). Commit and merge a PR in
+  the GitOps repo instead, then use `argocd.refresh/v1` if Argo CD needs an
+  immediate refresh.
+- **Opaque encoded payloads** (`base64 -d | sh`, inline multi-line scripts, or
+  nested Job/Pod YAML inside `command`). Reviewers deny unreadable commands; use
+  `--stdin-file` or `--request-file`.
 
 ## Setup the requester pod needs (one-time)
 
@@ -75,22 +91,48 @@ sudo-service \
   -- kubectl get nodes
 ```
 
-For exact-name cleanup of a retained `Complete` or `Failed` Job, prefer the typed
-playbook. It is automatically approved only when the server's requester,
-namespace, ownership/name-family, terminal-state, and UID checks all pass;
-otherwise it follows normal human review:
+### Typed playbooks (no human approval when allowlisted)
 
-```bash
-sudo-service \
-  --reason "Clear retained failed Job after verifying the later run succeeded" \
-  --playbook job.cleanup-terminal/v1 \
-  --parameter namespace=ansible \
-  --parameter name=ansible-drift-metrics-29783777
-```
+Prefer typed playbooks over raw `kubectl` commands whenever one fits. When the
+server's requester/namespace allowlist, live state preconditions, and target UID
+checks pass, the controller executes the action directly via the Kubernetes API
+without paging a human or spawning an executor Pod (otherwise it falls back to
+normal human review with a preflight warning):
 
-Do not use the playbook for an active Job, broad cleanup, or a Job whose retained
-logs are still needed for diagnosis. The controller deletes directly with a UID
-precondition; it does not launch a shell for an auto-approved request.
+1. **Delete a retained `Complete` or `Failed` Job (`job.cleanup-terminal/v1`):**
+   ```bash
+   sudo-service \
+     --reason "Clear retained failed Job after verifying the later run succeeded" \
+     --playbook job.cleanup-terminal/v1 \
+     --parameter namespace=ansible \
+     --parameter name=ansible-drift-metrics-29783777
+   ```
+   Do not use for an active Job, broad cleanup, or a Job whose logs are still
+   needed for diagnosis.
+
+2. **Trigger an on-demand Job from a `CronJob` (`cronjob.trigger/v1`):**
+   `name` must be a valid DNS-1123 label (`<= 63` chars) starting with
+   `<cronJob>-manual-`. Auto-approval requires the `CronJob` to be non-suspended
+   and have no active scheduled or manual Job already running:
+   ```bash
+   sudo-service \
+     --reason "Re-run SimpleFIN sync after upstream transient error" \
+     --playbook cronjob.trigger/v1 \
+     --parameter namespace=lake-system \
+     --parameter cronJob=simplefin-sync \
+     --parameter name="simplefin-sync-manual-$(date -u +%Y%m%d%H%M%S)"
+   ```
+
+3. **Hard-refresh an Argo CD `Application` (`argocd.refresh/v1`):**
+   Invalidates Argo CD's repo cache so a newly merged GitOps PR reconciles
+   immediately without waiting for polling:
+   ```bash
+   sudo-service \
+     --reason "Refresh sudo-service Application after merging GitOps PR" \
+     --playbook argocd.refresh/v1 \
+     --parameter namespace=argocd \
+     --parameter name=sudo-service
+   ```
 
 For anything richer than a command, use `--request-file` with a complete YAML
 or JSON HTTP request body. Do not put a manifest, heredoc, encoded script, or
@@ -382,6 +424,37 @@ caches just work — but anything else on the root filesystem is read-only, so
 write durable output to a mounted `emptyDir` (e.g. `/work`), not to `/`. Mounting
 your own volume at `/tmp`, or setting `HOME` yourself, opts out of the
 corresponding default.
+
+### Host node diagnostics (`kubectl debug node`)
+
+Inspecting host state beyond what VictoriaMetrics and VictoriaLogs already collect
+(for example `btrfs`, `nvme`, `smartctl`, or live kernel state) requires human
+approval because `chroot /host` grants host root. When you genuinely need it:
+
+1. Pass `--attach=true` and `--profile=sysadmin` (`general` lacks `SYS_CHROOT` in
+   containerd on several nodes, causing `chroot: Operation not permitted`).
+2. `kubectl debug` has no `--rm` flag and leaves `node-debugger-*` pods behind in
+   `sudo-service` forever; always capture the created pod name and delete it in an
+   `EXIT` trap:
+
+```bash
+sudo-service \
+  --reason "Check disk usage on magpie after rootfs space alert" \
+  --command '
+    set -eu
+    OUT=$(mktemp)
+    cleanup() {
+      POD=$(sed -n "s/^Creating debugging pod \([^ ]*\).*/\1/p" "$OUT" | head -n1)
+      rm -f "$OUT"
+      if [ -n "$POD" ]; then
+        kubectl delete pod -n sudo-service "$POD" --ignore-not-found=true >/dev/null 2>&1 || true
+      fi
+    }
+    trap cleanup EXIT
+    kubectl debug node/magpie -n sudo-service --attach=true --profile=sysadmin --image=ubuntu:24.04 -- \
+      chroot /host sh -ceu "uname -r && df -h / /var/lib/longhorn" 2>&1 | tee "$OUT"
+  '
+```
 
 ## Gotchas
 

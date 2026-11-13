@@ -18,3 +18,14 @@ namespaceSelector to imply the namespace.
 {{- define "sudo-service.controllerUsername" -}}
 system:serviceaccount:{{ .Values.namespace }}:sudo-service-controller-sa
 {{- end -}}
+
+{{/*
+Non-empty ("true") when at least one typed auto-approved playbook rule list is
+configured; empty string otherwise so `if include "sudo-service.hasPlaybooks" .`
+is truthy only when playbooks.yaml is needed.
+*/}}
+{{- define "sudo-service.hasPlaybooks" -}}
+{{- if or .Values.playbooks.terminalJobCleanup .Values.playbooks.cronJobTrigger .Values.playbooks.argocdRefresh -}}
+true
+{{- end -}}
+{{- end -}}
