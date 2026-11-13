@@ -231,7 +231,23 @@ design and the security rationale.
 Typed playbooks are closed, versioned operations with controller-validated
 parameters and live preconditions. They are separate from the legacy exact/prefix
 command allowlist: an arbitrary suffix, selector, image, or pod field cannot enter
-the execution path. The first playbook is `job.cleanup-terminal/v1`.
+the execution path, and automatic execution runs directly against the Kubernetes
+API without launching a shell or executor Pod.
+
+Supported playbooks:
+
+- `job.cleanup-terminal/v1` (`namespace`, `name`): deletes a retained `Complete` or
+  `Failed` Job owned by an allowlisted `CronJob` or matching a configured
+  `standaloneNamePrefixes` entry, pinning the target Job's UID (or recording a
+  checked no-op when already absent).
+- `cronjob.trigger/v1` (`namespace`, `cronJob`, `name` starting with
+  `<cronJob>-manual-`): creates a manual Job directly from an allowlisted,
+  non-suspended `CronJob` when no active Job for that `CronJob` is already running,
+  pinning the `CronJob` UID and stamping controller `OwnerReference` + manual
+  instantiation annotations.
+- `argocd.refresh/v1` (`namespace`, `name`): sets
+  `argocd.argoproj.io/refresh=hard` on an allowlisted Argo CD `Application`,
+  pinning the `Application` UID so Argo CD re-reads merged Git state immediately.
 
 ```sh
 sudo-service \
@@ -239,9 +255,23 @@ sudo-service \
   --playbook job.cleanup-terminal/v1 \
   --parameter namespace=ansible \
   --parameter name=ansible-drift-metrics-12345
+
+sudo-service \
+  --reason "Re-run SimpleFIN sync after upstream transient error" \
+  --playbook cronjob.trigger/v1 \
+  --parameter namespace=lake-system \
+  --parameter cronJob=simplefin-sync \
+  --parameter name=simplefin-sync-manual-20261113
+
+sudo-service \
+  --reason "Refresh Argo CD Application after merging GitOps PR" \
+  --playbook argocd.refresh/v1 \
+  --parameter namespace=argocd \
+  --parameter name=sudo-service
 ```
 
-It is deny-by-default. Configure exact requester/namespace rules in chart values:
+All playbooks are deny-by-default. Configure exact requester/namespace rules in
+chart values:
 
 ```yaml
 playbooks:
@@ -250,14 +280,17 @@ playbooks:
       namespace: ansible
       cronJobs: [ansible-drift-metrics]
       standaloneNamePrefixes: [ansible-drift-metrics-manual-]
+  cronJobTrigger:
+    - requester: system:serviceaccount:k8s-agent:k8s-agent-sa
+      namespace: lake-system
+      cronJobs: [simplefin-sync]
+  argocdRefresh:
+    - requester: system:serviceaccount:k8s-agent:k8s-agent-sa
+      namespace: argocd
+      allowAllApplications: true
 ```
 
-Before automatic approval the controller requires the canonical command, verifies
-the live Job is `Complete` or `Failed`, verifies its CronJob owner or configured
-ownerless-name prefix, and records its UID. Execution is a direct Kubernetes
-delete with a UID precondition; it never launches a shell or executor pod. A
-missing target is recorded as a checked no-op, so a later Job with the same name
-cannot be deleted. A request outside the configured boundary follows the normal
+A request outside the configured boundary or live preconditions follows the normal
 human approval path and carries a preflight warning explaining why.
 
 ### Render locally

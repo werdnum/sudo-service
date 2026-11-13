@@ -93,11 +93,14 @@ spec:
                   properties:
                     name:
                       type: string
-                      enum: [job.cleanup-terminal/v1]
+                      enum:
+                        - job.cleanup-terminal/v1
+                        - cronjob.trigger/v1
+                        - argocd.refresh/v1
                     parameters:
                       type: object
                       minProperties: 2
-                      maxProperties: 2
+                      maxProperties: 3
                       additionalProperties:
                         type: string
                 image:

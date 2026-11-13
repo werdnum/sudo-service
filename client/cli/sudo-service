@@ -51,6 +51,13 @@ REQUEST_FIELDS = {
     "privileges",
 }
 TERMINAL_JOB_CLEANUP_PLAYBOOK = "job.cleanup-terminal/v1"
+CRONJOB_TRIGGER_PLAYBOOK = "cronjob.trigger/v1"
+ARGOCD_REFRESH_PLAYBOOK = "argocd.refresh/v1"
+SUPPORTED_PLAYBOOKS = (
+    TERMINAL_JOB_CLEANUP_PLAYBOOK,
+    CRONJOB_TRIGGER_PLAYBOOK,
+    ARGOCD_REFRESH_PLAYBOOK,
+)
 LIST_REQUEST_FIELDS = {
     "env",
     "envFrom",
@@ -107,7 +114,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--playbook",
-        choices=[TERMINAL_JOB_CLEANUP_PLAYBOOK],
+        choices=list(SUPPORTED_PLAYBOOKS),
         help="Submit a versioned typed playbook instead of an arbitrary command.",
     )
     parser.add_argument(
@@ -311,7 +318,7 @@ def parse_args() -> argparse.Namespace:
         if conflicting:
             parser.error("--playbook cannot be combined with " + ", ".join(conflicting))
         if not args.parameters:
-            parser.error("--playbook requires --parameter namespace=... and --parameter name=...")
+            parser.error("--playbook requires --parameter KEY=VALUE")
     elif args.parameters:
         parser.error("--parameter requires --playbook")
     elif args.command and args.argv:
@@ -389,21 +396,51 @@ def playbook_request(name: str, raw_parameters: list[str], reason: str) -> dict[
         if key in parameters:
             raise SudoServiceError(f"duplicate playbook parameter: {key}")
         parameters[key] = value
-    if name != TERMINAL_JOB_CLEANUP_PLAYBOOK:
-        raise SudoServiceError(f"unsupported playbook: {name}")
-    if set(parameters) != {"namespace", "name"}:
-        raise SudoServiceError(
-            f"{TERMINAL_JOB_CLEANUP_PLAYBOOK} requires exactly namespace and name parameters"
+    # The server performs Kubernetes DNS validation and requires the exact
+    # canonical rendering for each playbook. shlex.quote keeps the preview
+    # unambiguous even when the server will subsequently reject a non-DNS value.
+    if name == TERMINAL_JOB_CLEANUP_PLAYBOOK:
+        if set(parameters) != {"namespace", "name"}:
+            raise SudoServiceError(
+                f"{TERMINAL_JOB_CLEANUP_PLAYBOOK} requires exactly namespace and name parameters"
+            )
+        namespace = parameters["namespace"]
+        job_name = parameters["name"]
+        command = (
+            f"kubectl delete job {shlex.quote(job_name)} -n {shlex.quote(namespace)} "
+            "--ignore-not-found=true --wait=false"
         )
-    namespace = parameters["namespace"]
-    job_name = parameters["name"]
-    # The server performs Kubernetes DNS validation and requires this exact
-    # canonical rendering. shlex.quote keeps the preview unambiguous even when
-    # the server will subsequently reject a non-DNS value.
-    command = (
-        f"kubectl delete job {shlex.quote(job_name)} -n {shlex.quote(namespace)} "
-        "--ignore-not-found=true --wait=false"
-    )
+    elif name == CRONJOB_TRIGGER_PLAYBOOK:
+        if set(parameters) != {"namespace", "cronJob", "name"}:
+            raise SudoServiceError(
+                f"{CRONJOB_TRIGGER_PLAYBOOK} requires exactly namespace, cronJob, and name parameters"
+            )
+        namespace = parameters["namespace"]
+        cron_job = parameters["cronJob"]
+        job_name = parameters["name"]
+        prefix = f"{cron_job}-manual-"
+        if not job_name.startswith(prefix) or len(job_name) == len(prefix):
+            raise SudoServiceError(
+                f"{CRONJOB_TRIGGER_PLAYBOOK} Job name {job_name!r} must start with {prefix!r} "
+                "followed by a non-empty suffix"
+            )
+        command = (
+            f"kubectl create job {shlex.quote(job_name)} "
+            f"{shlex.quote(f'--from=cronjob/{cron_job}')} -n {shlex.quote(namespace)}"
+        )
+    elif name == ARGOCD_REFRESH_PLAYBOOK:
+        if set(parameters) != {"namespace", "name"}:
+            raise SudoServiceError(
+                f"{ARGOCD_REFRESH_PLAYBOOK} requires exactly namespace and name parameters"
+            )
+        namespace = parameters["namespace"]
+        app_name = parameters["name"]
+        command = (
+            f"kubectl annotate application {shlex.quote(app_name)} -n {shlex.quote(namespace)} "
+            "argocd.argoproj.io/refresh=hard --overwrite"
+        )
+    else:
+        raise SudoServiceError(f"unsupported playbook: {name}")
     return {
         "reason": reason,
         "command": command,

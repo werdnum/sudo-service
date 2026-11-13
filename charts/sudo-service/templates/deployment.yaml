@@ -14,7 +14,7 @@ spec:
     metadata:
       labels:
         app: sudo-service
-      {{- if .Values.playbooks.terminalJobCleanup }}
+      {{- if include "sudo-service.hasPlaybooks" . }}
       annotations:
         checksum/playbooks: {{ toJson .Values.playbooks | sha256sum }}
       {{- end }}
@@ -62,7 +62,7 @@ spec:
               value: {{ .Values.adminGroup | quote }}
             - name: OAUTH2_PROXY_MODE
               value: "true"
-            {{- if .Values.playbooks.terminalJobCleanup }}
+            {{- if include "sudo-service.hasPlaybooks" . }}
             - name: PLAYBOOK_CONFIG
               value: /etc/sudo-service-playbooks/playbooks.yaml
             {{- end }}
@@ -112,7 +112,7 @@ spec:
               port: 8080
             initialDelaySeconds: 5
             periodSeconds: 10
-          {{- if .Values.playbooks.terminalJobCleanup }}
+          {{- if include "sudo-service.hasPlaybooks" . }}
           volumeMounts:
             - name: playbook-config
               mountPath: /etc/sudo-service-playbooks
@@ -184,7 +184,7 @@ spec:
               mountPath: /etc/oauth2-proxy/secrets
               readOnly: true
       volumes:
-        {{- if .Values.playbooks.terminalJobCleanup }}
+        {{- if include "sudo-service.hasPlaybooks" . }}
         - name: playbook-config
           configMap:
             name: sudo-service-playbooks

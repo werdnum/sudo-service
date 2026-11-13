@@ -1,4 +1,4 @@
-{{- if .Values.playbooks.terminalJobCleanup }}
+{{- if include "sudo-service.hasPlaybooks" . }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -6,6 +6,16 @@ metadata:
   namespace: {{ .Values.namespace }}
 data:
   playbooks.yaml: |
+    {{- if .Values.playbooks.terminalJobCleanup }}
     terminalJobCleanup:
 {{ toYaml .Values.playbooks.terminalJobCleanup | indent 6 }}
+    {{- end }}
+    {{- if .Values.playbooks.cronJobTrigger }}
+    cronJobTrigger:
+{{ toYaml .Values.playbooks.cronJobTrigger | indent 6 }}
+    {{- end }}
+    {{- if .Values.playbooks.argocdRefresh }}
+    argocdRefresh:
+{{ toYaml .Values.playbooks.argocdRefresh | indent 6 }}
+    {{- end }}
 {{- end }}
